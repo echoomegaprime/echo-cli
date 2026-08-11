@@ -1,0 +1,4 @@
+{
+  "version": 1,
+  "note": "No SDK namespace collision. echo_search_caps queried for 'echo.cli' and 'command line interface client gateway 45 commands engines knowledge bots scrapers', zero matches both times (2026-08-11). This repo is a pure HTTP client of the Echo SDK Gateway -- it consumes existing echo.* capabilities via the gateway rather than exposing any of its own; there is nothing for it to register."
+}
