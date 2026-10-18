@@ -8,6 +8,7 @@ import { Workspace } from './workspace.js';
 import { LocalModel } from './model.js';
 import { runTurn } from './agent.js';
 import { dispatchMcp } from './mcp.js';
+import { collectOwnerReadiness, ownerContracts } from './owners.js';
 import type { RpcRequest } from './mcp.js';
 
 interface Options { workspace: string; stateDir: string; model: string; endpoint: string; steps: string; session?: string }
@@ -23,6 +24,10 @@ const output = (value: unknown) => console.log(JSON.stringify(value, null, 2));
 
 export function registerCodeCommands(code: Command): void {
   code.description('ECHO Code — local inference, source inspection, reviewed edits and resumable sessions');
+  code.command('integrations').description('Show existing owner contracts and whether a shared broker is attached')
+    .action(async () => output({ architecture: 'ECHO Code client -> existing Omnipresence runtime; Sentinel independent observations',
+      contracts: ownerContracts, observations: await collectOwnerReadiness(), automaticRemediation: false,
+      note: 'Standalone CLI has no host broker. Shared runtime admission is not established; local sessions are offline preview state.' }));
   common(code.command('run <prompt>').description('Run one bounded turn; all edits stay pending approval'))
     .option('--model <name>', 'Installed local Ollama model', process.env.ECHO_CODE_MODEL || 'echo-steward:4b-pilot')
     .option('--endpoint <origin>', 'Loopback Ollama origin', 'http://127.0.0.1:11434')

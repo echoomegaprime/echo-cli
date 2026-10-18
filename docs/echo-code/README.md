@@ -24,7 +24,9 @@ node dist/code-main.js revert SESSION_ID PROPOSAL_ID --workspace C:\source
 
 Replace the displayed IDs, and inspect both original and proposed text before approval. Source changes only in the separate approve invocation. Revert refuses to overwrite later edits. Session files include local source excerpts/backups; use a private --state-dir and do not share them as telemetry.
 
-Other commands: chat (terminal required), sessions, run --session ID (same model/workspace), recover ID (after interruption), mcp --workspace PATH (stdio server). Use --help for exact options. Interactive chat has not received manual TTY acceptance; the tested paths are headless and fresh-process CLI/MCP operations.
+Other commands: chat (terminal required), sessions, run --session ID (same model/workspace), recover ID (after interruption), mcp --workspace PATH (stdio server), integrations (shared-owner contract/readiness view). Use --help for exact options. Interactive chat has not received manual TTY acceptance; the tested paths are headless and fresh-process CLI/MCP operations.
+
+Omnipresence should be the shared runtime owner and Sentinel the independent observer. A tested host-broker adapter is included; standalone operation does not attach that broker or activate the Single Runtime Engine. See OWNER_INTEGRATION.md for measured scopes, current limits and the activation contract still required.
 
 MCP launch configuration for a local host:
 
