@@ -1,5 +1,7 @@
 # Echo CLI
 
+ECHO Code local preview: this branch adds the separate `echo-code` entry point for local model inference, bounded repository inspection, explicitly approved edits, resumable sessions and read-only MCP tools. See [the ECHO Code guide](docs/echo-code/README.md) and its acceptance report for the tested scope and model-quality limits.
+
 Official command-line client for Echo Prime Technologies — 45+ commands across engines,
 knowledge search, the shared-brain memory system, doctrine generation, chat, unified search,
 tool discovery, bot deployment, scraper orchestration, dashboards, auth, and Cloudflare Worker
