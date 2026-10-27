@@ -1,3 +1,4 @@
+import { registerPrimeCommands } from '../prime/commands.js';
 import { Command, Option } from 'commander';
 import { randomUUID } from 'node:crypto';
 import { appendAuditEvent, makeEvent } from './events.js';
@@ -52,6 +53,7 @@ function audited<T>(store: SessionStore, operation: CodeEvent['operation'], sess
 }
 
 export function registerCodeCommands(code: Command, integrations: { continuityInvoke?: ContinuityInvoker } = {}): void {
+  registerPrimeCommands(code);
   code.description('ECHO Code — local inference, source inspection, reviewed edits and resumable sessions');
   code.command('integrations').description('Show existing owner contracts and whether a shared broker is attached')
     .action(async () => output({ architecture: 'ECHO Code client -> existing Omnipresence runtime; Sentinel independent observations',
