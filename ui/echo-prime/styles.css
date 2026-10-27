@@ -10,3 +10,46 @@
 @media(max-width:430px){.composer-wrap{padding-top:44px}}
 
 @media(max-width:800px){.mobile-scrim.visible{left:250px}}
+
+/* Polished lettering: metallic horizon, spectral edges and a traveling reflection. */
+.orb-wordmark{
+  --chrome-a:#86ffda;--chrome-b:#87ddff;--chrome-c:#d1acff;
+  gap:12px;text-shadow:none;isolation:isolate;
+}
+.orb-wordmark[data-palette="emerald"]{--chrome-a:#bdffc7;--chrome-b:#7df5cf;--chrome-c:#dfef9c}
+.orb-wordmark[data-palette="aurora"]{--chrome-a:#c8deff;--chrome-b:#c3a4ff;--chrome-c:#ffb4e0}
+.orb-wordmark .chrome-lettering{
+  position:relative;display:block;width:max-content;max-width:90%;
+  padding:.08em 0 .16em .28em;line-height:1.15;white-space:nowrap;
+  color:#e0fff5;font-weight:600;letter-spacing:.28em;
+  filter:drop-shadow(0 2px 1px #02080dcc) drop-shadow(0 0 9px #76e9d52e);
+}
+.orb-wordmark .chrome-primary{font-size:27px;font-weight:650}
+.orb-wordmark .chrome-secondary{font-size:8px;font-weight:600;letter-spacing:.42em;padding-left:.42em;opacity:.92}
+@supports ((background-clip:text) or (-webkit-background-clip:text)){
+  .orb-wordmark .chrome-lettering{
+    color:transparent;-webkit-text-fill-color:transparent;
+    background-image:
+      linear-gradient(112deg,transparent 37%,#d2faff0a 43%,#f2ffff99 48.3%,#fff 49.5%,#b2eaffaa 50.5%,transparent 56%),
+      linear-gradient(176deg,#f8fffd 1%,var(--chrome-a) 18%,#e5fcff 32%,#66939c 43%,#213b58 47%,#e7faff 49%,#fff 51%,var(--chrome-b) 62%,var(--chrome-c) 78%,#f2fff8 95%);
+    background-size:260% 100%,160% 100%;background-position:160% 50%,0 50%;
+    background-clip:text;-webkit-background-clip:text;
+    animation:chrome-reflection 8s cubic-bezier(.4,0,.25,1) infinite;
+  }
+  .orb-wordmark .chrome-secondary{animation-delay:-.24s;animation-duration:8s}
+  .chrome-lettering::before,.chrome-lettering::after{
+    content:attr(data-text);position:absolute;inset:0;padding:inherit;
+    font:inherit;letter-spacing:inherit;line-height:inherit;color:transparent;
+    -webkit-text-fill-color:transparent;z-index:-1;pointer-events:none;
+  }
+  .chrome-lettering::before{-webkit-text-stroke:.55px var(--chrome-b);transform:translate(-.5px,-.15px);opacity:.65}
+  .chrome-lettering::after{-webkit-text-stroke:.55px var(--chrome-c);transform:translate(.55px,.3px);opacity:.6}
+}
+@keyframes chrome-reflection{
+  0%,12%{background-position:160% 50%,0 50%}
+  66%,100%{background-position:-70% 50%,100% 50%}
+}
+.orb-wordmark[data-motion="paused"] .chrome-lettering{animation-play-state:paused}
+@media(max-width:800px){.orb-wordmark .chrome-primary{font-size:23px}.orb-wordmark .chrome-secondary{font-size:7px}.orb-wordmark{gap:10px}}
+@media(max-width:430px){.orb-wordmark .chrome-primary{font-size:22px}.orb-wordmark .chrome-secondary{font-size:6.5px}}
+@media(prefers-reduced-motion:reduce){.orb-wordmark .chrome-lettering{animation:none!important;background-position:55% 50%,35% 50%}}

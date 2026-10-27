@@ -10,10 +10,10 @@
   let mode='Chat',toastTimer,activeDraft=null;
   const orb=window.EchoPrimeOrb.mount($('#echo-orb'),{
     onFallback(){ $('#echo-orb').hidden=true;$('#orb-fallback').hidden=false; },
-    onMotionChange(value){$('#motion-toggle').setAttribute('aria-checked',String(value));},
+    onMotionChange(value){motionUI(value);},
   });
   orb.setPalette(palette);orb.setQuality(quality);if(saved.motion===false)orb.setMotion(false);
-  $('#motion-toggle').setAttribute('aria-checked',String(orb.motion!==false));
+  motionUI(orb.motion!==false);
   $('#quality').value=quality;
   function persist(){try{localStorage.setItem(storageKey,JSON.stringify({drafts,palette,quality,motion:orb.motion}));return true;}catch{return false;}}
   function toast(text){clearTimeout(toastTimer);$('#toast').textContent=text;$('#toast').classList.add('visible');toastTimer=setTimeout(()=>$('#toast').classList.remove('visible'),4200);}
@@ -32,9 +32,10 @@
     ['AGENTS','Bounded task execution','i-code','Awaiting connection'],
   ];
   for(const [name,description,icon,status] of systems){const row=document.createElement('div');row.className='system-row';row.dataset.system=name;const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');const use=document.createElementNS('http://www.w3.org/2000/svg','use');use.setAttribute('href','#'+icon);svg.append(use);const copy=document.createElement('div'),title=document.createElement('strong'),small=document.createElement('small'),state=document.createElement('span');title.textContent=name;small.textContent=description;copy.append(title,small);state.className='system-state';state.textContent=status;row.append(svg,copy,state);$('#systems-list').append(row);}
-  function paletteUI(){$$('[data-palette]').forEach(b=>{const selected=b.dataset.palette===palette;b.classList.toggle('selected',selected);b.setAttribute('aria-pressed',String(selected));});}
-  $$('[data-palette]').forEach(b=>b.addEventListener('click',()=>{palette=b.dataset.palette;orb.setPalette(palette);paletteUI();persist();}));
-  $('#motion-toggle').addEventListener('click',()=>{const next=$('#motion-toggle').getAttribute('aria-checked')!=='true';orb.setMotion(next);$('#motion-toggle').setAttribute('aria-checked',String(next));persist();});
+  function motionUI(value){$('#motion-toggle').setAttribute('aria-checked',String(value));$('.orb-wordmark').dataset.motion=value?'running':'paused';}
+  function paletteUI(){$('.orb-wordmark').dataset.palette=palette;$$('button[data-palette]').forEach(b=>{const selected=b.dataset.palette===palette;b.classList.toggle('selected',selected);b.setAttribute('aria-pressed',String(selected));});}
+  $$('button[data-palette]').forEach(b=>b.addEventListener('click',()=>{palette=b.dataset.palette;orb.setPalette(palette);paletteUI();persist();}));
+  $('#motion-toggle').addEventListener('click',()=>{const next=$('#motion-toggle').getAttribute('aria-checked')!=='true';orb.setMotion(next);motionUI(next);persist();});
   $('#quality').addEventListener('change',e=>{quality=e.target.value;orb.setQuality(quality);persist();});
   $$('[data-open]').forEach(b=>b.addEventListener('click',()=>openPanel(b.dataset.open)));
   $$('.close-dialog').forEach(b=>b.addEventListener('click',()=>b.closest('dialog').close()));

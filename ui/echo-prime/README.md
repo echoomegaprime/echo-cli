@@ -6,6 +6,8 @@ Open `index.html` in a modern browser. The interface is self-contained and makes
 
 Native WebGL renders a procedurally shaded sphere with fluid detail, rim light, colored reflections and orbital particles. Browsers without WebGL use an animated Canvas 2D renderer with projected 3D particles and field lines. Three palettes, graphics quality and animation controls are available from the orb or Appearance settings. Motion respects the initial system reduced-motion preference and pauses in hidden tabs.
 
+The central ECHO / OMEGA PRIME lettering uses a polished metallic gradient, cyan/violet spectral edges and a slow moving reflection. Its colors follow the orb palette; the existing animation control pauses the shimmer, including after reload. System reduced motion keeps the lettering static. The treatment works independently of WebGL.
+
 The responsive shell follows the user-provided emerald desktop, ECHO Prime desktop and mobile references. No Muse executable, proprietary engine, reference image or external asset is included.
 
 ## Current capabilities
@@ -20,4 +22,4 @@ The production integration must provide a separately admitted authenticated host
 
 ## Validation (2026-10-27)
 
-Desktop (1363 px) and mobile (390 x 844) inspected in a browser. Mobile viewport and document widths both measured 390 px with no horizontal overflow. Mobile navigation, mode placeholder switching, palette/quality/motion selection and preference persistence checked. JavaScript syntax checked separately. The preview browser disables WebGL, so the Canvas renderer was visually verified; the GPU renderer still needs validation on the target hardware. No live service connection is claimed.
+Desktop (1363 px) and mobile (390 x 844) inspected in a browser. Mobile viewport and document widths both measured 390 px with no horizontal overflow. Mobile navigation, mode placeholder switching, palette/quality/motion selection and preference persistence checked. Chrome palette synchronization, pause and persistence were also verified in the browser. JavaScript syntax checked separately. The preview browser disables WebGL, so the Canvas renderer was visually verified; the GPU renderer still needs validation on the target hardware. No live service connection is claimed.
