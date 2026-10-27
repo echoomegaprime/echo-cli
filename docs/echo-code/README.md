@@ -80,3 +80,13 @@ It correctly staged/applied/reverted the requested arithmetic edit and answered
 the injected-instruction fixture, but staged proposals for two read-only
 questions instead of answering. No source changed without separate approval.
 That result is historical. The subsequent read-only increment and fixed evaluation qualified 7B as the preview default; see [Read-only turns and model qualification](READ_ONLY_2026-10-26.md) for the bounded 9/9 versus 2/9 comparison and remaining limits.
+
+
+## Explicit durable memory checkpoints
+
+The memory prepare/status/sync commands preserve an explicit summary and its stable
+request ID across restarts. An attached existing host broker can capture and verify
+that summary through Fabric. The current SDK connection lacks continuity.write,
+so no live save is claimed. Standalone sync reports its missing broker and exits 2.
+See [checkpoint behavior and evidence](CONTINUITY_2026-10-26.md) and the
+[shared runtime admission proposal](RUNTIME_ADMISSION_PROPOSAL.md).

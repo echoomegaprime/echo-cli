@@ -31,3 +31,5 @@ const observations = await collectOwnerReadiness(existingScopedInvoke);
 ```
 
 Before activating shared execution: identify the Single Runtime Engine's canonical versioned session/tool contract; obtain its actual admitted role scope; bind workspace, cancellation, approvals, telemetry and replay/idempotency semantics; run readback/recovery tests; then complete exact-SHA release gates. Do not invent a second scheduler, bypass scope denial, or mark an integration live because its adapter tests pass.
+
+October 26 continuation: [Fabric checkpoint client](CONTINUITY_2026-10-26.md) now preserves pending intent, validates receipts and verifies recall. Actual capture returned a named continuity.write scope denial; downstream canWrite status did not authorize it. Shared Core source was re-read and remains unsuitable for this coding role. [The admission proposal](RUNTIME_ADMISSION_PROPOSAL.md) lists the concrete owner contract and activation evidence still needed.

@@ -1,0 +1,64 @@
+{
+  "observedLocalDate": "2026-10-26",
+  "sourceBaseline": "f13363d672ef565dd847d72405e0877b396e2b4c",
+  "capture": {
+    "attempted": true,
+    "saved": false,
+    "eventId": null,
+    "error": "scope_forbidden",
+    "required": "continuity.write",
+    "granted": [
+      "caps.read",
+      "certforge.read",
+      "continuity.read",
+      "crystal.read",
+      "db.read",
+      "prompts.read",
+      "prompts.write",
+      "tier:1"
+    ],
+    "requestId": "echo-code-muse:f13363d672ef565dd847d72405e0877b396e2b4c:checkpoint:v1",
+    "retried": false
+  },
+  "status": {
+    "runId": "19f1755d-36bb-47c7-bb9a-47c012ba4c05",
+    "downstreamCanWrite": true,
+    "upstreamWriteScopeGranted": false
+  },
+  "recall": {
+    "runId": "8be94fc7-28f6-4683-9b0e-586730e8a39e",
+    "query": "f13363d",
+    "matchingEvents": 0
+  },
+  "inspectedRelease": {
+    "path": "/home/forge/ecf-mcp/releases/6dabe274cbd7667e4c2233ecd5a58a576d19a8e4-recall5xx-20261007/",
+    "activeDeploymentShaVerified": false,
+    "sources": [
+      {
+        "path": "server/mcp/ecf-store.mjs",
+        "sha256": "b572ba8cb78b45e523245b29d33bac6a7023f3e16b72550796a2f0d5ef40c628"
+      },
+      {
+        "path": "server/mcp/ecf-mcp.mjs",
+        "sha256": "d0a70f14b21d98b411e71e698c65ca2ba3ca66ddedaa8ea5e5b633c474f1262e"
+      },
+      {
+        "path": "server/mcp/ecf-session-api.mjs",
+        "sha256": "0105cd028b1425dad3b92fec2975783b6eaa90292c330a6aefc4e0e6279ae8cb"
+      },
+      {
+        "path": "shared/continuity-core.mjs",
+        "sha256": "2fc12007a06acd64cea11e81f6d86495c705b56bcb6f4f5fe2b9598514009968"
+      }
+    ]
+  },
+  "validation": {
+    "tests": 116,
+    "testFiles": 14,
+    "memoryTests": 23,
+    "lint": "pass",
+    "typecheck": "pass",
+    "build": "pass",
+    "successPathEvidence": "contract fixtures; live capture blocked"
+  }
+}

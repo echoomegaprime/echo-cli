@@ -11,6 +11,8 @@ import { Workspace } from './workspace.js';
 import { LocalModel } from './model.js';
 import { runTurn } from './agent.js';
 import type { TaskMode } from './agent.js';
+import { listCheckpoints, prepareCheckpoint, syncCheckpoint } from './continuity.js';
+import type { ContinuityInvoker } from './continuity.js';
 import { dispatchMcp } from './mcp.js';
 import { collectOwnerReadiness, ownerContracts } from './owners.js';
 import type { RpcRequest } from './mcp.js';
@@ -49,7 +51,7 @@ function audited<T>(store: SessionStore, operation: CodeEvent['operation'], sess
   finally { record(succeeded ? 'operation_completed' : 'operation_failed', succeeded ? 'succeeded' : 'failed'); }
 }
 
-export function registerCodeCommands(code: Command): void {
+export function registerCodeCommands(code: Command, integrations: { continuityInvoke?: ContinuityInvoker } = {}): void {
   code.description('ECHO Code — local inference, source inspection, reviewed edits and resumable sessions');
   code.command('integrations').description('Show existing owner contracts and whether a shared broker is attached')
     .action(async () => output({ architecture: 'ECHO Code client -> existing Omnipresence runtime; Sentinel independent observations',
@@ -89,6 +91,21 @@ export function registerCodeCommands(code: Command): void {
         const text = await prompt.question('ECHO > '); if (text.trim() === '/exit') break; if (!text.trim()) continue;
         output(await runTurn({ workspace, store, sessionId: s.id, model, prompt: text, mode: opts.mode }));
       } } finally { prompt.close(); }
+    });
+  const memory = code.command('memory').description('Prepare and verify explicit checkpoints through the existing Fabric owner');
+  common(memory.command('prepare <session> <title> <detail>').description('Persist a pending checkpoint locally; no upload or automatic transcript capture'))
+    .action((session: string, title: string, detail: string, opts: Options) => {
+      const { store, workspace } = context(opts); output(prepareCheckpoint(store, workspace, session, title, detail));
+    });
+  common(memory.command('status <session>').description('Show durable checkpoint requests and receipt state'))
+    .action((session: string, opts: Options) => {
+      const { store, workspace } = context(opts); output(listCheckpoints(store, workspace, session));
+    });
+  common(memory.command('sync <session> <request>').description('Send an explicitly prepared checkpoint using an attached host broker and verify recall'))
+    .action(async (session: string, request: string, opts: Options) => {
+      const { store, workspace } = context(opts);
+      const result = await syncCheckpoint(store, workspace, session, request, integrations.continuityInvoke);
+      output(result); if (result.state !== 'verified') process.exitCode = 2;
     });
   common(code.command('doctor').description('Check local model inventory without generating or downloading a model'))
     .option('--model <name>', 'Installed local model', process.env.ECHO_CODE_MODEL || 'qwen2.5-coder:7b')

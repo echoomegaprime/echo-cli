@@ -17,7 +17,7 @@ UNKNOWN: proprietary engine implementation, system prompts, model weights/traini
 
 ## ECHO Code 0.1 contract
 
-Independent local agent: `echo-code run <prompt>`, `chat`, `doctor`, `sessions`, `show`, `review`, `reject`, `approve`, `revert`, `recover`, `mcp`. Standalone entry avoids the older SDK client's credential/config initialization. It uses only the existing Commander dependency and Node built-ins.
+Independent local agent: `echo-code run <prompt>`, `chat`, `doctor`, `sessions`, `show`, `review`, `reject`, `approve`, `revert`, `recover`, `mcp`, `memory prepare/status/sync`. Standalone entry avoids the older SDK client's credential/config initialization. It uses only the existing Commander dependency and Node built-ins.
 
 Inference is a bounded, non-streaming Ollama JSON action loop at a credential-free loopback origin. No remote/public origin, redirect, API key, hosted fallback or model download is implemented. Cloud-named models are refused. This assumes the selected local daemon/model is operator-controlled; an operator-configured proxy or misleading alias is outside the application's trust boundary.
 
@@ -32,3 +32,5 @@ Edit recovery: before/after hashes distinguish an interrupted write from an unap
 MCP: a local stdio server exposing only echo_code_list/read/search, initialize, ping, tools/list and tools/call; protocol profile 2024-11-05. JSON-RPC responses remain on stdout. It is not an MCP client and cannot call fleet tools. No HTTP server, remote authentication or MSP compatibility is claimed.
 
 Project AGENTS/CLAUDE instructions are not automatically loaded as model instructions. Protected policy files remain an operator/preflight responsibility. No project hooks, plugin code, package scripts or repository commands are executed by the agent. ECHO target engineering still requires its doorway chain and current preflight; this application is not an admission controller.
+
+Explicit checkpoints: caller-supplied summaries only, stable session-bound request IDs, atomic local pending state, existing host SDK capture, strict receipt validation and independent exact-event recall. Fixed capture/recall capabilities are never model tools. The standalone broker is absent; current live write scope is denied. Pending, uncertain, saved and verified states remain distinct; deadlines do not imply cancellation of remote effects. See CONTINUITY_2026-10-26.md for the complete contract and evidence limits.

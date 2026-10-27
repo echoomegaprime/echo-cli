@@ -3,13 +3,14 @@ import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readF
 import { join, resolve } from 'node:path';
 import { Workspace, redact } from './workspace.js';
 import type { Proposal } from './workspace.js';
+import type { MemoryCheckpoint } from './continuity.js';
 export { previewProposal } from './review.js';
 
 export interface Message { role: 'user' | 'assistant' | 'system'; content: string }
 export interface Session {
   version: 1; id: string; workspace: string; model: string; createdAt: string;
   status: 'idle' | 'running' | 'completed' | 'pending_approval' | 'failed' | 'step_limit' | 'interrupted';
-  messages: Message[]; proposals: Proposal[];
+  messages: Message[]; proposals: Proposal[]; checkpoints?: MemoryCheckpoint[];
 }
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 export class SessionStore {

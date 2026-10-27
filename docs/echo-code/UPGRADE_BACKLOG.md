@@ -9,3 +9,7 @@
 7. **Engineering delivery.** Independent code/security review; draft PR against exact candidate; CertForge and Certification App readbacks; target-specific release preflight, staging and rollback. Nothing in this preview auto-merges or deploys.
 
 No external paid provider, new model download or public tunnel is necessary for the tested local preview.
+
+## October 26 progress
+
+Read-only dispatch, complete unified review, durable rejection and the bounded 7B model gate are implemented. Broader model qualification remains open. Explicit checkpoint persistence/receipt/recall logic is implemented and tested; current write authorization and host attachment are still blocked. See CONTINUITY_2026-10-26.md and RUNTIME_ADMISSION_PROPOSAL.md before advancing shared execution.
