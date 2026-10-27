@@ -3,6 +3,7 @@ import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readF
 import { join, resolve } from 'node:path';
 import { Workspace, redact } from './workspace.js';
 import type { Proposal } from './workspace.js';
+export { previewProposal } from './review.js';
 
 export interface Message { role: 'user' | 'assistant' | 'system'; content: string }
 export interface Session {
@@ -71,6 +72,22 @@ export class SessionStore {
   }
   approve(id: string, proposalId: string, ws: Workspace) { this.edit(id, proposalId, ws, false); }
   revert(id: string, proposalId: string, ws: Workspace) { this.edit(id, proposalId, ws, true); }
+  reject(id: string, proposalId: string, ws: Workspace): { status: 'rejected'; alreadyRejected: boolean } {
+    const release = this.lease(id);
+    try {
+      const s = this.get(id);
+      if (s.workspace !== ws.root) throw new Error('Session workspace mismatch');
+      const p = s.proposals.find(p => p.id === proposalId);
+      if (!p) throw new Error('Proposal not found');
+      if (p.status === 'rejected') return { status: 'rejected', alreadyRejected: true };
+      if (p.status !== 'pending') throw new Error('Only a pending proposal can be rejected');
+      // Rejection updates only the atomic session journal, never workspace content.
+      p.status = 'rejected';
+      if (s.status === 'pending_approval' && !s.proposals.some(proposal => proposal.status === 'pending')) s.status = 'completed';
+      this.save(s);
+      return { status: 'rejected', alreadyRejected: false };
+    } finally { release(); }
+  }
   recover(id: string, ws: Workspace) {
     const lock = `${this.path(id)}.lock`;
     if (existsSync(lock)) {

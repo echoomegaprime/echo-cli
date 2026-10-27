@@ -12,7 +12,7 @@ export function redact(text: string): string {
 }
 export interface Proposal {
   id: string; path: string; before: string | null; beforeHash: string | null;
-  after: string; afterHash: string; status: 'pending' | 'applying' | 'applied' | 'reverting' | 'reverted';
+  after: string; afterHash: string; status: 'pending' | 'applying' | 'applied' | 'reverting' | 'reverted' | 'rejected';
 }
 
 /** Application boundary only; this is not an operating-system sandbox. */

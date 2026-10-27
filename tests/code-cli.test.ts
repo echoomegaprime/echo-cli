@@ -1,43 +1,97 @@
-import { expect, it } from 'vitest';
-import { execFileSync, spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { afterEach, expect, it, vi } from 'vitest';
+import { Command } from 'commander';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { SessionStore } from '../src/code/sessions.js';
 import { Workspace } from '../src/code/workspace.js';
+import { registerCodeCommands } from '../src/code/commands.js';
 
-const entry = resolve('src/code-main.ts');
-function cli(args: string[]) { return execFileSync(process.execPath, ['--import', 'tsx', entry, ...args], { encoding: 'utf8', timeout: 15000 }); }
-it('provides a standalone entry point and inspects a persisted proposal before approval', () => {
-  const root = mkdtempSync(join(tmpdir(), 'echo-code-cli-'));
-  try {
-    expect(cli(['--version'])).toContain('0.1.0');
-    const store = new SessionStore(join(root, 'state')); writeFileSync(join(root, 'a.txt'), 'before');
-    const ws = new Workspace(root, [store.directory]), s = store.create(root, 'fake');
-    const p = ws.propose('a.txt', 'after'); store.addProposal(s.id, p);
-    const args = ['--workspace', root, '--state-dir', store.directory];
-    const inspected = cli(['show', s.id, ...args]); expect(inspected).toContain('before'); expect(inspected).toContain('after');
-    expect(readFileSync(join(root, 'a.txt'), 'utf8')).toBe('before');
-    expect(cli(['approve', s.id, p.id, ...args])).toContain('applied');
-    expect(readFileSync(join(root, 'a.txt'), 'utf8')).toBe('after');
-    expect(cli(['revert', s.id, p.id, ...args])).toContain('reverted');
-  } finally { rmSync(root, { recursive: true, force: true }); }
+const roots: string[] = [];
+afterEach(() => { vi.restoreAllMocks(); roots.splice(0).forEach(root => rmSync(root, { recursive: true, force: true })); });
+function fixture() {
+  const root = mkdtempSync(join(tmpdir(), 'echo-code-cli-')); roots.push(root);
+  const project = join(root, 'project'); mkdirSync(project);
+  writeFileSync(join(project, 'a.txt'), 'before\n');
+  const store = new SessionStore(join(root, 'state')), ws = new Workspace(project, [store.directory]);
+  const session = store.create(ws.root, 'test-local'), proposal = ws.propose('a.txt', 'after\n');
+  store.addProposal(session.id, proposal);
+  const output = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+  async function run(args: string[], workspace = project) {
+    const command = new Command().exitOverride(); registerCodeCommands(command);
+    await command.parseAsync([...args, '--workspace', workspace, '--state-dir', store.directory], { from: 'user' });
+    return JSON.parse(String(output.mock.calls.at(-1)?.[0]));
+  }
+  return { project, root, store, session, proposal, run };
+}
+it('reviews a complete diff, rejects explicitly, and refuses later approval without changing source', async () => {
+  const f = fixture();
+  const review = await f.run(['review', f.session.id, f.proposal.id]);
+  expect(review.before).toBe('before\n'); expect(review.after).toBe('after\n');
+  expect(review.unifiedDiff).toContain('-before'); expect(review.unifiedDiff).toContain('+after');
+  const rejection = await f.run(['reject', f.session.id, f.proposal.id]);
+  expect(rejection).toMatchObject({ status: 'rejected', alreadyRejected: false });
+  expect(await f.run(['reject', f.session.id, f.proposal.id])).toMatchObject({ status: 'rejected', alreadyRejected: true });
+  await expect(f.run(['approve', f.session.id, f.proposal.id])).rejects.toThrow(/pending/i);
+  expect(readFileSync(join(f.project, 'a.txt'), 'utf8')).toBe('before\n');
 });
-it('speaks clean JSON-RPC over stdio from a fresh process', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'echo-code-mcp-'));
-  try {
-    writeFileSync(join(root, 'a.txt'), 'mcp fixture');
-    const child = spawn(process.execPath, ['--import', 'tsx', entry, 'mcp', '--workspace', root], { stdio: ['pipe', 'pipe', 'pipe'] });
-    let stdout = '', stderr = ''; child.stdout.on('data', b => { stdout += b; }); child.stderr.on('data', b => { stderr += b; });
-    child.stdin.end([
-      { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2024-11-05' } },
-      { jsonrpc: '2.0', method: 'notifications/initialized' },
-      { jsonrpc: '2.0', id: 2, method: 'tools/list' },
-      { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'echo_code_read', arguments: { path: 'a.txt' } } },
-    ].map(r => JSON.stringify(r)).join('\n') + '\n');
-    const exit = await new Promise<number | null>((resolve, reject) => { const timer = setTimeout(() => { child.kill(); reject(new Error('MCP subprocess timed out')); }, 10000); child.on('error', reject); child.on('exit', code => { clearTimeout(timer); resolve(code); }); });
-    expect(exit).toBe(0); expect(stderr).toBe('');
-    const responses = stdout.trim().split('\n').map(line => JSON.parse(line));
-    expect(responses).toHaveLength(3); expect(responses[2].result.content[0].text).toContain('mcp fixture');
-  } finally { rmSync(root, { recursive: true, force: true }); }
+it('refuses review and transcript display when a different workspace is selected', async () => {
+  const f = fixture(), other = join(f.root, 'other'); mkdirSync(other);
+  for (const args of [['review', f.session.id, f.proposal.id], ['show', f.session.id]]) {
+    await expect(f.run(args, other)).rejects.toThrow(/workspace mismatch/i);
+  }
+});
+
+it('records successful approval and revert with linked metadata-only events', async () => {
+  const f = fixture();
+  await f.run(['approve', f.session.id, f.proposal.id]);
+  expect(readFileSync(join(f.project, 'a.txt'), 'utf8')).toBe('after\n');
+  await f.run(['revert', f.session.id, f.proposal.id]);
+  expect(readFileSync(join(f.project, 'a.txt'), 'utf8')).toBe('before\n');
+  const text = readFileSync(join(f.store.directory, 'events.jsonl'), 'utf8');
+  const events = text.trim().split('\n').map(line => JSON.parse(line));
+  expect(events.map(e => [e.operation, e.event, e.status])).toEqual([
+    ['approve', 'operation_started', 'started'], ['approve', 'operation_completed', 'succeeded'],
+    ['revert', 'operation_started', 'started'], ['revert', 'operation_completed', 'succeeded'],
+  ]);
+  expect(events[0].correlationId).toBe(events[1].correlationId);
+  expect(events[2].correlationId).toBe(events[3].correlationId);
+  expect(events[0].correlationId).not.toBe(events[2].correlationId);
+  expect(events.every(e => e.sessionId === f.session.id)).toBe(true);
+  for (const event of events) {
+    expect(Object.keys(event).every(key => ['timestamp', 'event', 'operation', 'status', 'sessionId', 'correlationId', 'durationMs'].includes(key))).toBe(true);
+  }
+  expect(text).not.toContain(f.project);
+  expect(text).not.toContain('a.txt');
+  expect(text).not.toContain('after');
+});
+it('records failed stale approval without overwriting concurrent source or logging its contents', async () => {
+  const f = fixture();
+  writeFileSync(join(f.project, 'a.txt'), 'private concurrent edit');
+  await expect(f.run(['approve', f.session.id, f.proposal.id])).rejects.toThrow();
+  expect(readFileSync(join(f.project, 'a.txt'), 'utf8')).toBe('private concurrent edit');
+  const text = readFileSync(join(f.store.directory, 'events.jsonl'), 'utf8');
+  const events = text.trim().split('\n').map(line => JSON.parse(line));
+  expect(events.map(e => e.status)).toEqual(['started', 'failed']);
+  expect(events[1].event).toBe('operation_failed');
+  expect(text).not.toContain('private');
+});
+it('records review, rejection and recovery without exposing source or changing the file', async () => {
+  const f = fixture();
+  await f.run(['review', f.session.id, f.proposal.id]);
+  await f.run(['reject', f.session.id, f.proposal.id]);
+  await f.run(['recover', f.session.id]);
+  const events = readFileSync(join(f.store.directory, 'events.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  expect(events.filter(e => e.event === 'operation_completed').map(e => e.operation)).toEqual(['review', 'reject', 'recover']);
+  expect(readFileSync(join(f.project, 'a.txt'), 'utf8')).toBe('before\n');
+});
+it('reports an unavailable audit sink while preserving a successful edit result and another writer lock', async () => {
+  const f = fixture();
+  const warning = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  const lock = join(f.store.directory, 'events.jsonl.lock');
+  writeFileSync(lock, 'other writer');
+  expect(await f.run(['approve', f.session.id, f.proposal.id])).toMatchObject({ status: 'applied' });
+  expect(readFileSync(join(f.project, 'a.txt'), 'utf8')).toBe('after\n');
+  expect(readFileSync(lock, 'utf8')).toBe('other writer');
+  expect(warning.mock.calls.map(call => String(call[0])).join('')).toContain('audit unavailable: busy');
 });

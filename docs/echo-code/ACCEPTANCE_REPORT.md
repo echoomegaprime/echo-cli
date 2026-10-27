@@ -1,4 +1,4 @@
-# Acceptance report — local preview
+# Acceptance report â€” local preview
 
 Verdict: **working bounded local preview; model quality and governed release held**.
 
