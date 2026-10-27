@@ -90,3 +90,7 @@ that summary through Fabric. The current SDK connection lacks continuity.write,
 so no live save is claimed. Standalone sync reports its missing broker and exits 2.
 See [checkpoint behavior and evidence](CONTINUITY_2026-10-26.md) and the
 [shared runtime admission proposal](RUNTIME_ADMISSION_PROPOSAL.md).
+
+## Shared owner host integration
+
+The programmatic runSharedTurn entrypoint binds this client to an explicitly admitted owner coding contract through an authenticated host broker. See [the host integration contract](SHARED_RUNTIME_2026-10-27.md). The standalone CLI does not attach credentials or activate this path automatically.
