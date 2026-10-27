@@ -49,7 +49,7 @@ function audited<T>(store: SessionStore, operation: CodeEvent['operation'], sess
 }
 
 export function registerCodeCommands(code: Command): void {
-  code.description('ECHO Code â€” local inference, source inspection, reviewed edits and resumable sessions');
+  code.description('ECHO Code — local inference, source inspection, reviewed edits and resumable sessions');
   code.command('integrations').description('Show existing owner contracts and whether a shared broker is attached')
     .action(async () => output({ architecture: 'ECHO Code client -> existing Omnipresence runtime; Sentinel independent observations',
       contracts: ownerContracts, observations: await collectOwnerReadiness(), automaticRemediation: false,

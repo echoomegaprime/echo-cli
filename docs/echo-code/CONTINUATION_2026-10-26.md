@@ -1,4 +1,4 @@
-# ECHO Code continuation validation â€” October 26, 2026
+# ECHO Code continuation validation — October 26, 2026
 
 Scope: recover the existing Muse-inspired ECHO Code preview, preserve unfinished
 QUENCH work, and complete the edit-review audit increment. This is not a release

@@ -1,4 +1,7 @@
-# Acceptance report â€” local preview
+# Acceptance report — local preview
+
+Historical baseline at 2bcfd4cce8327d950a5791332d53e2676151e886.
+See [the October 26 continuation](CONTINUATION_2026-10-26.md) for newer validation and remaining gates.
 
 Verdict: **working bounded local preview; model quality and governed release held**.
 
