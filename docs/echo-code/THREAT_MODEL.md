@@ -5,6 +5,7 @@ Assets: source files, credentials, local session contents/backups, approval inte
 | Risk | Current control | Remaining limit |
 |---|---|---|
 | Model runs a command or deploys | No such action exists | Model prose can still suggest commands; review it |
+| Unrequested edit staging | Read-only default; dispatcher requires explicit caller-selected propose mode before constructing an edit | Permission applies to each invocation, not an OS sandbox; prior pending proposals remain available for separate approval |
 | Automatic or stale source overwrite | Proposal-only model, separate explicit approval, before/after hashes | Same-user malicious filesystem race is outside this application boundary |
 | Traversal / junction / hard-link escape | Relative path validation, parent link checks, real workspace binding, hard-link rejection | No OS sandbox; do not share the workspace with a hostile writer |
 | Windows special paths | Reject absolute/UNC/drive/ADS/control characters, device names, trailing-dot/space paths | Filesystem/provider edge cases have not had independent audit |

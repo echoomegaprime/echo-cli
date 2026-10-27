@@ -8,7 +8,7 @@ The reference column describes observed documentation/source/help, not verified 
 | Headless use | exec | run returns structured JSON; tested |
 | Interactive conversation | terminal UI | Basic line-oriented chat; no rich TUI; TTY/manual acceptance pending |
 | Inspect repository | coding agent | Bounded list/read/literal search; tests and real read |
-| Edit files | agent edits with approvals | One staged full-file edit per proposal turn; separate approval and conflict checks |
+| Edit files | agent edits with approvals | Read-only by default; explicit propose mode stages one full-file edit; separate approval and conflict checks |
 | Undo | session rewind differs from file restore | ECHO reverts its own unchanged approved edit; no conversation branching |
 | Resume / outage recovery | MSP durability and session resume | Local JSON recovery; fresh-store/process checks and interrupted edit reconciliation |
 | Programmatic control | MSP, TypeScript/Python SDK | ECHO library functions and JSON CLI; not MSP compatible |

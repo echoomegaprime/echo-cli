@@ -114,7 +114,7 @@ describe('local model and agent integration', () => {
       const address = server.address() as { port: number };
       const model = new LocalModel(`http://127.0.0.1:${address.port}`, 'test-local');
       const s = store.create(project, 'test-local');
-      const result = await runTurn({ workspace: ws, store, sessionId: s.id, model, prompt: 'Update main.txt', maxSteps: 4 });
+      const result = await runTurn({ workspace: ws, store, sessionId: s.id, model, mode: 'propose', prompt: 'Update main.txt', maxSteps: 4 });
       expect(result.status).toBe('pending_approval'); expect(requests).toHaveLength(2);
       expect(result.answer).toContain('No source file has been changed');
       expect(readFileSync(join(project, 'main.txt'), 'utf8')).toBe('old');

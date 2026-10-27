@@ -21,7 +21,7 @@ describe('source grounding across a coding turn', () => {
   it('refuses to stage an existing file the model has not read in this turn', async () => {
     const { root, store, ws, session } = setup();
     const actions: Action[] = [{ action: 'propose', path: 'main.ts', content: 'invented replacement' }, { action: 'final', content: 'I need to inspect the file.' }];
-    await runTurn({ workspace: ws, store, sessionId: session.id, prompt: 'Improve main.ts', model: { next: async () => actions.shift()! } });
+    await runTurn({ workspace: ws, store, sessionId: session.id, mode: 'propose', prompt: 'Improve main.ts', model: { next: async () => actions.shift()! } });
     expect(store.get(session.id).proposals).toHaveLength(0);
     expect(readFileSync(join(root, 'main.ts'), 'utf8')).toContain('answer = 42');
     expect(store.get(session.id).messages.some(m => m.content.includes('Read the complete current file before proposing'))).toBe(true);
@@ -34,7 +34,7 @@ describe('source grounding across a coding turn', () => {
       if (step === 2) { writeFileSync(join(root, 'main.ts'), 'concurrent author edit\n'); return { action: 'propose', path: 'main.ts', content: 'stale replacement' }; }
       return { action: 'final', content: 'The source changed; inspect it again.' };
     } };
-    await runTurn({ workspace: ws, store, sessionId: session.id, prompt: 'Improve main.ts', model });
+    await runTurn({ workspace: ws, store, sessionId: session.id, mode: 'propose', prompt: 'Improve main.ts', model });
     expect(store.get(session.id).proposals).toHaveLength(0);
     expect(readFileSync(join(root, 'main.ts'), 'utf8')).toBe('concurrent author edit\n');
   });
@@ -53,7 +53,7 @@ describe('source grounding across a coding turn', () => {
     const actions: Action[] = [{ action: 'read', path: 'main.ts' }, { action: 'final', content: 'Read completed.' }];
     await runTurn({ workspace: ws, store, sessionId: session.id, prompt: 'Read main.ts', model: { next: async () => actions.shift()! } });
     const second: Action[] = [{ action: 'propose', path: 'main.ts', content: 'stale' }, { action: 'final', content: 'Need a fresh read.' }];
-    await runTurn({ workspace: ws, store, sessionId: session.id, prompt: 'Now change it', model: { next: async () => second.shift()! } });
+    await runTurn({ workspace: ws, store, sessionId: session.id, mode: 'propose', prompt: 'Now change it', model: { next: async () => second.shift()! } });
     expect(store.get(session.id).proposals).toHaveLength(0);
   });
 });

@@ -1,4 +1,4 @@
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import { randomUUID } from 'node:crypto';
 import { appendAuditEvent, makeEvent } from './events.js';
 import type { AuditResult, CodeEvent } from './events.js';
@@ -10,11 +10,12 @@ import { SessionStore, previewProposal } from './sessions.js';
 import { Workspace } from './workspace.js';
 import { LocalModel } from './model.js';
 import { runTurn } from './agent.js';
+import type { TaskMode } from './agent.js';
 import { dispatchMcp } from './mcp.js';
 import { collectOwnerReadiness, ownerContracts } from './owners.js';
 import type { RpcRequest } from './mcp.js';
 
-interface Options { workspace: string; stateDir: string; model: string; endpoint: string; steps: string; session?: string }
+interface Options { workspace: string; stateDir: string; model: string; endpoint: string; steps: string; session?: string; mode: TaskMode }
 function common(command: Command) {
   return command.option('-w, --workspace <path>', 'Workspace directory', process.cwd())
     .option('--state-dir <path>', 'Private local session directory', join(process.env.LOCALAPPDATA || join(homedir(), '.local', 'share'), 'EchoCode', 'sessions'));
@@ -54,10 +55,11 @@ export function registerCodeCommands(code: Command): void {
     .action(async () => output({ architecture: 'ECHO Code client -> existing Omnipresence runtime; Sentinel independent observations',
       contracts: ownerContracts, observations: await collectOwnerReadiness(), automaticRemediation: false,
       note: 'Standalone CLI has no host broker. Shared runtime admission is not established; local sessions are offline preview state.' }));
-  common(code.command('run <prompt>').description('Run one bounded turn; all edits stay pending approval'))
-    .option('--model <name>', 'Installed local Ollama model', process.env.ECHO_CODE_MODEL || 'echo-steward:4b-pilot')
+  common(code.command('run <prompt>').description('Run one bounded turn; read-only unless proposal mode is selected'))
+    .option('--model <name>', 'Installed local Ollama model', process.env.ECHO_CODE_MODEL || 'qwen2.5-coder:7b')
     .option('--endpoint <origin>', 'Loopback Ollama origin', 'http://127.0.0.1:11434')
     .option('--steps <count>', 'Maximum model steps (1-30)', '10')
+    .addOption(new Option('--mode <mode>', 'Read-only inspection or explicitly enabled edit proposals').choices(['read-only', 'propose']).default('read-only'))
     .option('--session <id>', 'Resume this existing session')
     .action(async (prompt: string, opts: Options) => {
       const { store, workspace } = context(opts), model = new LocalModel(opts.endpoint, opts.model);
@@ -65,15 +67,16 @@ export function registerCodeCommands(code: Command): void {
       if (session.model !== opts.model) throw new Error('Resume model mismatch; select the original model');
       const abort = new AbortController(); const onInterrupt = () => abort.abort(); process.on('SIGINT', onInterrupt);
       try {
-        const result = await runTurn({ workspace, store, sessionId: session.id, model, prompt, maxSteps: Number(opts.steps), signal: abort.signal,
+        const result = await runTurn({ workspace, store, sessionId: session.id, model, prompt, mode: opts.mode, maxSteps: Number(opts.steps), signal: abort.signal,
           onEvent: event => process.stderr.write(`[${event.kind}] ${event.detail}\n`),
         });
         output(result); if (!['completed', 'pending_approval'].includes(result.status)) process.exitCode = 2;
       } finally { process.off('SIGINT', onInterrupt); }
     });
   common(code.command('chat').description('Interactive local conversation; use /exit to finish'))
-    .option('--model <name>', 'Installed local Ollama model', process.env.ECHO_CODE_MODEL || 'echo-steward:4b-pilot')
+    .option('--model <name>', 'Installed local Ollama model', process.env.ECHO_CODE_MODEL || 'qwen2.5-coder:7b')
     .option('--endpoint <origin>', 'Loopback Ollama origin', 'http://127.0.0.1:11434')
+    .addOption(new Option('--mode <mode>', 'Mode for every turn in this chat invocation').choices(['read-only', 'propose']).default('read-only'))
     .option('--session <id>', 'Resume a session')
     .action(async (opts: Options) => {
       if (!process.stdin.isTTY) throw new Error('Interactive chat needs a terminal; use run for scripts');
@@ -81,14 +84,14 @@ export function registerCodeCommands(code: Command): void {
       const s = opts.session ? store.get(opts.session) : store.create(workspace.root, opts.model);
       if (s.workspace !== workspace.root || s.model !== opts.model) throw new Error('Resume workspace/model mismatch');
       const prompt = createPrompt({ input: process.stdin, output: process.stdout });
-      output({ sessionId: s.id, approval: 'Edits remain staged; inspect with show and apply with approve in a separate invocation.' });
+      output({ sessionId: s.id, mode: opts.mode, approval: 'Edits remain staged; inspect with show and apply with approve in a separate invocation.' });
       try { for (;;) {
         const text = await prompt.question('ECHO > '); if (text.trim() === '/exit') break; if (!text.trim()) continue;
-        output(await runTurn({ workspace, store, sessionId: s.id, model, prompt: text }));
+        output(await runTurn({ workspace, store, sessionId: s.id, model, prompt: text, mode: opts.mode }));
       } } finally { prompt.close(); }
     });
   common(code.command('doctor').description('Check local model inventory without generating or downloading a model'))
-    .option('--model <name>', 'Installed local model', process.env.ECHO_CODE_MODEL || 'echo-steward:4b-pilot')
+    .option('--model <name>', 'Installed local model', process.env.ECHO_CODE_MODEL || 'qwen2.5-coder:7b')
     .option('--endpoint <origin>', 'Loopback Ollama origin', 'http://127.0.0.1:11434')
     .action(async (opts: Options) => {
       const model = new LocalModel(opts.endpoint, opts.model, 10000), models = await model.models();

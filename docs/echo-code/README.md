@@ -11,12 +11,20 @@ node dist/code-main.js doctor
 node dist/code-main.js run "Read src/example.ts and explain it" --workspace C:\path\to\source
 ```
 
-The separate `echo-code` binary is added to the package. It does not initialize or alter the older CLI's stored API-key configuration. Default endpoint is http://127.0.0.1:11434 and model is echo-steward:4b-pilot; use --model for another already-installed local model. A missing model fails; there is no download or paid fallback. For another operator-owned machine, establish an authorized loopback tunnel separately; the application itself accepts only loopback origins.
+The separate `echo-code` binary is added to the package. It does not initialize or alter the older CLI's stored API-key configuration. Default endpoint is http://127.0.0.1:11434 and model is qwen2.5-coder:7b; use --model for another already-installed local model. A missing model fails; there is no download or paid fallback. For another operator-owned machine, establish an authorized loopback tunnel separately; the application itself accepts only loopback origins.
+
+`run` and `chat` default to `--mode read-only`. The dispatcher refuses proposals
+before constructing or storing an edit, even when a prompt, source file, prior turn,
+or model response requests one. Select `--mode propose` explicitly to stage edits.
+Mode applies to the current run or chat invocation and is not inherited on resume.
+The JSON result reports the effective mode. Existing pending proposals are retained;
+read-only mode neither approves nor discards them. Session transcripts still persist
+locally, so read-only describes workspace operations, not a filesystem sandbox.
 
 Review and apply:
 
 ```powershell
-node dist/code-main.js run "Read example.ts and stage the requested change" --workspace C:\source
+node dist/code-main.js run "Read example.ts and stage the requested change" --mode propose --workspace C:\source
 node dist/code-main.js show SESSION_ID
 node dist/code-main.js approve SESSION_ID PROPOSAL_ID --workspace C:\source
 node dist/code-main.js revert SESSION_ID PROPOSAL_ID --workspace C:\source
@@ -71,4 +79,4 @@ The installed `qwen2.5-coder:7b` was evaluated on four disposable fixtures.
 It correctly staged/applied/reverted the requested arithmetic edit and answered
 the injected-instruction fixture, but staged proposals for two read-only
 questions instead of answering. No source changed without separate approval.
-The model-quality gate remains failed and the default model is unchanged.
+That result is historical. The subsequent read-only increment and fixed evaluation qualified 7B as the preview default; see [Read-only turns and model qualification](READ_ONLY_2026-10-26.md) for the bounded 9/9 versus 2/9 comparison and remaining limits.
