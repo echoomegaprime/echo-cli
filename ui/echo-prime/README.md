@@ -8,6 +8,8 @@ Native WebGL renders a procedurally shaded sphere with fluid detail, rim light, 
 
 The central ECHO / OMEGA PRIME lettering uses a polished metallic gradient, cyan/violet spectral edges and a slow moving reflection. Its colors follow the orb palette; the existing animation control pauses the shimmer, including after reload. System reduced motion keeps the lettering static. The treatment works independently of WebGL.
 
+The Canvas renderer includes a tinted solid body beneath the reflections so the emerald sphere retains its volume through the animation. This preserves the original orb composition while strengthening its center and depth.
+
 The responsive shell follows the user-provided emerald desktop, ECHO Prime desktop and mobile references. No Muse executable, proprietary engine, reference image or external asset is included.
 
 ## Current capabilities
