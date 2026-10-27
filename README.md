@@ -93,3 +93,7 @@ this kind, matching `gh`, `npm`, and similar); treat it like any other locally-s
 ## License
 
 Proprietary — see [LICENSE](LICENSE). Contributions: see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## ECHO Prime visual interface
+
+Open [ui/echo-prime/index.html](ui/echo-prime/index.html) for the responsive emerald workspace and animated multicolor orb. [Interface notes](ui/echo-prime/README.md) describe rendering, controls and validation. This frontend saves local drafts; the production ECHO host is not connected.

@@ -41,7 +41,8 @@
     "node": ">=20.0.0"
   },
   "files": [
-    "dist/"
+    "dist/",
+    "ui/"
   ],
   "publishConfig": {
     "registry": "https://npm.pkg.github.com",

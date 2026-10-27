@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>ECHO Prime · Your intelligence, connected</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<svg class="icon-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
+<symbol id="i-chat" viewBox="0 0 24 24"><path d="M5 4h14a1 1 0 0 1 1 1v12H8l-4 3V5a1 1 0 0 1 1-1Z"/><path d="M8 9h8M8 13h5"/></symbol>
+<symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 3 2.7 6.3L21 12l-6.3 2.7L12 21l-2.7-6.3L3 12l6.3-2.7L12 3Z"/></symbol>
+<symbol id="i-chip" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><rect x="10" y="10" width="4" height="4" rx="1"/><path d="M9 3v3m6-3v3m-6 12v3m6-3v3M3 9h3m-3 6h3m12-6h3m-3 6h3"/></symbol>
+<symbol id="i-code" viewBox="0 0 24 24"><path d="m8 6-6 6 6 6m8-12 6 6-6 6m-3-14-2 16"/></symbol>
+<symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+<symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/></symbol>
+<symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+<symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16M8 4v6m8 4v6"/></symbol>
+<symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"/><path d="m8 12 3 3 5-6"/></symbol>
+<symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+<symbol id="i-memory" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 4 16 4 16 0V5M4 12c0 4 16 4 16 0"/></symbol>
+</defs></svg>
+<button class="mobile-scrim" id="scrim" aria-label="Close navigation"></button>
+<aside class="sidebar" id="sidebar">
+  <a class="brand" href="#" aria-label="ECHO Prime home"><span class="brand-mark"><i></i><i></i><i></i></span><span>ECHO PRIME<small>FORGE WORKSPACE</small></span></a>
+  <button class="new-chat" id="new-chat"><svg><use href="#i-plus"/></svg>New conversation<kbd>⌘ K</kbd></button>
+  <nav aria-label="Workspace"><button class="nav-item active" data-view="conversation"><svg><use href="#i-chat"/></svg>Conversation<span class="active-dot"></span></button><button class="nav-item" data-view="studio"><svg><use href="#i-spark"/></svg>Creative studio</button><button class="nav-item" data-view="systems"><svg><use href="#i-chip"/></svg>Echo systems<span class="nav-count">6</span></button></nav>
+  <div class="history-heading">YOUR SPACE<button id="clear-history" title="Clear local drafts" aria-label="Clear local drafts"><svg><use href="#i-sliders"/></svg></button></div>
+  <div id="history" class="history"><p>A little space for<br>your next big idea.</p></div>
+  <div class="sidebar-bottom"><button class="workspace-card" data-open="systems"><span class="workspace-icon"><svg><use href="#i-chip"/></svg></span><span>Forge<small>Your local workspace</small></span><span class="tiny-chevron">↗</span></button><div class="profile"><span class="avatar">BM</span><span>Commander<small>Personal workspace</small></span><button class="icon-button" data-open="appearance" aria-label="Appearance settings"><svg><use href="#i-sliders"/></svg></button></div></div>
+</aside>
+<main>
+  <header class="topbar"><div><button id="menu" class="icon-button mobile-menu" aria-label="Open navigation" aria-expanded="false"><svg><use href="#i-menu"/></svg></button><span id="conversation-title">New conversation</span></div><div class="topbar-right"><span class="workspace-label"><svg><use href="#i-chip"/></svg>Local workspace</span><button class="connection-pill" data-open="systems"><span></span>Connect ECHO<svg><use href="#i-arrow"/></svg></button></div></header>
+  <section class="workspace-body" aria-label="ECHO Prime workspace">
+    <div class="scene" id="scene">
+      <div class="scene-ambient"></div><div class="orb-shadow"></div>
+      <svg class="connections" viewBox="0 0 1060 420" preserveAspectRatio="none" aria-hidden="true"><path d="M185 102 Q355 115 450 176M875 102Q705 115 610 176M180 242Q330 252 430 216M880 242Q730 252 630 216M280 350Q380 346 466 275M780 350Q680 346 594 275"/></svg>
+      <button class="system-node node-forge" data-system="FORGE"><span class="node-top"><span class="node-led"></span>FORGE</span><small>Local intelligence</small></button>
+      <button class="system-node node-swarm" data-system="SWARM"><span class="node-top"><span class="node-led violet"></span>SWARM</span><small>Connected minds</small></button>
+      <button class="system-node node-memory" data-system="MEMORY"><span class="node-top"><span class="node-led cyan"></span>MEMORY</span><small>Continuity, preserved</small></button>
+      <button class="system-node node-creative" data-system="CREATIVE"><span class="node-top"><span class="node-led rose"></span>CREATIVE</span><small>Imagine anything</small></button>
+      <button class="system-node node-ecf" data-system="ECF"><span class="node-top"><span class="node-led"></span>ECF</span><small>Your connected world</small></button>
+      <button class="system-node node-agents" data-system="AGENTS"><span class="node-top"><span class="node-led amber"></span>AGENTS</span><small>Ideas into action</small></button>
+      <div class="orb-stage" id="orb-stage"><canvas id="echo-orb" aria-label="Animated ECHO energy sphere with emerald, cyan and violet light" role="img"></canvas><div class="orb-fallback" id="orb-fallback" hidden></div><div class="orb-wordmark" aria-hidden="true"><span>E C H O</span><small>O M E G A&nbsp;&nbsp; P R I M E</small></div></div>
+      <button class="orb-control" data-open="appearance" title="Customize the orb" aria-label="Customize the orb"><svg><use href="#i-sliders"/></svg></button>
+    </div>
+    <div class="welcome" id="welcome"><div class="eyebrow"><span></span>AWAITING YOUR COMMAND</div><h1>What shall we create,<br class="mobile-break"> <em>Commander?</em></h1><p>Your intelligence. Your tools. <span>One connected workspace.</span></p><div class="suggestions"><button data-prompt="Help me build something useful."><svg><use href="#i-code"/></svg>Write some code<span>↗</span></button><button data-prompt="Help me work through an idea."><svg><use href="#i-spark"/></svg>Work through an idea<span>↗</span></button><button data-prompt="I have a question for Echo."><svg><use href="#i-chat"/></svg>Ask a question<span>↗</span></button></div></div>
+    <div class="draft-notice" id="draft-notice" hidden></div>
+    <div class="composer-wrap"><div class="composer-toolbar"><div class="mode-tabs" role="tablist" aria-label="Creation mode"><button class="selected" role="tab" aria-selected="true" data-mode="Chat">Chat</button><button role="tab" aria-selected="false" data-mode="Image">Image</button><button role="tab" aria-selected="false" data-mode="Music">Music</button><button role="tab" aria-selected="false" data-mode="Sound FX">Sound FX</button><button role="tab" aria-selected="false" data-mode="Voice">Voice</button></div><button class="quiet-button" data-open="systems"><span class="status-dot"></span>Connect Echo systems</button></div>
+      <form id="composer" class="composer"><label class="sr-only" for="prompt">Message Echo Prime</label><textarea id="prompt" maxlength="12000" rows="2" placeholder="Message Echo Prime…"></textarea><div class="composer-bottom"><span class="persona"><svg><use href="#i-spark"/></svg>Echo Prime persona</span><div class="send-actions"><button type="button" class="icon-button" id="voice-button" aria-label="Voice connection"><svg><use href="#i-mic"/></svg></button><button type="submit" class="send">Send<svg><use href="#i-arrow"/></svg></button></div></div></form>
+      <div class="composer-caption"><span><svg><use href="#i-shield"/></svg>Drafts stay on this device</span><span class="keyboard-hint">Enter to send <i>·</i> Shift + Enter for a new line</span></div>
+    </div>
+  </section>
+</main>
+<dialog id="appearance-dialog" class="panel-dialog"><div class="dialog-title"><div><span class="eyebrow">MAKE IT YOURS</span><h2>Living light.</h2></div><button class="icon-button close-dialog" aria-label="Close appearance"><svg><use href="#i-close"/></svg></button></div><p class="dialog-description">Give ECHO a different kind of energy.</p><label class="control-label">Light spectrum</label><div class="palettes"><button data-palette="prism" class="palette selected"><span class="palette-ball prism"></span>Prism<small>Emerald · cyan · violet</small></button><button data-palette="emerald" class="palette"><span class="palette-ball emerald"></span>Emerald<small>Signature ECHO green</small></button><button data-palette="aurora" class="palette"><span class="palette-ball aurora"></span>Aurora<small>Violet · rose · ice</small></button></div><div class="setting-row"><div>Animation<small>Fluid motion and orbital particles</small></div><button id="motion-toggle" class="switch" role="switch" aria-checked="true" aria-label="Orb animation"><span></span></button></div><div class="setting-row"><div>Graphics<small>Adaptive keeps your workspace responsive</small></div><select id="quality" aria-label="Graphics quality"><option value="adaptive">Adaptive</option><option value="high">High detail</option><option value="quiet">Quiet</option></select></div><div class="appearance-note"><svg><use href="#i-spark"/></svg>Move your pointer around the orb to shift the light.</div></dialog>
+<dialog id="systems-dialog" class="panel-dialog systems-dialog"><div class="dialog-title"><div><span class="eyebrow">ONE CONNECTED WORKSPACE</span><h2>Echo systems</h2></div><button class="icon-button close-dialog" aria-label="Close systems"><svg><use href="#i-close"/></svg></button></div><p class="dialog-description">Your workspace is ready. Connect ECHO to bring its systems online.</p><div class="systems-list" id="systems-list"></div><p class="connection-note">This interface does not grant access or start services. Live connections require the authorized ECHO host.</p></dialog>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script src="orb.js"></script><script src="app.js"></script>
+</body></html>
