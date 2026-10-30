@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { debuglog } from 'node:util';
 import { redact } from '../code/workspace.js';
+const debugOwnerResponse=debuglog('echo-prime');
 export type Json=Record<string,unknown>;
 export interface Tool {name:string;description?:string;inputSchema:Json}
 export interface McpConnection {listTools():Promise<Tool[]>;call(name:string,args:Json):Promise<unknown>}
@@ -40,7 +42,28 @@ export function unwrap(value:unknown):unknown {
   }
   if(v.sdk_result){v=object(v.sdk_result);continue;}
   if(v.status==='error'||v.status==='failed')failure(v);
-  if(typeof v.status_code==='number'){if(v.status_code<200||v.status_code>=300)failure(v);v=object(v.body);continue;}
+  if(typeof v.status_code==='number'){
+   if(v.status_code<200||v.status_code>=300)failure(v);
+   let body:unknown=v.body;
+   if(typeof body==='string'){
+    const bytes=Buffer.byteLength(body);
+    if(bytes>1048576){
+     debugOwnerResponse('%j',{event:'prime_owner_body_refused',category:'size_limit',bytes});
+     throw new Refused('Payload exceeds bounded limit');
+    }
+    try{body=JSON.parse(body);}
+    catch{
+     debugOwnerResponse('%j',{event:'prime_owner_body_refused',category:'malformed_json'});
+     throw new Refused('Unrecognized HTTP response body');
+    }
+    debugOwnerResponse('%j',{event:'prime_owner_body_decoded',bytes});
+   }
+   if(body===null||typeof body!=='object'||Array.isArray(body)){
+    debugOwnerResponse('%j',{event:'prime_owner_body_refused',category:'non_object'});
+    throw new Refused('Unrecognized HTTP response body');
+   }
+   v=body as Json;continue;
+  }
   if(v.result&&(v.run_id||v.status==='ok'||object(v.result).status_code)){v=object(v.result);continue;}
   return v;
  }
