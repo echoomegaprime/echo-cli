@@ -21,7 +21,7 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
   const path=new URL(req.url??'/',url).pathname;
   if(path.startsWith('/api/')){
    const supplied=(req.headers.cookie??'').split(';').map(c=>c.trim()).find(c=>c.startsWith('echo_prime='))?.slice(11)??'';
-   const allowed=supplied.length===token.length&&timingSafeEqual(Buffer.from(supplied),Buffer.from(token));
+   const allowed=/^[0-9a-f]{64}$/.test(supplied)&&timingSafeEqual(Buffer.from(supplied),Buffer.from(token));
    if(!allowed||req.headers['x-prime-request']!=='1'||req.headers['sec-fetch-site']==='cross-site'||(req.method==='POST'&&req.headers.origin!==url)){send(403,{error:'Same-origin Prime session required'});return;}
    if(active>=8){send(429,{error:'Too many requests'});return;}active++;
    const abort=new AbortController();const disconnected=()=>{if(!res.writableEnded)abort.abort();};res.once('close',disconnected);
