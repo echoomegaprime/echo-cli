@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { debuglog } from 'node:util';
 import { redact } from '../code/workspace.js';
+import type {SharedChat} from './chat.js';
 const debugOwnerResponse=debuglog('echo-prime');
 export type Json=Record<string,unknown>;
 export interface Tool {name:string;description?:string;inputSchema:Json}
@@ -13,7 +14,7 @@ export interface SdkBroker {
 }
 export interface PrimeRequest {target:'sdk'|'esh';name:string;arguments:Json}
 export interface PrimeOptions {
- capabilities:Capability[];sdk?:SdkBroker;esh?:McpConnection;
+ capabilities:Capability[];sdk?:SdkBroker;esh?:McpConnection;chat?:SharedChat;
  /** Existing host approval, never supplied by model output or the browser. */
  approveEsh?:(request:PrimeRequest,digest:string)=>Promise<boolean>;
 }
@@ -81,6 +82,10 @@ export class PrimeHub {
  private catalog:Map<string,Capability>;private tickets=new Map<string,Ticket>();private tools:Tool[]=[];
  constructor(private options:PrimeOptions){this.catalog=new Map(options.capabilities.map(c=>[c.id,{...c}]));}
  capabilities(){return [...this.catalog.values()];}
+ async chat(input:unknown,signal?:AbortSignal){
+  if(!this.options.chat)throw new Refused('Shared chat host not connected; owner admission is required');
+  return this.options.chat.submit(input,signal);
+ }
  async refresh(query:string){
   if(!this.options.sdk)throw new Refused('SDK host not connected');
   if(typeof query!=='string'||!query.trim()||query.length>150)throw new Refused('Enter a bounded search');
@@ -100,7 +105,7 @@ export class PrimeHub {
    esh.detail='Policy: '+String(s.policy_source??'unknown')+'; mode: '+String(s.policy_mode??'unknown');
    esh.version=s.version;esh.ledgerVerified=object(s.ledger).ok===true;esh.tools=this.tools;
   }catch(e){this.tools=[];esh.state=e instanceof Refused?'blocked':'unavailable';esh.detail=e instanceof Refused?e.message:'ESH read failed; availability unknown';}}
-  return {observedAt:new Date().toISOString(),esh,sdk:{state:this.options.sdk?'attached':'disconnected',detail:this.options.sdk?'Authenticated host attached; owner authorization still applies':'Authenticated SDK host not connected'},capabilities:this.capabilities()};
+  return {observedAt:new Date().toISOString(),esh,chat:this.options.chat?.status()??{state:'disconnected',detail:'Shared chat host not connected; owner admission is required'},sdk:{state:this.options.sdk?'attached':'disconnected',detail:this.options.sdk?'Authenticated host attached; owner authorization still applies':'Authenticated SDK host not connected'},capabilities:this.capabilities()};
  }
  async prepare(input:PrimeRequest){
   limited(input);const request=JSON.parse(JSON.stringify(input)) as PrimeRequest;

@@ -4,7 +4,7 @@ import {join} from 'node:path';
 import {randomBytes,timingSafeEqual} from 'node:crypto';
 import {PrimeHub,object,type PrimeRequest} from './hub.js';
 import {redact} from '../code/workspace.js';
-const assets:Record<string,string>={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/orb.js':'orb.js','/app.js':'app.js','/integrations.js':'integrations.js','/catalog.js':'catalog.js'};
+const assets:Record<string,string>={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/orb.js':'orb.js','/app.js':'app.js','/chat.js':'chat.js','/integrations.js':'integrations.js','/catalog.js':'catalog.js'};
 async function body(req:IncomingMessage){
  let size=0;const chunks:Buffer[]=[];
  for await(const part of req){size+=part.length;if(size>131072)throw new Error('Request exceeds 128 KiB');chunks.push(part);}
@@ -24,6 +24,7 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
    const allowed=supplied.length===token.length&&timingSafeEqual(Buffer.from(supplied),Buffer.from(token));
    if(!allowed||req.headers['x-prime-request']!=='1'||req.headers['sec-fetch-site']==='cross-site'||(req.method==='POST'&&req.headers.origin!==url)){send(403,{error:'Same-origin Prime session required'});return;}
    if(active>=8){send(429,{error:'Too many requests'});return;}active++;
+   const abort=new AbortController();const disconnected=()=>{if(!res.writableEnded)abort.abort();};res.once('close',disconnected);
    try{
     if(path==='/api/status'&&req.method==='GET'){send(200,await hub.status());return;}
     if(req.method!=='POST'||!req.headers['content-type']?.startsWith('application/json')){send(405,{error:'JSON POST required'});return;}
@@ -31,9 +32,10 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     if(path==='/api/search')send(200,{capabilities:await hub.refresh(String(data.query??''))});
     else if(path==='/api/prepare')send(200,await hub.prepare(data as unknown as PrimeRequest));
     else if(path==='/api/execute')send(200,await hub.execute(String(data.id??''),String(data.digest??'')));
+    else if(path==='/api/chat')send(200,await hub.chat(data,abort.signal));
     else send(404,{error:'Unknown route'});
    }catch(e){send(400,{error:redact(e instanceof Error?e.message:'Request failed').slice(0,600)});}
-   finally{active--;}
+   finally{res.removeListener('close',disconnected);active--;}
    return;
   }
   if(req.method!=='GET'||!assets[path]){send(404,{error:'Not found'});return;}
