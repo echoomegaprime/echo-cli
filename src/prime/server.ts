@@ -4,7 +4,7 @@ import {join} from 'node:path';
 import {randomBytes,timingSafeEqual} from 'node:crypto';
 import {PrimeHub,object,type PrimeRequest} from './hub.js';
 import {redact} from '../code/workspace.js';
-const assets:Record<string,string>={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/orb.js':'orb.js','/app.js':'app.js','/chat.js':'chat.js','/integrations.js':'integrations.js','/catalog.js':'catalog.js'};
+const assets:Record<string,string>={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/orb.js':'orb.js','/app.js':'app.js','/chat.js':'chat.js','/integrations.js':'integrations.js','/catalog.js':'catalog.js','/steward.js':'steward.js'};
 async function body(req:IncomingMessage){
  let size=0;const chunks:Buffer[]=[];
  for await(const part of req){size+=part.length;if(size>131072)throw new Error('Request exceeds 128 KiB');chunks.push(part);}
@@ -27,12 +27,14 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
    const abort=new AbortController();const disconnected=()=>{if(!res.writableEnded)abort.abort();};res.once('close',disconnected);
    try{
     if(path==='/api/status'&&req.method==='GET'){send(200,await hub.status());return;}
+    if(path==='/api/steward/status'&&req.method==='GET'){send(200,await hub.stewardStatus());return;}
     if(req.method!=='POST'||!req.headers['content-type']?.startsWith('application/json')){send(405,{error:'JSON POST required'});return;}
     const data=await body(req);
     if(path==='/api/search')send(200,{capabilities:await hub.refresh(String(data.query??''))});
     else if(path==='/api/prepare')send(200,await hub.prepare(data as unknown as PrimeRequest));
     else if(path==='/api/execute')send(200,await hub.execute(String(data.id??''),String(data.digest??'')));
     else if(path==='/api/chat')send(200,await hub.chat(data,abort.signal));
+    else if(path==='/api/steward/ask')send(200,await hub.stewardAsk(data));
     else send(404,{error:'Unknown route'});
    }catch(e){send(400,{error:redact(e instanceof Error?e.message:'Request failed').slice(0,600)});}
    finally{res.removeListener('close',disconnected);active--;}

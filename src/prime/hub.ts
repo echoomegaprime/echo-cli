@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { debuglog } from 'node:util';
 import { redact } from '../code/workspace.js';
 import type {SharedChat} from './chat.js';
+import {disconnectedSteward,type StewardOwner} from './steward.js';
 const debugOwnerResponse=debuglog('echo-prime');
 export type Json=Record<string,unknown>;
 export interface Tool {name:string;description?:string;inputSchema:Json}
@@ -14,7 +15,7 @@ export interface SdkBroker {
 }
 export interface PrimeRequest {target:'sdk'|'esh';name:string;arguments:Json}
 export interface PrimeOptions {
- capabilities:Capability[];sdk?:SdkBroker;esh?:McpConnection;chat?:SharedChat;
+ capabilities:Capability[];sdk?:SdkBroker;esh?:McpConnection;chat?:SharedChat;steward?:StewardOwner;
  /** Existing host approval, never supplied by model output or the browser. */
  approveEsh?:(request:PrimeRequest,digest:string)=>Promise<boolean>;
 }
@@ -82,6 +83,11 @@ export class PrimeHub {
  private catalog:Map<string,Capability>;private tickets=new Map<string,Ticket>();private tools:Tool[]=[];
  constructor(private options:PrimeOptions){this.catalog=new Map(options.capabilities.map(c=>[c.id,{...c}]));}
  capabilities(){return [...this.catalog.values()];}
+ async stewardStatus(){return this.options.steward?bounded(()=>this.options.steward!.status()):disconnectedSteward();}
+ async stewardAsk(input:unknown){
+  if(!this.options.steward)throw new Refused('Node Steward owner not connected');
+  return bounded(()=>this.options.steward!.ask(input),60000);
+ }
  async chat(input:unknown,signal?:AbortSignal){
   if(!this.options.chat)throw new Refused('Shared chat host not connected; owner admission is required');
   return this.options.chat.submit(input,signal);
