@@ -5,9 +5,14 @@
  function reset(){generation++;controller?.abort();result.textContent='';}
  function lock(value){busy=value;submit.disabled=value||!available.length;for(const element of [select,mode,input,target,$('#refresh-steward')])element.disabled=value;}
  async function request(path,data,signal){
-  const response=await fetch('/api/steward/'+path,{method:data?'POST':'GET',credentials:'same-origin',headers:{'X-Prime-Request':'1',...(data?{'Content-Type':'application/json'}:{})},...(data?{body:JSON.stringify(data)}:{}),signal});
-  const value=await response.json();if(!response.ok)throw new Error(value.error||'Steward owner is unavailable.');return value;
+  const current=generation;let headers={};if(typeof window!=='undefined'&&window.EchoPrimeWorkspace)headers=await window.EchoPrimeWorkspace.ownerHeaders();
+  if(current!==generation||signal?.aborted)throw new Error('Account session changed.');
+  const response=await fetch('/api/steward/'+path,{method:data?'POST':'GET',credentials:'same-origin',headers:{'X-Prime-Request':'1',...headers,...(data?{'Content-Type':'application/json'}:{})},...(data?{body:JSON.stringify(data)}:{}),signal});
+  const value=await response.json();if(current!==generation||signal?.aborted)throw new Error('Account session changed.');
+  if(!response.ok){if(response.status===401||response.status===403){if(typeof window!=='undefined'&&window.EchoPrimeWorkspace?.invalidate)window.EchoPrimeWorkspace.invalidate();else clearPrivate();}throw new Error(value.error||'Steward owner is unavailable.');}return value;
  }
+ function clearPrivate(){reset();available=[];select.replaceChildren();$('#steward-nodes').replaceChildren();input.value='';target.value='';$('#steward-status').textContent='Fleet coverage has not been checked.';if(panel.open)panel.close();lock(false);}
+ if(typeof window!=='undefined')window.addEventListener('echo-account-changed',clearPrivate);
  function render(status){
   available=(status.nodes||[]).filter(node=>node.advisoryAvailable);
   const options=available.map(node=>{const option=document.createElement('option');option.value=node.id;option.textContent=node.id;return option;});select.replaceChildren(...options);select.value=available[0]?.id||'';
@@ -40,7 +45,7 @@
   reset();const revision=generation;controller=new AbortController();lock(true);result.textContent='Asking this node’s Steward…';
   try{
    const value=await request('ask',{node:select.value,mode:mode.value,text:input.value.trim(),...(mode.value==='proposal'?{target:target.value.trim()}:{})},controller.signal);
-   if(revision===generation)result.textContent=(value.text||JSON.stringify(value.proposal,null,2))+'\n\nAdvisory output. Verify the evidence before acting.';
+   if(revision===generation){result.textContent=(value.text||JSON.stringify(value.proposal,null,2))+'\n\nAdvisory output. Verify the evidence before acting.';console.debug('[echo.steward]',{schema_version:1,event:'steward_advice',outcome:'returned'});}
   }catch(error){if(revision===generation)result.textContent=error.message;}
   finally{if(revision===generation)lock(false);}
  });

@@ -1,31 +1,51 @@
 import {createServer,type IncomingMessage} from 'node:http';
 import {readFile} from 'node:fs/promises';
 import {join} from 'node:path';
-import {randomBytes,timingSafeEqual} from 'node:crypto';
+import {randomBytes,randomUUID,timingSafeEqual} from 'node:crypto';
+import {debuglog} from 'node:util';
 import {PrimeHub,object,type PrimeRequest} from './hub.js';
 import {redact} from '../code/workspace.js';
-const assets:Record<string,string>={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/orb.js':'orb.js','/app.js':'app.js','/chat.js':'chat.js','/integrations.js':'integrations.js','/catalog.js':'catalog.js','/steward.js':'steward.js'};
+import {WorkspaceBridge,WorkspaceHttpError,type WorkspaceConfig} from './workspace.js';
+const assets:Record<string,string>={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/orb.js':'orb.js','/app.js':'app.js','/chat.js':'chat.js','/integrations.js':'integrations.js','/catalog.js':'catalog.js','/steward.js':'steward.js','/workspace-client.js':'workspace-client.js','/workspace.js':'workspace.js'};
+const debug=debuglog('echo-prime-server');
+assets['/privacy']='privacy.html';assets['/privacy.css']='privacy.css';
 async function body(req:IncomingMessage){
  let size=0;const chunks:Buffer[]=[];
  for await(const part of req){size+=part.length;if(size>131072)throw new Error('Request exceeds 128 KiB');chunks.push(part);}
  return object(JSON.parse(Buffer.concat(chunks).toString('utf8')));
 }
-export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767){
+export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767,options:{workspace?:WorkspaceConfig}={}){
  if(!Number.isInteger(port)||port<0||port>65535)throw new Error('Invalid port');
+ const workspace=options.workspace?new WorkspaceBridge(options.workspace):undefined;
+ if(workspace)await workspace.validateBackend();
  const token=randomBytes(32).toString('hex');let url='',active=0;
  const server=createServer(async(req,res)=>{
   res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Cache-Control','no-store');res.setHeader('Referrer-Policy','no-referrer');
-  res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
+  res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'"+(workspace?' https://accounts.google.com/gsi/client':'')+"; style-src 'self' 'unsafe-inline'"+(workspace?' https://accounts.google.com/gsi/style':'')+"; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'"+(workspace?' https://accounts.google.com':'')+"; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"+(workspace?'; frame-src https://accounts.google.com':''));
+  res.setHeader('Permissions-Policy','microphone=(self), camera=()');
   const send=(status:number,value:unknown)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(value));};
   if(req.headers.host!==new URL(url).host){send(403,{error:'Unrecognized host'});return;}
   const path=new URL(req.url??'/',url).pathname;
   if(path.startsWith('/api/')){
+   const started=Date.now(),requestId=randomUUID();
+   const operation=path.startsWith('/api/workspace/')?'workspace':path.startsWith('/api/steward/')?'steward':path==='/api/session'?'session':'owner';
+   const record=(outcome:string)=>debug('%j',{schemaVersion:1,event:'prime_api_request',operation,requestId,status:res.statusCode,outcome,durationMs:Date.now()-started});
+   res.once('finish',()=>record('returned'));res.once('close',()=>{if(!res.writableEnded)record('disconnected');});
    const supplied=(req.headers.cookie??'').split(';').map(c=>c.trim()).find(c=>c.startsWith('echo_prime='))?.slice(11)??'';
    const allowed=/^[0-9a-f]{64}$/.test(supplied)&&timingSafeEqual(Buffer.from(supplied),Buffer.from(token));
-   if(!allowed||req.headers['x-prime-request']!=='1'||req.headers['sec-fetch-site']==='cross-site'||(req.method==='POST'&&req.headers.origin!==url)){send(403,{error:'Same-origin Prime session required'});return;}
+   if(!allowed||req.headers['x-prime-request']!=='1'||req.headers['sec-fetch-site']==='cross-site'||(req.headers.origin!==undefined&&req.headers.origin!==url)||(req.method==='POST'&&req.headers.origin!==url)){send(403,{error:'Same-origin Prime session required'});return;}
    if(active>=8){send(429,{error:'Too many requests'});return;}active++;
    const abort=new AbortController();const disconnected=()=>{if(!res.writableEnded)abort.abort();};res.once('close',disconnected);
    try{
+    if(path==='/api/session'&&req.method==='GET'){
+     const session=workspace?await workspace.session(req,abort.signal):{authenticated:false,user:null,csrf:null};
+     send(200,{workspaceConfigured:!!workspace,...session,ownerAccess:workspace?.ownerAccess(session)??false});return;
+    }
+    if(path.startsWith('/api/workspace/')){
+     if(!workspace){send(503,{error:'Authenticated Workspace is not configured'});return;}
+     await workspace.handle(req,res,new URL(req.url??'/',url),abort.signal);return;
+    }
+    if(workspace)await workspace.requireOwner(req,abort.signal);
     if(path==='/api/status'&&req.method==='GET'){send(200,await hub.status());return;}
     if(path==='/api/steward/status'&&req.method==='GET'){send(200,await hub.stewardStatus());return;}
     if(req.method!=='POST'||!req.headers['content-type']?.startsWith('application/json')){send(405,{error:'JSON POST required'});return;}
@@ -36,7 +56,7 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     else if(path==='/api/chat')send(200,await hub.chat(data,abort.signal));
     else if(path==='/api/steward/ask')send(200,await hub.stewardAsk(data));
     else send(404,{error:'Unknown route'});
-   }catch(e){send(400,{error:redact(e instanceof Error?e.message:'Request failed').slice(0,600)});}
+   }catch(e){if(res.headersSent)res.destroy();else send(e instanceof WorkspaceHttpError?e.status:400,{error:redact(e instanceof Error?e.message:'Request failed').slice(0,600)});}
    finally{res.removeListener('close',disconnected);active--;}
    return;
   }

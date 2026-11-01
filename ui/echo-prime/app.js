@@ -4,10 +4,9 @@
   const storageKey='echo-prime-interface-v1';
   let saved={};try{saved=JSON.parse(localStorage.getItem(storageKey)||'{}');}catch{}
   if(!saved||typeof saved!=='object'||Array.isArray(saved))saved={};
-  let drafts=Array.isArray(saved.drafts)?saved.drafts.filter(d=>d&&typeof d.id==='string'&&typeof d.text==='string'&&d.text.length<=12000).slice(0,20):[];
   let palette=['prism','emerald','aurora'].includes(saved.palette)?saved.palette:'prism';
   let quality=['adaptive','high','quiet'].includes(saved.quality)?saved.quality:'adaptive';
-  let mode='Chat',toastTimer,activeDraft=null;
+  let mode='Chat',toastTimer,generation=0;
   const orb=window.EchoPrimeOrb.mount($('#echo-orb'),{
     onFallback(){ $('#echo-orb').hidden=true;$('#orb-fallback').hidden=false; },
     onMotionChange(value){motionUI(value);},
@@ -15,14 +14,21 @@
   orb.setPalette(palette);orb.setQuality(quality);if(saved.motion===false)orb.setMotion(false);
   motionUI(orb.motion!==false);
   $('#quality').value=quality;
-  function persist(){try{localStorage.setItem(storageKey,JSON.stringify({drafts,palette,quality,motion:orb.motion}));return true;}catch{return false;}}
+  // Persist appearance only. Legacy unscoped drafts are deliberately erased on
+  // startup before admission or history rendering can expose another account.
+  function persist(){try{localStorage.setItem(storageKey,JSON.stringify({palette,quality,motion:orb.motion}));return true;}catch{return false;}}
+  persist();saved={};
   function toast(text){clearTimeout(toastTimer);$('#toast').textContent=text;$('#toast').classList.add('visible');toastTimer=setTimeout(()=>$('#toast').classList.remove('visible'),4200);}
   const narrow=matchMedia('(max-width:800px)');
   function menu(open){const shown=narrow.matches&&open;$('#sidebar').classList.toggle('open',shown);$('#sidebar').inert=narrow.matches&&!shown;$('main').inert=shown;$('#scrim').classList.toggle('visible',shown);$('#menu').setAttribute('aria-expanded',String(shown));}
   narrow.addEventListener('change',()=>menu(false));menu(false);
   function openPanel(name){menu(false);const dialog=name==='appearance'?$('#appearance-dialog'):$('#systems-dialog');if(!dialog.open)dialog.showModal();}
-  function newChat(){window.EchoPrimeChat.reset();activeDraft=null;$('#prompt').value='';$('#conversation-title').textContent='New conversation';$('#draft-notice').hidden=true;menu(false);$('#prompt').focus();}
-  function renderHistory(){const target=$('#history');target.replaceChildren();if(!drafts.length){const p=document.createElement('p');p.textContent='A little space for your next big idea.';target.append(p);return;}for(const draft of drafts){const b=document.createElement('button');b.className='history-item';b.textContent=draft.text.slice(0,70);b.title=draft.text.slice(0,120);b.addEventListener('click',()=>{window.EchoPrimeChat.reset();activeDraft=draft.id;$('#prompt').value=draft.text;$('#conversation-title').textContent=draft.text.slice(0,38);$('#draft-notice').hidden=true;menu(false);$('#prompt').focus();});target.append(b);}}
+  async function newChat(){
+    generation++;await window.EchoPrimeWorkspace?.ready;menu(false);
+    try{if(await window.EchoPrimeWorkspace?.newChat())return;}catch{toast('Conversation could not be created. No automatic retry was made.');return;}
+    window.EchoPrimeChat.reset();$('#prompt').value='';$('#conversation-title').textContent='New conversation';$('#draft-notice').hidden=true;$('#prompt').focus();
+  }
+  window.addEventListener('echo-account-changed',()=>{generation++;clearTimeout(toastTimer);$('#toast').textContent='';$('#toast').classList.remove('visible');$('#prompt').value='';$('#draft-notice').textContent='';$('#draft-notice').hidden=true;$('#history').replaceChildren();menu(false);});
   const systems=[
     ['FORGE','Local intelligence','i-chip','Awaiting connection'],
     ['CONTINUITY','Continuity Fabric memory','i-memory','Access required'],
@@ -52,15 +58,25 @@
   $('#scrim').addEventListener('click',()=>menu(false));
   $('#new-chat').addEventListener('click',newChat);
   $('.brand').addEventListener('click',e=>{e.preventDefault();newChat();});
-  $('#clear-history').addEventListener('click',()=>{if(!drafts.length){toast('No saved drafts to clear.');return;}if(confirm('Clear the drafts saved by this interface on this device?')){drafts=[];persist();renderHistory();newChat();}});
+  $('#clear-history').hidden=true;
   $$('[data-prompt]').forEach(b=>b.addEventListener('click',()=>{$('#prompt').value=b.dataset.prompt;$('#prompt').focus();}));
   const placeholders={Chat:'Message Echo Prime…',Image:'Describe what you imagine…',Video:'Describe the scene and motion…',Music:'Describe the music you hear…','Sound FX':'Describe the sound you need…',Voice:'What would you like Echo to say?'};
   $$('.mode-tabs button').forEach(b=>b.addEventListener('click',()=>{mode=b.dataset.mode;$$('.mode-tabs button').forEach(t=>{const selected=t===b;t.classList.toggle('selected',selected);t.setAttribute('aria-selected',String(selected));});$('#prompt').placeholder=placeholders[mode];$('#prompt').focus();}));
-  $('#voice-button').addEventListener('click',()=>{openPanel('systems');toast('Connect the ECHO host to enable voice.');});
-  $('#composer').addEventListener('submit',async e=>{e.preventDefault();const text=$('#prompt').value.trim();if(mode!=='Chat'){window.EchoPrimeStudio?.open(({Image:'image',Video:'video',Music:'music','Sound FX':'sound',Voice:'voice'})[mode],text);return;}if(!text){$('#prompt').focus();return;}const id=activeDraft||(crypto.randomUUID?.()||Array.from(crypto.getRandomValues(new Uint8Array(16)),n=>n.toString(16).padStart(2,'0')).join(''));drafts=[{id,text,mode,createdAt:new Date().toISOString()},...drafts.filter(d=>d.id!==id)].slice(0,20);activeDraft=id;const stored=persist();renderHistory();$('#conversation-title').textContent=text.slice(0,38);const result=await window.EchoPrimeChat.send(text);if(result.cancelled)return;$('#draft-notice').textContent=result.detail+(stored?'':' Browser storage is unavailable.');$('#draft-notice').hidden=false;if(result.sent&&$('#prompt').value.trim()===text)$('#prompt').value='';toast(result.sent?'Answer received.':result.detail);});
+  $('#voice-button').addEventListener('click',async()=>{await window.EchoPrimeWorkspace?.ready;if(window.EchoPrimeWorkspace?.enabled)return;openPanel('systems');toast('Connect the ECHO host to enable voice.');});
+  $('#composer').addEventListener('submit',async e=>{
+    e.preventDefault();const current=generation,text=$('#prompt').value.trim();
+    await window.EchoPrimeWorkspace?.ready;if(current!==generation)return;
+    if(mode!=='Chat'){window.EchoPrimeStudio?.open(({Image:'image',Video:'video',Music:'music','Sound FX':'sound',Voice:'voice'})[mode],text);return;}
+    if(!text){$('#prompt').focus();return;}
+    let result;
+    try{result=await window.EchoPrimeWorkspace?.send(text);if(!result?.handled)result=await window.EchoPrimeChat.send(text);}
+    catch{result={sent:false,detail:'Connection unavailable. No automatic retry was made.'};}
+    if(current!==generation||result.cancelled)return;
+    $('#draft-notice').textContent=result.detail;$('#draft-notice').hidden=false;if(result.sent&&$('#prompt').value.trim()===text)$('#prompt').value='';toast(result.sent?'Answer received.':result.detail);
+  });
   $('#prompt').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();$('#composer').requestSubmit();}});
   document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();newChat();}if(e.key==='Escape'&&$('#sidebar').classList.contains('open')){menu(false);$('#menu').focus();}});
   if(!navigator.userAgent.includes('Mac'))$('kbd').textContent='Ctrl K';
   window.addEventListener('pagehide',event=>{if(!event.persisted)orb.destroy();});
-  paletteUI();renderHistory();
+  paletteUI();
 })();

@@ -10,10 +10,13 @@
   $('#chat-log').append(article);$('#chat-log').hidden=false;$('#welcome').hidden=true;article.scrollIntoView({block:'nearest'});
  }
  async function api(path,body,signal){
+  const current=generation;let headers={};if(window.EchoPrimeWorkspace)headers=await window.EchoPrimeWorkspace.ownerHeaders();
+  if(current!==generation||signal?.aborted)throw new Error('Account session changed.');
   const response=await fetch('/api/'+path,{method:body?'POST':'GET',credentials:'same-origin',
-   headers:{'x-prime-request':'1',...(body?{'content-type':'application/json'}:{})},
+   headers:{'x-prime-request':'1',...headers,...(body?{'content-type':'application/json'}:{})},
    ...(body?{body:JSON.stringify(body)}:{}),signal});
-  const data=await response.json();if(!response.ok)throw new Error(data.error||'Chat request failed');return data;
+   const data=await response.json();if(current!==generation||signal?.aborted)throw new Error('Account session changed.');
+   if(!response.ok){if(response.status===401||response.status===403){if(window.EchoPrimeWorkspace?.invalidate)window.EchoPrimeWorkspace.invalidate();else window.dispatchEvent(new Event('echo-account-changed'));}throw new Error(data.error||'Chat request failed');}return data;
  }
  window.EchoPrimeChat={
   reset(){generation++;active?.abort();active=null;sessionId=undefined;$('#chat-log').replaceChildren();$('#chat-log').hidden=true;$('#welcome').hidden=false;busy(false);},
@@ -26,8 +29,8 @@
     const status=await api('status',undefined,controller.signal);
     if(current!==generation)return {cancelled:true};
     if(controller.signal.aborted)throw new Error('Interrupted');
-    if(status.chat?.state!=='attached')return {sent:false,detail:status.chat?.detail||'Shared chat host is not connected. Your draft is saved.'};
-    if(status.chat.busy)return {sent:false,detail:'The host is finishing another turn. Your draft is saved.'};
+    if(status.chat?.state!=='attached')return {sent:false,detail:status.chat?.detail||'Shared chat host is not connected. The prompt remains in this tab.'};
+    if(status.chat.busy)return {sent:false,detail:'The host is finishing another turn. The prompt remains in this tab.'};
     line('user',text);submitted=true;
     const result=await api('chat',{requestId:crypto.randomUUID(),prompt:text,...(sessionId?{sessionId}:{})},controller.signal);
     if(current!==generation)return {cancelled:true};
@@ -36,16 +39,18 @@
     line('assistant',result.answer||'Turn ended without an answer.',
      (result.answerVerification==='unverified_model_text'?'Model text; verify claims. ':'Application result. ')+
      'Read-only · '+result.status+' · Session '+sessionId+(evidence?' · Sources: '+evidence:''));
+    console.debug('[echo.code]',{schema_version:1,event:'coding_turn',outcome:result.status==='completed'?'completed':'returned'});
     return {sent:result.status==='completed',detail:result.status==='completed'?'Answer received.':'Turn '+result.status+'. No automatic retry was made.'};
    }catch(error){
     if(current!==generation)return {cancelled:true};
     const detail=controller.signal.aborted?'Turn cancelled. The provider may still be finishing; no retry was made.':
-     (error instanceof Error?error.message:'Chat connection failed')+(submitted?' No automatic retry was made.':' Your draft is saved.');
+     (error instanceof Error?error.message:'Chat connection failed')+(submitted?' No automatic retry was made.':' The prompt remains in this tab.');
     if(submitted)line('assistant',detail,'Connection result');
     return {sent:false,detail};
    }finally{clearTimeout(timer);if(active===controller){active=null;busy(false);}}
   },
  };
  $('#stop-chat').addEventListener('click',()=>window.EchoPrimeChat.cancel());
+ window.addEventListener('echo-account-changed',()=>window.EchoPrimeChat.reset());
  window.addEventListener('pagehide',()=>active?.abort());
 })();
