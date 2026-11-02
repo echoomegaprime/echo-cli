@@ -4,7 +4,8 @@
   "description": "Echo Prime Technologies CLI — Query engines, search knowledge, manage doctrines, deploy workers",
   "type": "module",
   "bin": {
-    "echo": "./dist/index.js"
+    "echo": "./dist/index.js",
+    "echo-code": "./dist/code-main.js"
   },
   "scripts": {
     "build": "tsc",
@@ -31,16 +32,17 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "eslint": "^9.0.0",
-    "tsx": "^4.19.0",
+    "tsx": "^4.23.15",
     "typescript": "^5.5.0",
     "typescript-eslint": "^8.67.0",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.12"
   },
   "engines": {
     "node": ">=20.0.0"
   },
   "files": [
-    "dist/"
+    "dist/",
+    "ui/"
   ],
   "publishConfig": {
     "registry": "https://npm.pkg.github.com",
