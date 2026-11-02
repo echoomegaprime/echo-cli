@@ -14,9 +14,18 @@ async function body(req:IncomingMessage){
  for await(const part of req){size+=part.length;if(size>131072)throw new Error('Request exceeds 128 KiB');chunks.push(part);}
  return object(JSON.parse(Buffer.concat(chunks).toString('utf8')));
 }
-export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767,options:{workspace?:WorkspaceConfig}={}){
+export interface PrimeServerOptions {workspace?:WorkspaceConfig;publicOrigin?:string}
+function publicOrigin(value:string|undefined):string|undefined{
+ if(value===undefined)return undefined;
+ let origin:URL;try{origin=new URL(value);}catch{throw new Error('Invalid public HTTPS origin');}
+ if(origin.protocol!=='https:'||origin.username||origin.password||origin.port||origin.pathname!=='/'||origin.search||origin.hash||! /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i.test(origin.hostname)||origin.hostname.endsWith('.localhost'))throw new Error('Invalid public HTTPS origin');
+ return origin.origin;
+}
+export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767,options:PrimeServerOptions={}){
  if(!Number.isInteger(port)||port<0||port>65535)throw new Error('Invalid port');
- const workspace=options.workspace?new WorkspaceBridge(options.workspace):undefined;
+ const externalOrigin=publicOrigin(options.publicOrigin);
+ if(externalOrigin&&(!options.workspace||!options.workspace.ownerUid))throw new Error('Public origin requires an authenticated Workspace and pinned primary owner');
+ const workspace=options.workspace?new WorkspaceBridge(options.workspace,!!externalOrigin):undefined;
  if(workspace)await workspace.validateBackend();
  const token=randomBytes(32).toString('hex');let url='',active=0;
  const server=createServer(async(req,res)=>{
@@ -24,7 +33,8 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
   res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'"+(workspace?' https://accounts.google.com/gsi/client':'')+"; style-src 'self' 'unsafe-inline'"+(workspace?' https://accounts.google.com/gsi/style':'')+"; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'"+(workspace?' https://accounts.google.com':'')+"; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"+(workspace?'; frame-src https://accounts.google.com':''));
   res.setHeader('Permissions-Policy','microphone=(self), camera=()');
   const send=(status:number,value:unknown)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(value));};
-  if(req.headers.host!==new URL(url).host){send(403,{error:'Unrecognized host'});return;}
+  const expectedOrigin=externalOrigin??url;
+  if(req.headers.host!==new URL(expectedOrigin).host){send(403,{error:'Unrecognized host'});return;}
   const path=new URL(req.url??'/',url).pathname;
   if(path.startsWith('/api/')){
    const started=Date.now(),requestId=randomUUID();
@@ -33,7 +43,7 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
    res.once('finish',()=>record('returned'));res.once('close',()=>{if(!res.writableEnded)record('disconnected');});
    const supplied=(req.headers.cookie??'').split(';').map(c=>c.trim()).find(c=>c.startsWith('echo_prime='))?.slice(11)??'';
    const allowed=/^[0-9a-f]{64}$/.test(supplied)&&timingSafeEqual(Buffer.from(supplied),Buffer.from(token));
-   if(!allowed||req.headers['x-prime-request']!=='1'||req.headers['sec-fetch-site']==='cross-site'||(req.headers.origin!==undefined&&req.headers.origin!==url)||(req.method==='POST'&&req.headers.origin!==url)){send(403,{error:'Same-origin Prime session required'});return;}
+   if(!allowed||req.headers['x-prime-request']!=='1'||req.headers['sec-fetch-site']==='cross-site'||(req.headers.origin!==undefined&&req.headers.origin!==expectedOrigin)||(req.method==='POST'&&req.headers.origin!==expectedOrigin)){send(403,{error:'Same-origin Prime session required'});return;}
    if(active>=8){send(429,{error:'Too many requests'});return;}active++;
    const abort=new AbortController();const disconnected=()=>{if(!res.writableEnded)abort.abort();};res.once('close',disconnected);
    try{
@@ -63,7 +73,7 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
   if(req.method!=='GET'||!assets[path]){send(404,{error:'Not found'});return;}
   try{
    const data=await readFile(join(uiDirectory,assets[path]));
-   if(path==='/'||path==='/index.html')res.setHeader('Set-Cookie','echo_prime='+token+'; HttpOnly; SameSite=Strict; Path=/');
+   if(path==='/'||path==='/index.html')res.setHeader('Set-Cookie','echo_prime='+token+'; HttpOnly; SameSite=Strict; Path=/'+(externalOrigin?'; Secure':''));
    res.writeHead(200,{'Content-Type':path.endsWith('.js')?'text/javascript; charset=utf-8':path.endsWith('.css')?'text/css; charset=utf-8':'text/html; charset=utf-8'});res.end(data);
   }catch{send(404,{error:'Asset unavailable'});}
  });

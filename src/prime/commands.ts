@@ -7,7 +7,7 @@ import {sdkBroker,type SdkTools} from './sdk.js';
 import {startPrimeServer} from './server.js';
 import {connectSteward,type StewardOwner,type StewardTools} from './steward.js';
 import type {WorkspaceConfig} from './workspace.js';
-interface PrimeConfig {esh?:StdioConfig;sdk?:StdioConfig&{tools:SdkTools;fixedArguments?:Json};steward?:StdioConfig&{tools:StewardTools};workspace?:WorkspaceConfig}
+interface PrimeConfig {esh?:StdioConfig;sdk?:StdioConfig&{tools:SdkTools;fixedArguments?:Json};steward?:StdioConfig&{tools:StewardTools};workspace?:WorkspaceConfig;publicOrigin?:string}
 export function registerPrimeCommands(code:Command){
  code.command('prime').description('Open the local ECHO Prime interface with explicitly configured owner connections')
  .option('--config <file>','Reviewed local MCP connection configuration; never imported automatically')
@@ -28,8 +28,8 @@ export function registerPrimeCommands(code:Command){
     }catch{process.stderr.write(JSON.stringify({schemaVersion:1,event:'steward_owner_unavailable',category:'connection_or_contract'})+'\n');}
    }
    const hub=new PrimeHub({capabilities:snapshot.capabilities,esh,steward,sdk:sdk&&config.sdk?await sdkBroker(sdk,config.sdk.tools,config.sdk.fixedArguments):undefined});
-   const server=await startPrimeServer(hub,ui,Number(opts.port),{workspace:config.workspace});
-   process.stdout.write(JSON.stringify({url:server.url,esh:!!esh,sdk:!!sdk,steward:!!steward,scope:'local interactive host; no release or cloud deployment'})+'\n');
+   const server=await startPrimeServer(hub,ui,Number(opts.port),{workspace:config.workspace,publicOrigin:config.publicOrigin});
+   process.stdout.write(JSON.stringify({url:server.url,publicOrigin:config.publicOrigin??null,esh:!!esh,sdk:!!sdk,steward:!!steward,scope:'loopback host; public ingress requires configured TLS proxy and release evidence'})+'\n');
    const close=async()=>{await server.close();connections.forEach(c=>c.close());};
    process.once('SIGINT',()=>void close());process.once('SIGTERM',()=>void close());
   }catch(e){connections.forEach(c=>c.close());throw e;}

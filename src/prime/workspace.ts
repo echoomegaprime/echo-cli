@@ -86,7 +86,7 @@ function checkCsrf(req:IncomingMessage,expected:string){
  * cached user, SDK credential, caller tenant ID or arbitrary upstream URL. */
 export class WorkspaceBridge {
  readonly origin:string;readonly ownerUid?:string;
- constructor(config:WorkspaceConfig){
+ constructor(config:WorkspaceConfig,private readonly secureCookies=false){
   const url=new URL(config.baseUrl);
   if(url.protocol!=='http:'||!['127.0.0.1','[::1]'].includes(url.hostname)||url.username||url.password||url.pathname!=='/'||url.search||url.hash)throw new Error('Workspace requires a fixed loopback HTTP origin');
   if(config.ownerUid!==undefined&&(typeof config.ownerUid!=='string'||!/^[A-Za-z0-9_.:@+-]{1,200}$/.test(config.ownerUid)))throw new Error('Invalid configured Workspace owner identity');
@@ -165,7 +165,7 @@ export class WorkspaceBridge {
     if(!authWrites.has(pathname)||cookies.length!==1){await response.body?.cancel();throw new WorkspaceHttpError(502,'Unexpected account cookie');}
     const match=/^echo_workspace_session=([A-Za-z0-9_-]{32,128}|);/.exec(cookies[0]);
     if(!match||/;\s*domain=/i.test(cookies[0])){await response.body?.cancel();throw new WorkspaceHttpError(502,'Invalid account cookie');}
-    res.setHeader('Set-Cookie',`echo_workspace_session=${match[1]}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${match[1]?'28800':'0'}`);
+    res.setHeader('Set-Cookie',`echo_workspace_session=${match[1]}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${match[1]?'28800':'0'}${this.secureCookies?'; Secure':''}`);
    }
    res.statusCode=response.status;res.setHeader('Content-Type',contentType);res.setHeader('Cache-Control','no-store');
    if(!response.body){res.end();return;}

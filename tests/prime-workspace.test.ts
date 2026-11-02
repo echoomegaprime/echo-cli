@@ -1,4 +1,4 @@
-import {createServer} from 'node:http';
+import {createServer,request as httpRequest} from 'node:http';
 import {fileURLToPath} from 'node:url';
 import {randomBytes} from 'node:crypto';
 import {runInNewContext} from 'node:vm';
@@ -173,6 +173,7 @@ async function ownerFixture(authEnabled=true){
   }
   if(!account){json(401,{error:'Sign in required'});return;}
   if(req.method==='POST'&&req.headers['x-echo-csrf']!==`csrf-${account}`){json(403,{error:'Wrong CSRF'});return;}
+  if(url.pathname==='/api/auth/logout'){revoked.add(account);res.setHeader('set-cookie','echo_workspace_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');json(200,{ok:true});return;}
   if(url.pathname==='/api/auth/accounts'){json(200,{accounts:[{uid:'owner',role:'owner',status:'approved'}]});return;}
   if(url.pathname==='/api/auth/decide'){json(200,{ok:true});return;}
   if(url.pathname==='/api/state'){if(behavior.delayMs)await new Promise(resolve=>setTimeout(resolve,behavior.delayMs));json(200,{auth_enabled:true,tenant_isolation:account!==behavior.legacyOwnerUid,user:{uid:behavior.stateUid||account},csrf:behavior.stateCsrf||`csrf-${account}`,chats:[{id:`chat-${account}`,title:`Private ${account}`}],projects:[],library:[]});return;}
@@ -213,6 +214,39 @@ async function login(p:{url:string;cookie:string},account:string){
  return {...p,csrf:data.csrf,cookie:p.cookie+'; '+(response.headers.get('set-cookie')??'').split(';')[0]};
 }
 describe('canonical Workspace boundary in the existing Prime host',()=>{
+ it.each(['http://echoomegaprime.com','https://127.0.0.1','https://localhost','https://user@example.test','https://echoomegaprime.com/path','https://echoomegaprime.com?x=1','https://echoomegaprime.com#fragment','https://echoomegaprime.com:444'])('refuses unsafe public origin %s',async publicOrigin=>{
+  const upstream=await ownerFixture();
+  await expect(startPrimeServer(new PrimeHub({capabilities:[]}),ui,0,{workspace:{baseUrl:upstream.baseUrl,ownerUid:'owner'},publicOrigin})).rejects.toThrow(/origin/i);
+ });
+ it('refuses public mode without a configured authenticated backend and pinned primary owner',async()=>{
+  await expect(startPrimeServer(new PrimeHub({capabilities:[]}),ui,0,{publicOrigin:'https://echoomegaprime.com'})).rejects.toThrow(/authenticated|owner/i);
+  const upstream=await ownerFixture();
+  await expect(startPrimeServer(new PrimeHub({capabilities:[]}),ui,0,{workspace:{baseUrl:upstream.baseUrl},publicOrigin:'https://echoomegaprime.com'})).rejects.toThrow(/owner/i);
+ });
+ it('binds public Host and Origin explicitly, secures both cookies, and retains current tenant/owner admission behind the TLS proxy',async()=>{
+  const upstream=await ownerFixture(),publicOrigin='https://echoomegaprime.com';
+  const server=await startPrimeServer(new PrimeHub({capabilities:[]}),ui,0,{workspace:{baseUrl:upstream.baseUrl,ownerUid:'owner'},publicOrigin});cleanup.push(server.close);
+  const request=(path:string,extra:Record<string,string>={},body?:unknown)=>new Promise<{status:number;cookie:string;body:string}>((resolve,reject)=>{
+   const req=httpRequest(server.url+path,{method:body===undefined?'GET':'POST',headers:{host:'echoomegaprime.com','x-prime-request':'1',...(body===undefined?{}:{'content-type':'application/json'}),...extra}},res=>{
+    let text='';res.setEncoding('utf8');res.on('data',chunk=>{text+=chunk;});res.on('end',()=>resolve({status:res.statusCode!,cookie:res.headers['set-cookie']?.[0]??'',body:text}));
+   });req.on('error',reject);req.end(body===undefined?undefined:JSON.stringify(body));
+  });
+  const root=await request('/');expect(root.status).toBe(200);expect(root.cookie).toMatch(/; Secure(?:;|$)/);expect(root.cookie).toContain('HttpOnly');
+  const primeCookie=root.cookie.split(';')[0];
+  expect((await request('/api/session',{cookie:primeCookie})).status).toBe(200);
+  expect((await request('/api/session',{cookie:primeCookie,host:'www.echoomegaprime.com'})).status).toBe(403);
+  expect((await fetch(server.url)).status).toBe(403);
+  for(const origin of ['http://echoomegaprime.com','https://attacker.example',server.url])expect((await request('/api/workspace/auth/login',{cookie:primeCookie,origin,'x-echo-csrf':'login'},{account:'member'})).status).toBe(403);
+  const signedIn=await request('/api/workspace/auth/login',{cookie:primeCookie,origin:publicOrigin,'x-echo-csrf':'login'},{account:'member'});
+  expect(signedIn.status).toBe(200);expect(signedIn.cookie).toMatch(/; Secure(?:;|$)/);expect(signedIn.cookie).toContain('HttpOnly');
+  const cookie=primeCookie+'; '+signedIn.cookie.split(';')[0],csrf=(JSON.parse(signedIn.body) as {csrf:string}).csrf;
+  expect((await request('/api/workspace/state',{cookie,'x-echo-csrf':csrf})).status).toBe(200);
+  expect((await request('/api/workspace/state',{cookie,'x-echo-csrf':'csrf-owner'})).status).toBe(403);
+  expect((await request('/api/status',{cookie,'x-echo-csrf':csrf})).status).toBe(403);
+  const logout=await request('/api/workspace/auth/logout',{cookie,origin:publicOrigin,'x-echo-csrf':csrf},{});expect(logout.status).toBe(200);expect(logout.cookie).toContain('Max-Age=0');expect(logout.cookie).toMatch(/; Secure(?:;|$)/);
+  expect(JSON.parse((await request('/api/session',{cookie})).body)).toMatchObject({authenticated:false,user:null,csrf:null});
+  expect(upstream.calls.every(c=>!c.cookie.includes('echo_prime=')&&!c.authorization)).toBe(true);
+ });
  it.each(['demoted owner','configured UID mismatch'])('refuses unisolated legacy-owner data and model tools for %s',async(kind)=>{
   const upstream=await ownerFixture(),p=await login(await prime(upstream.baseUrl,kind==='configured UID mismatch'?'admin':'owner'),'owner');
   if(kind==='demoted owner')upstream.roles.set('owner','member');
