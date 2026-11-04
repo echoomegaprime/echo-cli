@@ -32,7 +32,7 @@
     if(status.chat?.state!=='attached')return {sent:false,detail:status.chat?.detail||'Shared chat host is not connected. The prompt remains in this tab.'};
     if(status.chat.busy)return {sent:false,detail:'The host is finishing another turn. The prompt remains in this tab.'};
     line('user',text);submitted=true;
-    const result=await api('chat',{requestId:crypto.randomUUID(),prompt:text,...(sessionId?{sessionId}:{}),...(window.EchoPrimeModels?.provider()?{provider:window.EchoPrimeModels.provider()}:{})},controller.signal);
+    const result=await api('chat',{requestId:crypto.randomUUID(),prompt:text,...(sessionId?{sessionId}:{}),...(window.EchoPrimeModels?.provider()?{provider:window.EchoPrimeModels.provider()}:{}),...(window.EchoPrimeModels?.model?.()?{model:window.EchoPrimeModels.model()}:{})},controller.signal);
     if(current!==generation)return {cancelled:true};
     sessionId=result.sessionId;
     const evidence=Array.isArray(result.evidence)?result.evidence.map(e=>e.path+' ['+e.sha256+']').join('; '):'';

@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { SessionStore, previewProposal } from './sessions.js';
 import { Workspace } from './workspace.js';
 import { LocalModel } from './model.js';
-import { DEFAULT_MODELS, MODEL_IDS, buildModel, sessionModelName } from './model-factory.js';
+import { DEFAULT_MODELS, MODEL_IDS, ModelRouter, buildModel, sessionModelName } from './model-factory.js';
 import type { ModelId } from './model-factory.js';
 import { runTurn } from './agent.js';
 import type { TaskMode } from './agent.js';
@@ -22,10 +22,12 @@ import type { RpcRequest } from './mcp.js';
 
 interface Options { workspace: string; stateDir: string; model: string; endpoint: string; steps: string; session?: string; mode: TaskMode; provider?: ModelId }
 /** The one place the CLI builds its Model: qwen = local Ollama (flags as before), claude/gpt/grok = that vendor's own CLI, no fallback. */
-function selectModel(opts: Options, command: Command) {
+async function selectModel(opts: Options, command: Command) {
   const id = opts.provider ?? 'qwen';
   if (id === 'qwen') return { model: new LocalModel(opts.endpoint, opts.model), name: opts.model };
   const config = { ...DEFAULT_MODELS, cli: command.getOptionValueSource('model') === 'cli' ? { [id]: { model: opts.model } } : {} };
+  // Argon (Gemini via agy): an explicit --model must be one agy lists right now; unknown ids are refused, never defaulted.
+  if (id === 'argon' && config.cli.argon?.model) await new ModelRouter(config).variant('argon', config.cli.argon.model);
   return { model: buildModel(id, config), name: sessionModelName(id, config) };
 }
 const providerOption = () => new Option('--provider <id>', 'Model provider: qwen (local Ollama) or a subscription CLI; never falls back').choices([...MODEL_IDS]).default('qwen');
@@ -77,7 +79,7 @@ export function registerCodeCommands(code: Command, integrations: { continuityIn
     .option('--session <id>', 'Resume this existing session')
     .addOption(providerOption())
     .action(async (prompt: string, opts: Options, command: Command) => {
-      const { store, workspace } = context(opts), { model, name } = selectModel(opts, command);
+      const { store, workspace } = context(opts), { model, name } = await selectModel(opts, command);
       const session = opts.session ? store.get(opts.session) : store.create(workspace.root, name);
       if (session.model !== name) throw new Error('Resume model mismatch; select the original model');
       const abort = new AbortController(); const onInterrupt = () => abort.abort(); process.on('SIGINT', onInterrupt);
@@ -96,7 +98,7 @@ export function registerCodeCommands(code: Command, integrations: { continuityIn
     .addOption(providerOption())
     .action(async (opts: Options, command: Command) => {
       if (!process.stdin.isTTY) throw new Error('Interactive chat needs a terminal; use run for scripts');
-      const { workspace, store } = context(opts), { model, name } = selectModel(opts, command);
+      const { workspace, store } = context(opts), { model, name } = await selectModel(opts, command);
       const s = opts.session ? store.get(opts.session) : store.create(workspace.root, name);
       if (s.workspace !== workspace.root || s.model !== name) throw new Error('Resume workspace/model mismatch');
       const prompt = createPrompt({ input: process.stdin, output: process.stdout });

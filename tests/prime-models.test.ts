@@ -100,6 +100,53 @@ describe('Prime chat with a selected provider', () => {
   });
 });
 
+const AGY_LIST = ['Fetching available models...', 'gemini-4-argon-medium\tGemini 4 Argon (Medium)', 'gemini-4-argon-high\tGemini 4 Argon (High)', 'claude-opus-5-5-low\tClaude Opus 5.5 (Low)'].join('\n');
+function agy() {
+  const calls: { cmd: string; args: string[] }[] = [];
+  const run: Runner = async (cmd, args) => {
+    calls.push({ cmd, args });
+    if (cmd !== 'agy') return ok();
+    return args[0] === 'models' ? ok(AGY_LIST) : args[0] === '--version' ? ok('agy 1') : ok(JSON.stringify({ status: 'SUCCESS', response: final('gemini answer') }));
+  };
+  return { calls, run, turns: () => calls.filter(c => c.args.includes('--output-format')) };
+}
+describe('Prime chat with a Gemini variant on Argon', () => {
+  it('validates the model against what agy lists, passes it through and says it is only the requested model', async () => {
+    const a = agy(), s = await setup(a.run);
+    const r = await s.chat.submit(req({ provider: 'argon', model: 'gemini-4-argon-high' }));
+    expect(r).toMatchObject({ status: 'completed', answer: 'gemini answer', model: { id: 'argon', requested: 'gemini-4-argon-high', model: null, reported: false, answered: true } });
+    expect(a.turns()).toHaveLength(1);
+    expect(a.turns()[0].args).toEqual(expect.arrayContaining(['--model', 'gemini-4-argon-high']));
+    expect(s.store.get(r.sessionId).model).toBe('argon:gemini-4-argon-high');
+  });
+  it('without a model Argon keeps its default and the session stays plain argon', async () => {
+    const a = agy(), s = await setup(a.run);
+    const r = await s.chat.submit(req({ provider: 'argon' }));
+    expect(a.turns()[0].args).toEqual(expect.arrayContaining(['--model', 'gemini-4-argon-medium']));
+    expect(r.model).toMatchObject({ requested: 'gemini-4-argon-medium' }); expect(s.store.get(r.sessionId).model).toBe('argon');
+  });
+  it('rejects an id agy does not list (even a claude one) and never runs a turn', async () => {
+    const a = agy(), s = await setup(a.run);
+    await expect(s.chat.submit(req({ provider: 'argon', model: 'gemini-9-nope' }))).rejects.toThrow(/Unknown Argon model "gemini-9-nope"/);
+    await expect(s.chat.submit(req({ provider: 'argon', model: 'claude-opus-5-5-low' }))).rejects.toThrow(/Unknown Argon model/);
+    expect(a.turns()).toHaveLength(0);
+  });
+  it('only Argon takes a model: other providers and the default provider refuse it', async () => {
+    const a = agy(), s = await setup(a.run);
+    await expect(s.chat.submit(req({ model: 'gemini-4-argon-high' }))).rejects.toThrow(/Invalid chat request/);
+    await expect(s.chat.submit(req({ provider: 'qwen', model: 'gemini-4-argon-high' }))).rejects.toThrow(/Invalid chat request/);
+    await expect(s.chat.submit(req({ provider: 'argon', model: 42 }))).rejects.toThrow(/Invalid chat request/);
+    await expect(s.chat.submit(req({ provider: 'argon', model: 'gemini-4-argon-high; calc' }))).rejects.toThrow(/Invalid chat request/);
+    expect(a.turns()).toHaveLength(0);
+  });
+  it('pins a conversation to its variant', async () => {
+    const a = agy(), s = await setup(a.run);
+    const first = await s.chat.submit(req({ provider: 'argon', model: 'gemini-4-argon-high' }));
+    await expect(s.chat.submit(req({ provider: 'argon', model: 'gemini-4-argon-medium', sessionId: first.sessionId }))).rejects.toThrow(/different model.*new conversation/i);
+    expect((await s.chat.submit(req({ provider: 'argon', model: 'gemini-4-argon-high', sessionId: first.sessionId }))).status).toBe('completed');
+  });
+});
+
 describe('GET /api/prime/models', () => {
   async function get(hub: PrimeHub, headers?: Record<string, string>) {
     const dir = mkdtempSync(join(tmpdir(), 'prime-route-')); cleanups.push(dir); writeFileSync(join(dir, 'index.html'), 'Prime'); writeFileSync(join(dir, 'models.js'), '// picker');
@@ -127,6 +174,7 @@ describe('GET /api/prime/models', () => {
     expect(body.providers.map(p => p.id)).toEqual(['qwen', 'claude', 'gpt', 'grok', 'argon']);
     expect(body.providers.find(p => p.id === 'qwen')!.available).toBe(true);
     expect(body.providers.find(p => p.id === 'grok')).toMatchObject({ available: false, reason: expect.stringContaining('could not start') });
+    expect(body.providers.find(p => p.id === 'argon')).toMatchObject({ variants: [], variantsReason: expect.stringMatching(/no Gemini/i) });
   });
   it('says plainly when no router is configured', async () => {
     const r = await get(new PrimeHub({ capabilities: [] }));
@@ -161,9 +209,9 @@ const report = (over: Record<string, unknown> = {}) => ({
     { id: 'grok', label: 'Grok (grok CLI)', kind: 'cli', available: true, requested: null, last: null },
   ], ...over,
 });
-async function pickerFixture(opts: { stored?: string; throwStorage?: boolean; body?: unknown; status?: number } = {}) {
+async function pickerFixture(opts: { stored?: string; variantStored?: string; throwStorage?: boolean; body?: unknown; status?: number } = {}) {
   const toolbar = element(), composer = element();
-  const store: Record<string, string> = opts.stored ? { 'echo-prime-model-v1': opts.stored } : {};
+  const store: Record<string, string> = { ...(opts.stored ? { 'echo-prime-model-v1': opts.stored } : {}), ...(opts.variantStored ? { 'echo-prime-argon-model-v1': opts.variantStored } : {}) };
   const localStorage = opts.throwStorage
     ? { getItem() { throw new Error('blocked'); }, setItem() { throw new Error('blocked'); } }
     : { getItem: (k: string) => store[k] ?? null, setItem: (k: string, v: string) => { store[k] = v; } };
@@ -171,7 +219,7 @@ async function pickerFixture(opts: { stored?: string; throwStorage?: boolean; bo
   const window = { addEventListener: vi.fn() } as Record<string, unknown>;
   runInNewContext(modelsSource, { window, localStorage, fetch, Error, console, Promise, Array, JSON,
     document: { querySelector: (s: string) => s === '.composer-toolbar' ? toolbar : s === '#composer' ? composer : null, createElement: (t: string) => element(t) } });
-  const api = window.EchoPrimeModels as { ready: Promise<void>; provider: () => string | undefined; describe: (m: unknown) => string };
+  const api = window.EchoPrimeModels as { ready: Promise<void>; provider: () => string | undefined; model: () => string | undefined; describe: (m: unknown) => string };
   await api.ready;
   return { api, toolbar, store, fetch };
 }
@@ -218,6 +266,46 @@ describe('model picker (models.js)', () => {
   });
 });
 
+const argonRow = (extra: Record<string, unknown> = {}) => ({ id: 'argon', label: 'Argon (agy CLI)', kind: 'cli', available: true, requested: null, last: null,
+  variants: [{ id: 'gemini-4-argon-medium', label: 'Gemini 4 Argon (Medium)' }, { id: 'gemini-3.8-flash-high', label: 'Gemini 3.8 Flash (High)' }], ...extra });
+const withArgon = (row = argonRow()) => { const r = report(); r.providers.push(row as never); return r; };
+describe('model picker: Gemini variants (models.js)', () => {
+  const selects = (toolbar: El) => flat(toolbar).filter(e => e.tag === 'select');
+  it('shows a second select with the labels agy gave only while Argon is selected, and sends nothing for other providers', async () => {
+    const { api, toolbar } = await pickerFixture({ body: withArgon() });
+    expect(selects(toolbar)[1].hidden).toBe(true); expect(api.model()).toBeUndefined();
+    const [provider, variant] = selects(toolbar);
+    provider.value = 'argon'; provider.fire('change');
+    expect(variant.hidden).toBe(false);
+    expect(variant.children.map(o => o.textContent)).toEqual(['Gemini 4 Argon (Medium)', 'Gemini 3.8 Flash (High)']);
+    expect(variant.value).toBe('gemini-4-argon-medium'); expect(api.provider()).toBe('argon'); expect(api.model()).toBe('gemini-4-argon-medium');
+    provider.value = 'claude'; provider.fire('change');
+    expect(variant.hidden).toBe(true); expect(api.model()).toBeUndefined();
+  });
+  it('persists the variant choice, restores it, and ignores a stored id agy no longer lists', async () => {
+    const first = await pickerFixture({ stored: 'argon', body: withArgon() });
+    const variant = selects(first.toolbar)[1];
+    variant.value = 'gemini-3.8-flash-high'; variant.fire('change');
+    expect(first.store['echo-prime-argon-model-v1']).toBe('gemini-3.8-flash-high'); expect(first.api.model()).toBe('gemini-3.8-flash-high');
+    expect((await pickerFixture({ stored: 'argon', body: withArgon(), variantStored: 'gemini-3.8-flash-high' })).api.model()).toBe('gemini-3.8-flash-high');
+    expect((await pickerFixture({ stored: 'argon', body: withArgon(), variantStored: 'gemini-9-gone' })).api.model()).toBe('gemini-4-argon-medium');
+    const blocked = await pickerFixture({ body: withArgon(), throwStorage: true });
+    const p = selects(blocked.toolbar)[0]; p.value = 'argon'; p.fire('change');
+    const v = selects(blocked.toolbar)[1]; v.value = 'gemini-3.8-flash-high'; v.fire('change');
+    expect(blocked.api.model()).toBe('gemini-3.8-flash-high');
+  });
+  it('sends no model and says why when agy listed no variants', async () => {
+    const { api, toolbar } = await pickerFixture({ stored: 'argon', body: withArgon(argonRow({ variants: [], variantsReason: '"agy models" listed no Gemini models' })) });
+    expect(api.provider()).toBe('argon'); expect(api.model()).toBeUndefined();
+    expect(selects(toolbar)[1].hidden).toBe(true);
+    expect(flat(toolbar).map(e => e.textContent).join(' ')).toMatch(/listed no Gemini models.*default/i);
+  });
+  it('describes an Argon reply as the requested id, never as the answering model', async () => {
+    const { api } = await pickerFixture({ body: withArgon() });
+    expect(api.describe({ id: 'argon', label: 'Argon (agy CLI)', answered: true, reported: false, model: null, requested: 'gemini-4-argon-high' })).toBe('model not reported by agy (requested: gemini-4-argon-high)');
+  });
+});
+
 function chatFixture(models?: unknown) {
   const nodes = new Map(['#composer .send', '#stop-chat', '#chat-log', '#welcome'].map(k => [k, element()]));
   const sessionId = randomUUID();
@@ -235,6 +323,12 @@ describe('chat.js integration', () => {
     expect(body.provider).toBe('gpt'); expect(body).not.toHaveProperty('model');
     const message = f.nodes.get('#chat-log')!.children[1];
     expect(message.children[2].textContent).toContain('note for gpt');
+  });
+  it('sends the Gemini variant only when the picker supplies one', async () => {
+    const f = chatFixture({ provider: () => 'argon', model: () => 'gemini-4-argon-high', describe: () => 'note' });
+    await f.chat.send('inspect');
+    const body = JSON.parse((f.fetch.mock.calls[1] as unknown as [string, { body: string }])[1].body);
+    expect(body).toMatchObject({ provider: 'argon', model: 'gemini-4-argon-high' });
   });
   it('sends no provider key without the picker (legacy host path unchanged)', async () => {
     const f = chatFixture();

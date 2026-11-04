@@ -119,9 +119,9 @@ describe('availability report', () => {
     let now = 1_000_000; const r = runner(() => ok());
     const router = new ModelRouter({ ...DEFAULT_MODELS, endpoint: fake.url }, { runner: r.run, now: () => now });
     await router.report(); await router.report();
-    expect(r.calls).toHaveLength(4); expect(fake.tags()).toBe(1);
-    now += 59_000; await router.report(); expect(r.calls).toHaveLength(4);
-    now += 2_000; await router.report(); expect(r.calls).toHaveLength(8); expect(fake.tags()).toBe(2);
+    expect(r.calls).toHaveLength(5); expect(fake.tags()).toBe(1); // claude, codex, grok, agy --version, agy models
+    now += 59_000; await router.report(); expect(r.calls).toHaveLength(5);
+    now += 2_000; await router.report(); expect(r.calls).toHaveLength(10); expect(fake.tags()).toBe(2);
   });
   it('exposes the model that actually answered the last turn and keeps it after a failed turn', async () => {
     const fake = await ollama([DEFAULT_MODELS.model]);

@@ -3,7 +3,7 @@ import type {Workspace} from '../code/workspace.js';
 import type {SessionStore} from '../code/sessions.js';
 import {runSharedTurn,type CodingAdmission,type CodingInvoker} from '../code/shared.js';
 import {runTurn,type TurnResult} from '../code/agent.js';
-import {isModelId,type ModelId,type ModelRouter,type AnswerInfo} from '../code/model-factory.js';
+import {isModelId,VARIANT_ARG,type ModelId,type ModelRouter,type AnswerInfo} from '../code/model-factory.js';
 /** Either the authenticated host path (invoke + admission) or a reviewed model router (Qwen on loopback, or a vendor CLI). */
 export interface SharedChatOptions {workspace:Workspace;store:SessionStore;invoke?:CodingInvoker;admission?:CodingAdmission;models?:ModelRouter}
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -11,7 +11,9 @@ const debug=debuglog('echo-prime');
 /** Attached by an authenticated embedding host. Browser data cannot select an
  * invoker, admission, workspace, model name, proposal mode or credentials. When a
  * model router is configured the browser may only pick a provider id from the
- * reviewed list; the model behind it comes from the reviewed configuration. */
+ * reviewed list; the model behind it comes from the reviewed configuration.
+ * The one exception is Argon (Gemini via agy): the browser may name a `model`, accepted
+ * only if agy currently lists it (unknown ids are refused, never defaulted). */
 export class SharedChat {
  private busy=false;private used=new Set<string>();private options:SharedChatOptions;
  constructor(options:SharedChatOptions){
@@ -26,7 +28,7 @@ export class SharedChat {
  async submit(input:unknown,signal?:AbortSignal):Promise<TurnResult&{requestId:string;model?:AnswerInfo}>{
   if(!input||typeof input!=='object'||Array.isArray(input))throw new Error('Invalid chat request');
   const data=input as Record<string,unknown>;
-  if(Object.keys(data).some(k=>!['requestId','prompt','sessionId','provider'].includes(k))||
+  if(Object.keys(data).some(k=>!['requestId','prompt','sessionId','provider','model'].includes(k))||
    typeof data.requestId!=='string'||!uuid.test(data.requestId)||typeof data.prompt!=='string'||
    !data.prompt.trim()||data.prompt.length>12000||
    (data.sessionId!==undefined&&(typeof data.sessionId!=='string'||!uuid.test(data.sessionId))))throw new Error('Invalid chat request');
@@ -37,12 +39,18 @@ export class SharedChat {
    if(!router)throw new Error('Model selection is not configured; this host answers with its pinned model');
   }
   const provider:ModelId|undefined=router?(data.provider===undefined?router.defaultId:data.provider as ModelId):undefined;
+  let variant:string|undefined;
+  if(data.model!==undefined){
+   if(!router)throw new Error('Model selection is not configured; this host answers with its pinned model');
+   if(provider!=='argon'||typeof data.model!=='string'||!VARIANT_ARG.test(data.model))throw new Error('Invalid chat request');
+   variant=await router.variant('argon',data.model);
+  }
   if(this.used.has(requestId))throw new Error('Chat request already submitted; no automatic replay');
   if(this.busy)throw new Error('Chat is busy; wait for the current turn');
   if(this.used.size>=1000)throw new Error('Chat host request limit reached');
   if(signal?.aborted)throw new Error('Interrupted');
   const {workspace,store,invoke,admission}=this.options;
-  const sessionModel=router&&provider?router.sessionModel(provider):'qwen2.5-coder:7b';
+  const sessionModel=router&&provider?router.sessionModel(provider,variant):'qwen2.5-coder:7b';
   const session=data.sessionId?store.get(data.sessionId as string):store.create(workspace.root,sessionModel);
   if(session.workspace!==workspace.root)throw new Error('Chat session workspace/model mismatch');
   if(session.model!==sessionModel)throw new Error(router?'This conversation was started with a different model; start a new conversation to switch models':'Chat session workspace/model mismatch');
@@ -51,10 +59,10 @@ export class SharedChat {
   const started=performance.now(),controller=new AbortController();
   const abort=()=>controller.abort();signal?.addEventListener('abort',abort,{once:true});
   const timer=setTimeout(abort,120000);
-  debug('%j',{event:'prime_chat_started',requestId,sessionId:session.id,mode:'read-only'});
+  debug('%j',{event:'prime_chat_started',requestId,sessionId:session.id,mode:'read-only',...(variant?{variant}:{})});
   try{
    if(router&&provider){
-    const turn=router.turn(provider);
+    const turn=router.turn(provider,variant);
     const result=await runTurn({workspace,store,model:turn.model,sessionId:session.id,prompt,mode:'read-only',maxSteps:10,signal:controller.signal});
     turn.answered();
     debug('%j',{event:'prime_chat_finished',requestId,sessionId:session.id,provider,status:result.status,durationMs:Math.round(performance.now()-started)});
