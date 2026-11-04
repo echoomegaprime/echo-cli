@@ -3,6 +3,7 @@ import { debuglog } from 'node:util';
 import { redact } from '../code/workspace.js';
 import type {SharedChat} from './chat.js';
 import {disconnectedSteward,type StewardOwner} from './steward.js';
+import type {ModelRouter} from '../code/model-factory.js';
 const debugOwnerResponse=debuglog('echo-prime');
 export type Json=Record<string,unknown>;
 export interface Tool {name:string;description?:string;inputSchema:Json}
@@ -15,7 +16,7 @@ export interface SdkBroker {
 }
 export interface PrimeRequest {target:'sdk'|'esh';name:string;arguments:Json}
 export interface PrimeOptions {
- capabilities:Capability[];sdk?:SdkBroker;esh?:McpConnection;chat?:SharedChat;steward?:StewardOwner;
+ capabilities:Capability[];sdk?:SdkBroker;esh?:McpConnection;chat?:SharedChat;steward?:StewardOwner;models?:ModelRouter;
  /** Existing host approval, never supplied by model output or the browser. */
  approveEsh?:(request:PrimeRequest,digest:string)=>Promise<boolean>;
 }
@@ -87,6 +88,12 @@ export class PrimeHub {
  async stewardAsk(input:unknown){
   if(!this.options.steward)throw new Refused('Node Steward owner not connected');
   return bounded(()=>this.options.steward!.ask(input),60000);
+ }
+ /** Per-provider availability (cached 60 s) and the model that answered last. Never falls back or substitutes. */
+ async models(){
+  const router=this.options.models;
+  if(!router)return {configured:false,routing:false,default:null,contextTokens:null,providers:[]};
+  return {configured:true,routing:this.options.chat?.status().routing===true,...await bounded(()=>router.report(),30000)};
  }
  async chat(input:unknown,signal?:AbortSignal){
   if(!this.options.chat)throw new Refused('Shared chat host not connected; owner admission is required');

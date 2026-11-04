@@ -17,12 +17,16 @@ export function parseAction(value: unknown): Action {
   if (a.action === 'final' && typeof a.content === 'string' && a.content.trim()) return { action: 'final', content: a.content };
   throw new Error('Model returned an unsupported action');
 }
+export interface LocalAnswered { requested: string; model: string | null; reported: boolean }
 export class LocalModel implements Model {
+  /** What the endpoint said answered the most recent step; null model means it did not say. */
+  last?: LocalAnswered;
   private endpoint: URL;
-  constructor(endpoint: string, readonly model: string, private timeoutMs = 120000) {
+  constructor(endpoint: string, readonly model: string, private timeoutMs = 120000, private numCtx = 32768) {
     this.endpoint = validateEndpoint(endpoint);
     if (!model || model.length > 150 || /cloud/i.test(model) || [...model].some(c => c.charCodeAt(0) < 32)) throw new Error('Cloud or invalid model names are not supported');
     if (!Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > 300000) throw new Error('Invalid model timeout');
+    if (!Number.isInteger(numCtx) || numCtx < 1024 || numCtx > 1048576) throw new Error('Invalid model context size');
   }
   async models(): Promise<string[]> {
     const value = await this.request('api/tags') as { models?: { name: string }[] };
@@ -55,10 +59,15 @@ export class LocalModel implements Model {
       format: { type: 'object', required: ['action'], properties: {
         action: { type: 'string', enum: ['list', 'read', 'search', 'propose', 'final'] }, path: { type: 'string' }, query: { type: 'string' }, content: { type: 'string' },
       }, additionalProperties: false },
-      options: { temperature: 0, num_predict: 4096, num_ctx: 32768 }, messages,
-    }, signal) as { message?: { content?: string }; done?: boolean };
+      options: { temperature: 0, num_predict: 4096, num_ctx: this.numCtx }, messages,
+    }, signal) as { message?: { content?: string }; done?: boolean; model?: unknown };
     if (!response.done || typeof response.message?.content !== 'string') throw new Error('Local model response is incomplete');
-    try { return parseAction(JSON.parse(redact(response.message.content))); }
+    try {
+      const action = parseAction(JSON.parse(redact(response.message.content)));
+      const reported = typeof response.model === 'string' && response.model.length > 0 && response.model.length <= 150 ? response.model : null;
+      this.last = { requested: this.model, model: reported, reported: reported !== null };
+      return action;
+    }
     catch { throw new Error('Local model returned an invalid action; no tools were executed for that response'); }
   }
 }

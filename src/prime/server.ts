@@ -6,7 +6,7 @@ import {debuglog} from 'node:util';
 import {PrimeHub,object,type PrimeRequest} from './hub.js';
 import {redact} from '../code/workspace.js';
 import {WorkspaceBridge,WorkspaceHttpError,type WorkspaceConfig} from './workspace.js';
-const assets:Record<string,string>={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/orb.js':'orb.js','/app.js':'app.js','/chat.js':'chat.js','/integrations.js':'integrations.js','/catalog.js':'catalog.js','/steward.js':'steward.js','/workspace-client.js':'workspace-client.js','/workspace.js':'workspace.js'};
+const assets:Record<string,string>={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/orb.js':'orb.js','/app.js':'app.js','/chat.js':'chat.js','/integrations.js':'integrations.js','/catalog.js':'catalog.js','/steward.js':'steward.js','/workspace-client.js':'workspace-client.js','/workspace.js':'workspace.js','/models.js':'models.js'};
 const debug=debuglog('echo-prime-server');
 assets['/privacy']='privacy.html';assets['/privacy.css']='privacy.css';
 async function body(req:IncomingMessage){
@@ -57,6 +57,7 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     }
     if(workspace)await workspace.requireOwner(req,abort.signal);
     if(path==='/api/status'&&req.method==='GET'){send(200,await hub.status());return;}
+    if(path==='/api/prime/models'&&req.method==='GET'){send(200,await hub.models());return;}
     if(path==='/api/steward/status'&&req.method==='GET'){send(200,await hub.stewardStatus());return;}
     if(req.method!=='POST'||!req.headers['content-type']?.startsWith('application/json')){send(405,{error:'JSON POST required'});return;}
     const data=await body(req);
