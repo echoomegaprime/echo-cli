@@ -2,9 +2,9 @@
  'use strict';
  // Model picker. The server decides what each provider id means; this file only offers the reviewed ids,
  // remembers the choice in this browser, and states plainly which model answered or why one is unavailable.
- const storageKey='echo-prime-model-v1',variantKey='echo-prime-argon-model-v1',ids=['qwen','claude','gpt','grok','argon'];
- const fallbackLabels={qwen:'Qwen (FORGE, 256K)',claude:'Claude (claude CLI)',gpt:'GPT (codex CLI)',grok:'Grok (grok CLI)',argon:'Argon (Gemini 4, agy CLI)'};
- let chosen=null,chosenVariant=null,report=null,failed=false,generation=0;
+ const storageKey='echo-prime-model-v1',variantKey='echo-prime-argon-model-v1',ids=['qwen','claude','gpt','grok','argon','swarm'];
+ const fallbackLabels={qwen:'Qwen (FORGE, 256K)',claude:'Claude (claude CLI)',gpt:'GPT (codex CLI)',grok:'Grok (grok CLI)',argon:'Argon (Gemini 4, agy CLI)',swarm:'Swarm (40-seat brain)'};
+ let swarmState=null,chosen=null,chosenVariant=null,report=null,failed=false,generation=0;
  try{const stored=localStorage.getItem(storageKey);if(ids.includes(stored))chosen=stored;}catch{}
  try{const stored=localStorage.getItem(variantKey);if(typeof stored==='string'&&/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(stored))chosenVariant=stored;}catch{}
  const wrap=document.createElement('div'),label=document.createElement('label'),select=document.createElement('select'),note=document.createElement('small');
@@ -22,6 +22,7 @@
  if(mount)mount.append(wrap);
  function entries(){
   return ids.map(id=>{
+   if(id==='swarm')return {id,label:fallbackLabels.swarm,available:!!swarmState&&swarmState.available===true,reason:swarmState&&typeof swarmState.reason==='string'?swarmState.reason:swarmState?'':'swarm status not loaded'};
    const row=report&&Array.isArray(report.providers)?report.providers.find(p=>p&&p.id===id):null;
    return {id,label:row&&typeof row.label==='string'?row.label:fallbackLabels[id],available:row?row.available!==false:true,reason:row&&typeof row.reason==='string'?row.reason:''};
   });
@@ -54,6 +55,7 @@
   else if(!report.routing)note.textContent='Model choice is not enabled on this host.';
   else if(row&&!row.available)note.textContent=row.label+' is unavailable: '+(row.reason||'no reason given')+'. No other model will be used.';
   else if(selected==='argon'&&row&&!gemini.length){const why=argonRow()&&typeof argonRow().variantsReason==='string'?argonRow().variantsReason:'no Gemini models were listed';note.textContent=row.label+' selected. '+why+'; the agy default model is used. If it fails, the turn fails; no other model is used.';}
+  else if(selected==='swarm')note.textContent=row.label+' selected. Runs can take many minutes and spend the shown budget; the worker has no cancel. If it fails the turn fails; no other model is used.';
   else note.textContent=row?row.label+' selected. If it fails, the turn fails; no other model is used.':'';
   select.disabled=!!failed||(!!report&&!report.routing);
  }
@@ -88,6 +90,10 @@
  const ready=refresh();
  window.EchoPrimeModels={
   ready,refresh,
+  /** swarm.js reports the worker state here ({available,reason}); the picker never assumes the swarm is up. */
+  setSwarm(state){swarmState=state&&typeof state==='object'?{available:state.available===true,reason:typeof state.reason==='string'?state.reason:''}:null;render();},
+  /** True when the next message must go through the swarm instead of the chat route. */
+  swarm(){return report&&report.routing===true&&!failed&&current()==='swarm';},
   /** The provider id to send with a chat turn, or undefined when the host does not route by provider. */
   provider(){return report&&report.routing===true&&!failed?current():undefined;},
   /** The Gemini model id to send with an Argon turn (validated by the server against agy's list), else undefined. */
