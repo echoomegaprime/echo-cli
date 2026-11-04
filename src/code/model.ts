@@ -7,7 +7,7 @@ export function validateEndpoint(endpoint: string): URL {
   if (!['http:', 'https:'].includes(url.protocol) || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error('Model endpoint must be a credential-free loopback origin');
   return url;
 }
-function parseAction(value: unknown): Action {
+export function parseAction(value: unknown): Action {
   if (!value || typeof value !== 'object') throw new Error('Model returned an invalid action');
   const a = value as Record<string, unknown>;
   if (['list', 'read', 'propose'].includes(String(a.action)) && typeof a.path !== 'string') throw new Error('Model action needs a path');
