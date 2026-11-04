@@ -23,6 +23,16 @@ The responsive shell follows the user-provided emerald desktop, ECHO Prime deskt
 
 The production integration must provide a separately admitted authenticated host and the existing bounded `runSharedTurn` adapter. Do not add credentials to static files or assume that this interface grants `continuity.write` or `coding.invoke`.
 
+## Swarm (40-seat brain)
+
+The model picker has a "Swarm (40-seat brain)" entry. Selecting it sends the next ECHO Code chat message to the Maximalist Swarm Fusion Brain worker instead of a single model. It is off unless the reviewed Prime config has a `swarm` section (and the `models` section the picker needs):
+
+```json
+{ "models": {}, "swarm": { "baseUrl": "http://127.0.0.1:8358", "defaultBudget": { "max_calls": 80, "max_cost_usd": 1, "max_wall_s": 1800 } } }
+```
+
+`baseUrl` must be a loopback origin (the worker has no auth and runs on FORGE next to Prime). Budgets are clamped to the worker maxima (120 calls, 5 USD, 4800 s). A run takes minutes: the card shows elapsed time and the budget, polls every 3 s (paused while the tab is hidden), then shows the fused answer, confidence, major findings, preserved dissent, unresolved uncertainty and provenance. Every result carries `MAXIMALIST_RECONSTRUCTED` and `historical_parity: false`, shown as "a reconstruction, not the historical original". Stop only stops waiting; the worker has no cancel and the run may continue up to its budget. Failures are shown as failures and never fall back to another model. Messages that the Workspace conversation handles first (`app.js`) do not reach the swarm. Code: `swarm.js`, `swarm.css`, `src/prime/swarm.ts`.
+
 ## Validation (2026-10-27)
 
 Desktop (1363 px) and mobile (390 x 844) inspected in a browser. Mobile viewport and document widths both measured 390 px with no horizontal overflow. Mobile navigation, mode placeholder switching, palette/quality/motion selection and preference persistence checked. Chrome palette synchronization, pause and persistence were also verified in the browser. JavaScript syntax checked separately. The preview browser disables WebGL, so the Canvas renderer was visually verified; the GPU renderer still needs validation on the target hardware. This UI check does not establish live generation. The separate ESH/host acceptance and remaining SDK connection limitations are recorded in INTEGRATIONS.md.

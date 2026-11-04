@@ -5,7 +5,7 @@
   <meta name="color-scheme" content="dark">
   <title>ECHO Prime · Your intelligence, connected</title>
   <link rel="stylesheet" href="styles.css">
-  <link rel="stylesheet" href="fleet.css"><link rel="stylesheet" href="composer.css">
+  <link rel="stylesheet" href="fleet.css"><link rel="stylesheet" href="composer.css"><link rel="stylesheet" href="swarm.css">
   <script defer src="composer.js"></script><script defer src="voicebar.js"></script><script defer src="plugins.js"></script>
 </head>
 <body>
@@ -77,6 +77,6 @@
 <div class="steward-table-wrap"><table class="steward-table"><caption class="sr-only">Per-node Steward coverage and model readiness</caption><thead><tr><th scope="col">Node</th><th scope="col">OS</th><th scope="col">Identity</th><th scope="col">Runtime</th><th scope="col">Model</th><th scope="col">Evaluation</th><th scope="col">Rollback</th></tr></thead><tbody id="steward-nodes"></tbody></table></div>
 <form id="steward-form" class="steward-form"><label>Node<select id="steward-node" required></select></label><label>Response<select id="steward-mode"><option value="answer">Answer a question</option><option value="explain">Explain an incident</option><option value="proposal">Propose a typed remedy</option></select></label><label id="steward-target-label" hidden>Exact resource in the incident<input id="steward-target" maxlength="240" placeholder="For example, echo-workers.service"></label><label>Question or incident<textarea id="steward-text" rows="4" maxlength="8000" required placeholder="Describe this node’s condition without including credentials…"></textarea></label><button id="steward-submit" class="new-chat" type="submit" disabled>Ask this node’s Steward</button></form>
 <pre id="steward-result" aria-live="polite"></pre><p class="connection-note">Advice and shadow proposals stay separate from repairs. Model promotion requires a passing evaluation, a verified canary and a rollback slot.</p></dialog>
-<script src="catalog.js"></script><script src="orb.js"></script><script src="chat.js"></script><script src="workspace-client.js"></script><script src="workspace.js"></script><script src="app.js"></script><script src="models.js"></script><script src="integrations.js"></script><script src="steward.js"></script>
+<script src="catalog.js"></script><script src="orb.js"></script><script src="chat.js"></script><script src="workspace-client.js"></script><script src="workspace.js"></script><script src="app.js"></script><script src="models.js"></script><script src="integrations.js"></script><script src="steward.js"></script><script src="swarm.js"></script>
 <script src="fleet.js"></script><script src="logs.js"></script>
 </body></html>

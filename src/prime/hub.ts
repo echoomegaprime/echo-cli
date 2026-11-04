@@ -4,6 +4,7 @@ import { redact } from '../code/workspace.js';
 import type {SharedChat} from './chat.js';
 import {disconnectedSteward,type StewardOwner} from './steward.js';
 import type {ModelRouter} from '../code/model-factory.js';
+import {SwarmError,type SwarmClient} from './swarm.js';
 const debugOwnerResponse=debuglog('echo-prime');
 export type Json=Record<string,unknown>;
 export interface Tool {name:string;description?:string;inputSchema:Json}
@@ -16,7 +17,7 @@ export interface SdkBroker {
 }
 export interface PrimeRequest {target:'sdk'|'esh';name:string;arguments:Json}
 export interface PrimeOptions {
- capabilities:Capability[];sdk?:SdkBroker;esh?:McpConnection;chat?:SharedChat;steward?:StewardOwner;models?:ModelRouter;
+ capabilities:Capability[];sdk?:SdkBroker;esh?:McpConnection;chat?:SharedChat;steward?:StewardOwner;models?:ModelRouter;swarm?:SwarmClient;
  /** Existing host approval, never supplied by model output or the browser. */
  approveEsh?:(request:PrimeRequest,digest:string)=>Promise<boolean>;
 }
@@ -95,6 +96,16 @@ export class PrimeHub {
   if(!router)return {configured:false,routing:false,default:null,contextTokens:null,providers:[]};
   return {configured:true,routing:this.options.chat?.status().routing===true,...await bounded(()=>router.report(),30000)};
  }
+ /** Opt-in 40-seat swarm worker: status never throws for an unconfigured or unreachable worker, it says why. Runs never fall back to another model. */
+ async swarmHealth(signal?:AbortSignal){
+  const swarm=this.options.swarm;
+  if(!swarm)return {configured:false,available:false,reason:'Swarm is not enabled: the reviewed Prime configuration has no swarm section'};
+  try{return {configured:true,available:true,defaultBudget:swarm.config.defaultBudget,worker:await swarm.health(signal)};}
+  catch(e){return {configured:true,available:false,defaultBudget:swarm.config.defaultBudget,reason:e instanceof Error?redact(e.message).slice(0,300):'Swarm worker check failed'};}
+ }
+ private swarmClient(){if(!this.options.swarm)throw new SwarmError(503,'Swarm is not enabled: the reviewed Prime configuration has no swarm section');return this.options.swarm;}
+ async swarmRun(input:unknown,signal?:AbortSignal){return this.swarmClient().run(input,signal);}
+ async swarmStatus(runId:string,signal?:AbortSignal){return this.swarmClient().status(runId,signal);}
  async chat(input:unknown,signal?:AbortSignal){
   if(!this.options.chat)throw new Refused('Shared chat host not connected; owner admission is required');
   return this.options.chat.submit(input,signal);
