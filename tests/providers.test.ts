@@ -1,0 +1,102 @@
+import { describe, expect, it } from 'vitest';
+import { CliModel, ProviderUnavailableError, childEnv, type Runner, type RunResult } from '../src/code/providers.js';
+
+const ok = (stdout: string): RunResult => ({ code: 0, stdout, stderr: '', timedOut: false });
+const action = JSON.stringify({ action: 'final', content: 'done' });
+const claudeJson = (result: string, usage: Record<string, number> = { 'claude-haiku-5-5': 4 }) => JSON.stringify({
+  is_error: false, result, modelUsage: Object.fromEntries(Object.entries(usage).map(([k, v]) => [k, { outputTokens: v }])),
+});
+const grokJson = (text: string, model = 'grok-4.7-build') => JSON.stringify({ text, modelUsage: { [model]: { outputTokens: 9 } } });
+const codexEvents = (text: string) => [
+  '2026 ERROR noise that is not json',
+  JSON.stringify({ type: 'thread.started', thread_id: 't' }),
+  JSON.stringify({ type: 'item.completed', item: { type: 'error', message: 'skills budget' } }),
+  JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text } }),
+  JSON.stringify({ type: 'turn.completed', usage: {} }),
+].join('\n');
+function recorder(result: RunResult) {
+  const calls: { cmd: string; args: string[]; env: NodeJS.ProcessEnv; input?: string; cwd: string }[] = [];
+  const runner: Runner = async (cmd, args, o) => { calls.push({ cmd, args, env: o.env, input: o.input, cwd: o.cwd }); return result; };
+  return { calls, runner };
+}
+const messages = [{ role: 'system' as const, content: 'sys' }, { role: 'user' as const, content: 'hello' }];
+
+describe('CLI provider models', () => {
+  it('claude: parses the action and reports the model that answered', async () => {
+    const { calls, runner } = recorder(ok(claudeJson(action, { 'claude-sonnet-5-5': 40, 'claude-haiku-5-5': 3 })));
+    const model = new CliModel('claude', { model: 'sonnet', runner });
+    expect(await model.next(messages)).toEqual({ action: 'final', content: 'done' });
+    expect(model.last).toMatchObject({ provider: 'claude', requested: 'sonnet', model: 'claude-sonnet-5-5', reported: true });
+    const { args, input } = calls[0];
+    expect(args).toEqual(expect.arrayContaining(['-p', '--output-format', 'json', '--no-session-persistence', '--strict-mcp-config', '--disable-slash-commands', '--model', 'sonnet']));
+    expect(args).not.toContain('--dangerously-skip-permissions');
+    expect(input).toContain('hello');
+  });
+  it('claude: accepts a fenced JSON action', async () => {
+    const { runner } = recorder(ok(claudeJson('```json\n' + action + '\n```')));
+    expect(await new CliModel('claude', { runner }).next(messages)).toEqual({ action: 'final', content: 'done' });
+  });
+  it('gpt: reads the last agent_message and says the CLI does not report a model', async () => {
+    const { calls, runner } = recorder(ok(codexEvents(action)));
+    const model = new CliModel('gpt', { model: 'gpt-5', runner });
+    expect(await model.next(messages)).toEqual({ action: 'final', content: 'done' });
+    expect(model.last).toMatchObject({ provider: 'gpt', requested: 'gpt-5', model: null, reported: false });
+    expect(calls[0].args).toEqual(expect.arrayContaining(['exec', '--json', '--ephemeral', '-s', 'read-only', '-m', 'gpt-5']));
+  });
+  it('grok: reads text and reports the model', async () => {
+    const { calls, runner } = recorder(ok(grokJson(action)));
+    const model = new CliModel('grok', { runner });
+    expect(await model.next(messages)).toEqual({ action: 'final', content: 'done' });
+    expect(model.last).toMatchObject({ provider: 'grok', requested: null, model: 'grok-4.7-build', reported: true });
+    expect(calls[0].args).toEqual(expect.arrayContaining(['--output-format', 'json']));
+    expect(calls[0].args).not.toContain('--always-approve');
+  });
+  it('runs in an empty directory with a minimal environment and no secrets', async () => {
+    process.env.OPENAI_API_KEY = 'fixture-should-not-leak-openai'; process.env.ANTHROPIC_API_KEY = 'fixture-should-not-leak-anthropic'; process.env.XAI_API_KEY = 'xai-nope';
+    try {
+      const { calls, runner } = recorder(ok(claudeJson(action)));
+      await new CliModel('claude', { runner }).next(messages);
+      const env = calls[0].env;
+      expect(Object.keys(env).some(k => /KEY|TOKEN|SECRET|PASSWORD/i.test(k))).toBe(false);
+      expect(JSON.stringify(env)).not.toMatch(/should-not-leak|xai-nope/);
+      expect(env.PATH ?? env.Path).toBeTruthy();
+      expect(calls[0].cwd).not.toBe(process.cwd());
+      expect(childEnv()).toEqual(env);
+    } finally { delete process.env.OPENAI_API_KEY; delete process.env.ANTHROPIC_API_KEY; delete process.env.XAI_API_KEY; }
+  });
+  it('fails loudly, with the provider named, and never falls back', async () => {
+    for (const [provider, result] of [
+      ['claude', { code: 1, stdout: claudeJson('Not logged in'), stderr: '', timedOut: false }],
+      ['gpt', { code: 1, stdout: '', stderr: 'not signed in', timedOut: false }],
+      ['grok', { code: 2, stdout: '', stderr: 'auth required', timedOut: false }],
+      ['grok', { code: null, stdout: '', stderr: '', timedOut: true }],
+    ] as const) {
+      const { runner } = recorder(result as RunResult);
+      const model = new CliModel(provider, { runner });
+      const err = await model.next(messages).catch(e => e);
+      expect(err).toBeInstanceOf(ProviderUnavailableError);
+      expect(String(err.message)).toMatch(new RegExp(provider, 'i'));
+      expect(String(err.message)).toMatch(/no fallback/i);
+      expect(model.last).toBeUndefined();
+    }
+  });
+  it('rejects a non-JSON or unsupported answer without executing anything', async () => {
+    const { runner } = recorder(ok(claudeJson('I think you should read the file')));
+    await expect(new CliModel('claude', { runner }).next(messages)).rejects.toThrow(/invalid action/i);
+  });
+  it('flags an is_error claude result even when the exit code is 0', async () => {
+    const { runner } = recorder(ok(JSON.stringify({ is_error: true, result: 'Not logged in · Please run /login', modelUsage: {} })));
+    await expect(new CliModel('claude', { runner }).next(messages)).rejects.toBeInstanceOf(ProviderUnavailableError);
+  });
+  it('redacts secrets that come back in model output', async () => {
+    // A deterministic synthetic value exercises the actual provider-key pattern
+    // without putting a credential-shaped literal into the source inventory.
+    const fixtureKey = 'sk-' + 'x'.repeat(32);
+    const { runner } = recorder(ok(claudeJson(JSON.stringify({ action: 'final', content: 'key ' + fixtureKey }))));
+    const result = await new CliModel('claude', { runner }).next(messages);
+    expect(JSON.stringify(result)).not.toContain(fixtureKey);
+  });
+  it('refuses overlong or malformed model names', () => {
+    for (const bad of ['', 'x'.repeat(200), 'a b', '--flag', 'a\nb']) expect(() => new CliModel('claude', { model: bad, runner: recorder(ok('')).runner })).toThrow();
+  });
+});

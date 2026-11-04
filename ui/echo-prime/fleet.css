@@ -1,0 +1,32 @@
+.prime-fleet-bar{display:flex;align-items:center;flex-wrap:wrap;gap:10px 16px;padding:11px 24px;border-bottom:1px solid var(--border,rgba(167,210,199,.12));background:rgba(9,21,22,.72)}
+.prime-fleet-bar[hidden],.prime-journal-status[hidden]{display:none!important}
+.prime-fleet-nodes{display:flex;flex-wrap:wrap;gap:7px}
+.prime-fleet-node,.prime-forge-status{font:inherit;font-size:11px;color:var(--muted,#b3c7c3);background:rgba(255,255,255,.025);border:1px solid rgba(169,212,203,.14);border-radius:8px;padding:7px 9px;display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+.prime-fleet-node:hover,.prime-forge-status:hover{border-color:rgba(122,230,190,.5);background:rgba(122,230,190,.07)}
+.prime-fleet-node:focus-visible,.prime-forge-status:focus-visible{outline:2px solid #8ce2c0;outline-offset:3px}
+.prime-fleet-led{width:6px;height:6px;flex-shrink:0;border-radius:50%;background:#778c89}
+.prime-fleet-node.connected .prime-fleet-led{background:#8ce2b8;box-shadow:0 0 7px rgba(140,226,184,.35)}
+.prime-fleet-node.disconnected .prime-fleet-led{background:#e5a18d}
+.prime-fleet-state{font-size:10px;color:#91aaa4}
+.prime-forge-status.ready{color:#a8eacb;border-color:rgba(140,226,184,.25)}
+.prime-forge-status.attention,.prime-forge-status.needed{color:#e4c89a}
+.prime-fleet-note{font-size:10px;color:#91aaa4;margin-left:auto}
+.prime-journal-status{white-space:normal;text-align:left;font-size:12px}
+.prime-observations-dialog{width:min(760px,calc(100vw - 32px));max-height:84vh}
+.prime-observations-status{color:#a9c1b9;line-height:1.6;font-size:13px}
+.prime-observations-body{display:grid;gap:14px;padding-bottom:8px}
+.prime-evidence-card{padding:16px;border:1px solid rgba(167,210,199,.12);border-radius:12px;background:rgba(9,24,23,.6);min-width:0}
+.prime-evidence-card h3{font-size:14px;line-height:1.5;margin:0 0 8px;color:#e0ebe7}
+.prime-evidence-card p,.prime-observations-body>p{font-size:13px;line-height:1.6;color:#a9c1b9;margin:6px 0}
+.prime-evidence-card pre{max-height:260px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px}
+.prime-operation-list{display:grid;gap:8px;max-height:390px;overflow:auto;padding-right:3px}
+.prime-operation-list .prime-evidence-card{padding:10px 12px}
+.prime-operation-list .prime-evidence-card h3{font-size:12px}
+.prime-operation-list pre{margin-bottom:0}
+.workspace-main-view .prime-operation-list{max-height:none;overflow:visible;padding-right:0}
+.workspace-main-view .prime-operation-list .prime-evidence-card{background:rgba(10,25,24,.5)}
+.prime-journal-counts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.prime-evidence-card .prime-journal-count{font-size:clamp(24px,4vw,40px);font-variant-numeric:tabular-nums;color:#d6eee4;line-height:1.2;margin:12px 0 4px}
+@media(max-width:760px){.prime-fleet-bar{padding:10px 14px;gap:9px}.prime-fleet-nodes{width:100%;gap:5px}.prime-fleet-node{font-size:10px;padding:6px 7px}.prime-fleet-state{display:none}.prime-fleet-note{margin-left:0}.prime-forge-status{font-size:10px}.prime-evidence-card{padding:12px}}
+@media(max-width:420px){.prime-journal-counts{grid-template-columns:1fr}}
+@media(prefers-reduced-motion:reduce){.prime-fleet-led{box-shadow:none!important}}
