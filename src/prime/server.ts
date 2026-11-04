@@ -9,6 +9,7 @@ import {WorkspaceBridge,WorkspaceHttpError,type WorkspaceConfig} from './workspa
 const assets:Record<string,string>={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/orb.js':'orb.js','/app.js':'app.js','/chat.js':'chat.js','/integrations.js':'integrations.js','/catalog.js':'catalog.js','/steward.js':'steward.js','/workspace-client.js':'workspace-client.js','/workspace.js':'workspace.js'};
 const debug=debuglog('echo-prime-server');
 assets['/privacy']='privacy.html';assets['/privacy.css']='privacy.css';
+for(const name of ['composer.js','voicebar.js','plugins.js','composer.css'])assets['/'+name]=name;
 async function body(req:IncomingMessage){
  let size=0;const chunks:Buffer[]=[];
  for await(const part of req){size+=part.length;if(size>131072)throw new Error('Request exceeds 128 KiB');chunks.push(part);}

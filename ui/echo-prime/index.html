@@ -4,7 +4,8 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>ECHO Prime · Your intelligence, connected</title>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css"><link rel="stylesheet" href="composer.css">
+  <script defer src="composer.js"></script><script defer src="voicebar.js"></script><script defer src="plugins.js"></script>
 </head>
 <body>
 <svg class="icon-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
@@ -28,7 +29,7 @@
   <nav aria-label="Workspace"><button class="nav-item active" data-view="conversation"><svg><use href="#i-chat"/></svg>Conversation<span class="active-dot"></span></button><button class="nav-item" data-view="studio"><svg><use href="#i-spark"/></svg>Creative studio</button><button class="nav-item" data-view="systems"><svg><use href="#i-chip"/></svg>Echo systems<span class="nav-count">12</span></button></nav>
   <button class="nav-item" id="open-steward"><svg><use href="#i-shield"/></svg>Node Steward</button>
   <button class="nav-item" id="workspace-open-esh" data-owner-only hidden><svg><use href="#i-code"/></svg>ESH shell</button>
-  <div id="workspace-navigation" hidden><button class="nav-item" data-workspace-view="projects">Projects</button><button class="nav-item" data-workspace-view="library">Files &amp; journals</button><button class="nav-item" data-workspace-view="memory">Memory</button><button class="nav-item" data-workspace-view="plugins">MCP connections</button><button class="nav-item" data-workspace-view="voice">Voice &amp; personality</button><button class="nav-item" data-workspace-view="operations" data-owner-only>Tools &amp; diagnostics</button></div>
+  <div id="workspace-navigation" hidden><button class="nav-item" data-workspace-view="projects">Projects</button><button class="nav-item" data-workspace-view="library">Library</button><button class="nav-item" id="workspace-open-plugins">Plugins &amp; memory</button><button class="nav-item" data-workspace-view="operations" data-owner-only>SDK</button><button class="nav-item" data-workspace-view="operations" data-owner-only>Vault</button><button class="nav-item" data-workspace-view="library">Code review</button><button class="nav-item" data-view="logs" data-owner-only>Logs &amp; debugging</button><button class="nav-item" data-workspace-view="voice">Voice &amp; personality</button></div>
   <button class="nav-item" data-workspace-view="account" id="workspace-account">Account</button>
   <label class="workspace-search" id="workspace-search-label" hidden>Find a conversation<input id="workspace-chat-search" type="search" maxlength="500" autocomplete="off"></label>
   <div class="history-heading">YOUR SPACE<button id="clear-history" title="Clear local drafts" aria-label="Clear local drafts"><svg><use href="#i-sliders"/></svg></button></div>
