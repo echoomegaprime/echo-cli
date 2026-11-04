@@ -37,7 +37,21 @@ const fusion = (over: Record<string, unknown> = {}) => ({
   provenance: { profile: 'MAXIMALIST_RECONSTRUCTED', historical_parity: false, seats: 40 }, ...over });
 const json = (status: number, body: unknown) => ({ ok: status < 400, status, json: async () => body });
 
-interface Opts { health?: unknown; healthStatus?: number; run?: () => unknown; runStatus?: number; runs?: (n: number) => { status?: number; body: unknown } }
+interface Session { workspaceConfigured: boolean; authenticated: boolean; ownerAccess: boolean; csrf: string | null; user: { uid: string; role: string; status: string } | null }
+const owner = (): Session => ({ workspaceConfigured: true, authenticated: true, ownerAccess: true, csrf: 'csrf-owner', user: { uid: 'owner', role: 'owner', status: 'approved' } });
+const member = (): Session => ({ workspaceConfigured: true, authenticated: true, ownerAccess: false, csrf: 'csrf-member', user: { uid: 'member', role: 'member', status: 'approved' } });
+const anonymous = (): Session => ({ workspaceConfigured: true, authenticated: false, ownerAccess: false, csrf: null, user: null });
+/** Stands in for workspace.js on a host with an authenticated Workspace: the cached session, ownerHeaders() (which in production re-reads /api/session) and invalidate(). */
+function workspaceStub(session: Session | null, enabled = true) {
+  const ws = {
+    ready: Promise.resolve(enabled), enabled, session, sessionReads: 0,
+    ownerHeaders: vi.fn(async () => { ws.sessionReads++; if (!ws.session?.ownerAccess) throw new Error('Primary owner admission required.'); return { 'x-echo-csrf': ws.session.csrf! }; }),
+    invalidate: vi.fn(() => { ws.session = null; }),
+  };
+  return ws;
+}
+
+interface Opts { health?: unknown; healthStatus?: number; run?: () => unknown; runStatus?: number; runs?: (n: number) => { status?: number; body: unknown }; models?: unknown; modelsStatus?: number; workspace?: ReturnType<typeof workspaceStub> }
 async function setup(opts: Opts = {}) {
   const toolbar = element(), composer = element(), send = element(), stop = element(), log = element(), welcome = element();
   const nodes: Record<string, El> = { '.composer-toolbar': toolbar, '#composer': composer, '#composer .send': send, '#stop-chat': stop, '#chat-log': log, '#welcome': welcome };
@@ -49,25 +63,30 @@ async function setup(opts: Opts = {}) {
   const fetch = vi.fn(async (url: string, init?: { method?: string; body?: string }) => {
     const method = init?.method ?? 'GET', body = init?.body ? JSON.parse(init.body) : undefined;
     calls.push({ url, method, body });
-    if (url === '/api/prime/models') return json(200, report());
+    if (url === '/api/prime/models') return json(opts.modelsStatus ?? 200, opts.models ?? report());
     if (url === '/api/prime/swarm/health') return json(opts.healthStatus ?? 200, opts.health ?? { configured: true, available: true, defaultBudget: { max_calls: 80, max_cost_usd: 1, max_wall_s: 1800 }, worker: { profile: 'MAXIMALIST_RECONSTRUCTED' } });
     if (url === '/api/prime/swarm/run') return json(opts.runStatus ?? 202, opts.run ? opts.run() : { runId: RUN, phase: 'independent', budget: { max_calls: 80, max_cost_usd: 1, max_wall_s: 1800 }, idempotencyKey: 'prime-x' });
     if (url === `/api/prime/swarm/runs/${RUN}`) { polls++; const r = opts.runs ? opts.runs(polls) : { body: { runId: RUN, phase: 'independent', done: false } }; return json(r.status ?? 200, r.body); }
     throw new Error('unexpected url ' + url);
   });
   const chat = { send: vi.fn(async () => ({ sent: true, detail: 'original' })), cancel: vi.fn(), reset: vi.fn() };
-  const window: Record<string, unknown> = { addEventListener: vi.fn(), EchoPrimeChat: chat };
+  const window: Record<string, unknown> = { addEventListener: vi.fn(), EchoPrimeChat: chat, ...(opts.workspace ? { EchoPrimeWorkspace: opts.workspace } : {}) };
   const context = { window, document: doc, fetch, localStorage: { getItem: () => null, setItem: () => undefined }, setTimeout, clearTimeout, Date, AbortController, Error, console: { debug: vi.fn(), log: console.log } };
   runInNewContext(modelsSource, context);
   const models = window.EchoPrimeModels as { ready: Promise<void>; provider(): string | undefined; swarm(): boolean };
   await models.ready;
   const { send: sentChat, cancel: cancelSpy, reset: resetSpy } = chat; // swarm.js wraps these; the originals are what other providers must still reach
   runInNewContext(swarmSource, context);
-  await (window.EchoPrimeSwarm as { ready: Promise<unknown> }).ready;
+  const swarm = window.EchoPrimeSwarm as { ready: Promise<unknown>; refresh(): Promise<unknown> };
+  await swarm.ready;
   const select = flat(toolbar).find(e => e.tag === 'select')!;
   const choose = (id: string) => { select.value = id; select.fire('change'); };
+  const windowHandlers = window.addEventListener as ReturnType<typeof vi.fn>;
+  /** Fires every window listener registered for the event (models.js and swarm.js both subscribe). */
+  const fire = (name: string) => { for (const [registered, fn] of windowHandlers.mock.calls as [string, () => void][]) if (registered === name) fn(); };
+  const count = (url: string) => calls.filter(c => c.url === url).length;
   return { chat: window.EchoPrimeChat as { send(t: string): Promise<Record<string, unknown>>; cancel(): void; reset(): void }, original: sentChat, originalCancel: cancelSpy, originalReset: resetSpy,
-    select, choose, toolbar, calls, models, send, stop, log, doc, visibility, polls: () => polls, windowHandlers: window.addEventListener as ReturnType<typeof vi.fn> };
+    select, choose, toolbar, calls, count, fire, models, swarm, ws: opts.workspace, send, stop, log, doc, visibility, polls: () => polls, windowHandlers };
 }
 const settle = () => vi.advanceTimersByTimeAsync(0);
 /** Starts a turn, lets the first poll happen on the fake clock, and returns the settled result. */
@@ -105,6 +124,53 @@ describe('Swarm entry in the model picker', () => {
     s.choose('claude');
     expect(await s.chat.send('hi')).toMatchObject({ detail: 'original' });
     expect(s.original).toHaveBeenCalledTimes(1); expect(s.calls.some(c => c.url.endsWith('/swarm/run'))).toBe(false);
+  });
+});
+
+describe('owner-only status routes before sign-in (the 2026-11-04 401 request storm)', () => {
+  const HEALTH = '/api/prime/swarm/health', MODELS = '/api/prime/models';
+  it('anonymous visitor: neither owner-only route is fetched, nothing is invalidated, the session is not re-read, and both pickers say to sign in', async () => {
+    const s = await setup({ workspace: workspaceStub(anonymous()), healthStatus: 401, health: { error: 'Sign in required' }, modelsStatus: 401, models: { error: 'Sign in required' } });
+    expect(await s.swarm.ready).toEqual({ available: false, reason: 'Sign in to use the Swarm.' });
+    expect(s.count(HEALTH)).toBe(0); expect(s.count(MODELS)).toBe(0);
+    expect(s.ws!.invalidate).not.toHaveBeenCalled(); expect(s.ws!.sessionReads).toBe(0);
+    expect(text(s.toolbar)).toContain('Sign in to choose a model'); expect(s.select.disabled).toBe(true);
+    expect(s.select.children[5].textContent).toBe('Swarm (40-seat brain) (unavailable)');
+    expect(s.models.swarm()).toBe(false); expect(s.models.provider()).toBeUndefined();
+    for (let i = 0; i < 25; i++) s.fire('echo-account-changed');
+    await settle();
+    expect(s.count(HEALTH)).toBe(0); expect(s.count(MODELS)).toBe(0);
+    expect(s.ws!.invalidate).not.toHaveBeenCalled(); expect(s.ws!.sessionReads).toBe(0);
+    expect(s.original).not.toHaveBeenCalled();
+  });
+  it('signed-in member: the owner-only routes are skipped and both pickers say they are for the primary owner only', async () => {
+    const s = await setup({ workspace: workspaceStub(member()), healthStatus: 403, health: { error: 'Primary owner admission required' }, modelsStatus: 403, models: { error: 'Primary owner admission required' } });
+    expect(await s.swarm.ready).toEqual({ available: false, reason: 'The Swarm is available to the primary owner only.' });
+    expect(s.count(HEALTH)).toBe(0); expect(s.count(MODELS)).toBe(0); expect(s.ws!.invalidate).not.toHaveBeenCalled();
+    expect(text(s.toolbar)).toContain('primary owner only'); expect(s.select.disabled).toBe(true);
+  });
+  it('owner whose session expired: one fetch, exactly one invalidate, no retry, then the honest sign-in state', async () => {
+    const s = await setup({ workspace: workspaceStub(owner()), healthStatus: 401, health: { error: 'Sign in required' } });
+    expect(s.count(HEALTH)).toBe(1); expect(s.ws!.invalidate).toHaveBeenCalledTimes(1); expect(s.ws!.session).toBeNull();
+    expect(await s.swarm.ready).toEqual({ available: false, reason: 'Swarm status unavailable (Sign in required)' });
+    s.fire('echo-account-changed'); await settle(); // what the invalidation dispatches in production
+    expect(s.count(HEALTH)).toBe(1); expect(s.ws!.invalidate).toHaveBeenCalledTimes(1);
+    expect(text(s.toolbar)).toContain('Sign in to choose a model');
+    expect(await s.swarm.refresh()).toEqual({ available: false, reason: 'Sign in to use the Swarm.' });
+    expect(s.count(HEALTH)).toBe(1);
+  });
+  it('host without an authenticated Workspace: a 403 is reported as unavailable and invalidates nothing', async () => {
+    const s = await setup({ workspace: workspaceStub({ workspaceConfigured: false, authenticated: false, ownerAccess: false, csrf: null, user: null }, false), healthStatus: 403, health: { error: 'Same-origin Prime session required' } });
+    expect(s.count(HEALTH)).toBe(1); expect(s.ws!.invalidate).not.toHaveBeenCalled();
+    expect(await s.swarm.ready).toEqual({ available: false, reason: 'Swarm status unavailable (Same-origin Prime session required)' });
+  });
+  it('cools down for 5 s after a failed status check even while account events keep firing', async () => {
+    const s = await setup({ workspace: workspaceStub(owner()), healthStatus: 500, health: { error: 'boom' } });
+    expect(s.count(HEALTH)).toBe(1); expect(s.ws!.invalidate).not.toHaveBeenCalled();
+    for (let i = 0; i < 5; i++) s.fire('echo-account-changed');
+    await settle(); expect(s.count(HEALTH)).toBe(1);
+    await vi.advanceTimersByTimeAsync(4900); s.fire('echo-account-changed'); await settle(); expect(s.count(HEALTH)).toBe(1);
+    await vi.advanceTimersByTimeAsync(200); s.fire('echo-account-changed'); await settle(); expect(s.count(HEALTH)).toBe(2);
   });
 });
 

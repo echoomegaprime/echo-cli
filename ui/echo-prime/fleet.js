@@ -185,7 +185,14 @@
   mount();render();
   setInterval(()=>{if(!doc.hidden)void pollFleet();},FLEET_MS);
   setInterval(()=>{if(!doc.hidden)void pollHealth();},HEALTH_MS);
-  window.addEventListener('echo-account-changed',()=>{reset();later(pollAll);});
+  window.addEventListener('echo-account-changed',()=>{
+   // workspace.js dispatches this only for a real identity change, and its cached session is the identity the page
+   // now renders. When this bar already reflects that identity there is nothing to re-admit, so a repeated event can
+   // never restart polling (the 2026-11-04 request storm re-read /api/session twice per event here).
+   const key=identityKey(window.EchoPrimeWorkspace?.session);
+   if(key===lastKey){console.debug('[echo.fleet]',{event:'account_event',outcome:'unchanged'});return;}
+   reset();later(pollAll);
+  });
   doc.addEventListener('visibilitychange',()=>{if(!doc.hidden)void pollAll();});
   window.addEventListener('pagehide',()=>reset());
   window.addEventListener('pageshow',event=>{if(event.persisted)void pollAll();});

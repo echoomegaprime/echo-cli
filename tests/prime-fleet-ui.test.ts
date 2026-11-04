@@ -40,7 +40,7 @@ const fleetResponse=()=>({observed_at:now(),nodes:[
  {id:'crucible',connection:'unknown'},
 ]});
 
-interface World {session:any;handlers:Record<string,(body?:any)=>any>;calls:[string,any][];sessionError:boolean;onIdentity?:(session:any)=>void}
+interface World {session:any;handlers:Record<string,(body?:any)=>any>;calls:[string,any][];sessionError:boolean;sessionReads:number;onIdentity?:(session:any)=>void}
 function boot(world:World,options:{logs?:boolean}={}){
  const created:Node[]=[],queried=new Map<string,Node>(),timers:{fn:()=>unknown;ms:number}[]=[],events:Record<string,((event:any)=>unknown)[]>={},documentEvents:Record<string,((event:any)=>unknown)[]>={};
  const get=(selector:string)=>{if(!queried.has(selector))queried.set(selector,new Node());return queried.get(selector)!;};
@@ -52,6 +52,7 @@ function boot(world:World,options:{logs?:boolean}={}){
   session:any=null;
   constructor(options:any){world.onIdentity=options.onIdentityChange;}
   async loadSession(){
+   world.sessionReads++;
    if(world.sessionError){world.onIdentity?.(null);throw new Error('Account admission unavailable.');}
    const value=world.session,previous=this.session;
    const changed=(previous?.user?.uid??null)!==(value.user?.uid??null)||!!previous?.authenticated!==!!value.authenticated||previous?.user?.status!==value.user?.status||!!previous?.ownerAccess!==!!value.ownerAccess;
@@ -64,7 +65,8 @@ function boot(world:World,options:{logs?:boolean}={}){
    return handler(body);
   }
  }
- const window:any={EchoPrimeWorkspaceTransport:Transport,EchoPrimeWorkspace:{ready:Promise.resolve(true)},
+ // The facade exposes the Workspace's cached session the way workspace.js does, so the bar can tell a real change from a repeated event.
+ const window:any={EchoPrimeWorkspaceTransport:Transport,EchoPrimeWorkspace:{ready:Promise.resolve(true),get session(){return world.sessionError?null:world.session;}},
   addEventListener:(name:string,callback:(event:any)=>unknown)=>(events[name]??=[]).push(callback),
   dispatchEvent:(event:any)=>{for(const fn of events[event.type]||[])fn(event);}};
  const context={window,document,AbortController,Promise,setInterval:(fn:()=>unknown,ms:number)=>{timers.push({fn,ms});return timers.length;},clearInterval:vi.fn(),console};
@@ -81,7 +83,7 @@ function boot(world:World,options:{logs?:boolean}={}){
   leds:()=>Object.fromEntries(['quench','forge','anvil','hammer','temper','crucible'].map(id=>[id,nodeButton(id).className.replace('fleet-node ','')])),
   forgeText:()=>byId('forge-connection').textContent};
 }
-const world=(over:Partial<World>={}):World=>({session:session(),sessionError:false,calls:[],handlers:{
+const world=(over:Partial<World>={}):World=>({session:session(),sessionError:false,sessionReads:0,calls:[],handlers:{
  '/fleet':()=>fleetResponse(),'/health':()=>({ok:true,model:{loaded:true},sync:{verified:4,remaining:0,mode:undefined}}),
 },...over});
 
@@ -192,6 +194,16 @@ describe('live node bar',()=>{
   expect(dialog.open).toBe(false);expect(Object.values(h.leds()).every(v=>v==='unknown')).toBe(true);
   slow.resolve(fleetResponse());await pending;await flush();
   expect(Object.values(h.leds()).every(v=>v==='unknown')).toBe(true);
+ });
+ it('ignores an echo-account-changed event whose identity it already reflects: no session re-read, no refetch, no reset',async()=>{
+  for(const s of [session(),anonymous()]){
+   const w=world({session:s}),h=boot(w);await flush();
+   await h.nodeButton('forge').fire('click');const dialog=h.created.find(n=>n.tagName==='DIALOG')!;expect(dialog.open).toBe(true);
+   const calls=h.calls.length,reads=w.sessionReads;
+   for(let i=0;i<25;i++)h.emit('echo-account-changed');
+   await flush();
+   expect(h.calls.length).toBe(calls);expect(w.sessionReads).toBe(reads);expect(dialog.open).toBe(true);
+  }
  });
  it('does not restart polling when the transport reports an unchanged identity',async()=>{
   const w=world(),h=boot(w);await flush();const before=h.calls.length;
