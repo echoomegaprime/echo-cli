@@ -15,7 +15,8 @@
  const input=(placeholder,value='',type='text')=>element('input',{placeholder,value,type,autocomplete:'off'});
  const field=(label,node)=>element('label',{class:'workspace-field'},element('span',{},label),node);
  const pre=value=>element('pre',{class:'workspace-receipt'},typeof value==='string'?value:JSON.stringify(value,null,2));
- function status(text){notice.textContent=text;}
+ const statusHooks=[];
+ function status(text){notice.textContent=text;for(const hook of statusHooks)try{hook(text);}catch{}}
  function log(operation,outcome){console.debug('[echo.workspace]',{schema_version:1,event:'workspace_operation',operation,outcome});}
  function button(label,action,className='quiet-button',panelScoped=true){
   const node=element('button',{type:'button',class:className},label),epoch=state.epoch,accountEpoch=state.accountEpoch,panel=state.panel;
@@ -62,6 +63,7 @@
   const used=Math.ceil((messages.reduce((n,m)=>n+(typeof m.content==='string'?m.content.length:0),0)+(Number(state.data?.base_context_chars)||0)+$('#prompt').value.length)/4);
   $('#workspace-context').textContent=capacity>0?`Estimated context ${used.toLocaleString()} / ${capacity.toLocaleString()} tokens`:'';
   $('#workspace-attachments').textContent=state.attachments.size?`${state.attachments.size} attached files`:'';
+  window.dispatchEvent(new Event('echo-workspace-context'));
  }
  function line(role,text,detail){
   const article=element('article',{class:'chat-message '+role},element('strong',{},role==='user'?'You':role==='assistant'?'Echo Prime':'Activity'),element('p',{},String(text)));
@@ -263,7 +265,7 @@
  function scheduleListening(){
   clearTimeout(listenTimer);if(!voiceOptions.conversation)return;
   if(voiceOptions.remaining<=0){endConversation();voiceOptions.limitReached=true;status('Voice conversation paused after ten turns. Select Start voice conversation to resume explicitly.');return;}
-  const epoch=state.epoch,panel=state.panel;listenTimer=setTimeout(()=>{if(!voiceOptions.conversation||epoch!==state.epoch||panel!==state.panel||document.hidden||!dialog.open)return;void dictate().catch(()=>{endConversation();stopAudio();status('Voice conversation stopped. Review the last receipt before resuming.');});},300);
+  const epoch=state.epoch,panel=state.panel;listenTimer=setTimeout(()=>{if(!voiceOptions.conversation||epoch!==state.epoch||panel!==state.panel||document.hidden||!(dialog.open||state.voiceBar))return;void dictate().catch(()=>{endConversation();stopAudio();status('Voice conversation stopped. Review the last receipt before resuming.');});},300);
  }
  // Reuses the canonical Workspace mono 16 kHz PCM WAV contract. Raw samples
  // exist only for this bounded capture; no browser storage or automatic send.
@@ -436,5 +438,14 @@
    return state.enabled;
   }catch{status('Workspace connection is unavailable. No automatic retry or alternate account was used.');return false;}
  })();
- window.EchoPrimeWorkspace={ready,get enabled(){return state.enabled;},get generalMode(){return state.enabled&&$('#workspace-chat-kind').value==='workspace';},send,newChat,open,ownerHeaders,invalidate(){transport.clear();},cancel(){state.turn?.abort();}};
+ // Narrow facade for the composer, voice bar and plugins view. It deliberately
+ // omits the CSRF proof, transport and request headers.
+ async function haltSpeech(){const speech=state.speech;stopAudio();if(speech?.session_id)await api('/voice/cancel',speech);}
+ const bridge=Object.freeze({state,voiceOptions,get session(){return transport.session;},api,refresh,openChat,updateContext,dictate,speakReply,stopAudio,endConversation,
+  onStatus(hook){if(typeof hook==='function')statusHooks.push(hook);},
+  setChat(chat){if(chat&&chat.id&&chat.id===state.chat?.id){state.chat=chat;renderChat();}},
+  async startConversation(){if(voiceOptions.conversation||state.capture||state.micPending)throw new Error('Stop the active microphone or voice conversation first.');voiceOptions.conversation=true;voiceOptions.remaining=10;voiceOptions.limitReached=false;try{await dictate();}catch(error){endConversation();stopAudio();throw error;}},
+  async stopVoice(){endConversation();try{await haltSpeech();}finally{status('Voice stopped. Microphone off. No pending response will restart it.');}},
+  async interrupt(){try{await haltSpeech();}catch{}await dictate();}});
+ window.EchoPrimeWorkspace={ready,bridge,get enabled(){return state.enabled;},get generalMode(){return state.enabled&&$('#workspace-chat-kind').value==='workspace';},send,newChat,open,ownerHeaders,invalidate(){transport.clear();},cancel(){state.turn?.abort();}};
 })();

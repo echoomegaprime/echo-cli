@@ -26,15 +26,15 @@ Update this file as each row lands. Visual comparison (screenshots) is tracked i
 
 | Feature | WS ref | Prime | PR ref | Notes |
 |---|---|---|---|---|
-| Chats | `data-view=chats` | reduced | `index.html:29` "Conversation" | label differs |
+| Chats | `data-view=chats` | **present** (label) | `plugins.js` `labels()` renames "Conversation" when a Workspace is configured | Offline Prime keeps its own label |
 | Projects | `app.js:209-216` | hidden, reduced | `workspace.js:188-192` | dialog only; no per-project chat list / start chat |
-| Library | `app.js:237-247` | hidden, reduced | `workspace.js:193-205` | no search box, no "Write a note", no Save-to-library per code block; upload 500 KB vs 100 KB |
-| Plugins & memory | `app.js:257-276` | hidden, split | `index.html:31` Memory + MCP | label does not exist |
-| SDK | `app.js:277-289` | hidden, owner, reduced | `workspace.js:345-348` | search + read schema only; no `/api/catalog`, no invoke |
-| Vault | `app.js:290-303` | hidden, owner, reduced | `workspace.js:349-350` | put only; no locate/get/list |
-| Code review | `app.js:304-312` | hidden, reduced | `workspace.js:200` | per-file only; no paste/project pick |
+| Library | `app.js:237-247` | hidden, reduced | nav label `index.html:31`; Save-to-library per message/code block `composer.js` `saveDialog` | no search box, no "Write a note" page; upload 500 KB vs 100 KB. Page not in this slice |
+| Plugins & memory | `app.js:257-276` | **present** (hidden until Workspace) | `plugins.js` (unified view), nav `index.html:31` `#workspace-open-plugins` | MCP + private preferences for every approved account; owner cards in section 4. Replaces the separate Memory and MCP connections nav entries |
+| SDK | `app.js:277-289` | hidden, owner, **nav entry first-class** | nav `index.html:31` (opens existing `operations` view `workspace.js:345-348`) | page still search + read schema only; no `/api/catalog`, no invoke (not this slice) |
+| Vault | `app.js:290-303` | hidden, owner, **nav entry first-class** | nav `index.html:31` (opens existing `operations` view `workspace.js:349-350`) | put only; no locate/get/list (not this slice) |
+| Code review | `app.js:304-312` | hidden, **nav entry first-class** | nav `index.html:31` (opens Library view, `workspace.js:200` per-file review) | no paste/project pick page (not this slice) |
 | Logs & debugging | `app.js:324-330,344` | hidden, owner, **present** | `logs.js` (nav button "Logs & debugging" added to `#workspace-navigation`) | see section 3; `workspace.js` "Tools & diagnostics" raw-JSON buttons remain |
-| Recent chats | `.side-label` + `#chat-list` (50) | hidden | `index.html:34-35` "YOUR SPACE" + `#history` (500) | heading differs |
+| Recent chats | `.side-label` + `#chat-list` (50) | hidden, **present** (heading) | `plugins.js` `labels()` renames "YOUR SPACE" when a Workspace is configured; list `#history` (500) | |
 | Chat search | `#chat-search`, 250 ms debounce | hidden, present | `workspace.js:425-426` | same endpoint |
 | Creative, Systems, Steward, ESH, Account, Appearance | none | extra | `index.html:29-37` | preserve |
 
@@ -53,29 +53,29 @@ Update this file as each row lands. Visual comparison (screenshots) is tracked i
 
 | Feature | WS ref | Prime | PR ref | Notes |
 |---|---|---|---|---|
-| MCP list / add / enable / remove | `mcp.js` | hidden, present | `workspace.js:228-233` | raw schema JSON |
-| Check connections (Crystal, ECF, ESH cards) | `app.js:257-275` | reduced | `workspace.js:345` | raw JSON |
-| Recall a memory | card | hidden, present, owner | `workspace.js:223-225` | |
-| Store a memory to Crystal (`crystal_save`) | card | **missing** | none | Prime `memory_save` is the preference store |
-| Automatic journal hooks, delivery status | card | **missing** | none | |
-| Personality Forge assets (`personality_assets`) | card, if `voice.configured` | **missing** | `workspace.js:335` | |
-| BloodlinePrime directive | card | **missing** | none | |
-| ESH action card | `app.js` | hidden, owner, present | `workspace.js:156-185,348` | Prime requires review-then-run (preserve) |
-| Non-owner view | `app.js:259` | present | `workspace.js:47` | |
+| MCP list / add / enable / remove | `mcp.js` | hidden, **present** | `plugins.js` `mcpCards`, `toolSummary` | tool schemas shown as name — description; credential field cleared after every add |
+| Check connections (Crystal, ECF, ESH cards) | `app.js:257-275` | hidden, owner, **present** | `plugins.js` `connectionCards` (`/api/plugins`) | cards show Readable / Unavailable / Not checked with the backend error text |
+| Recall a memory | card | hidden, owner, **present** | `plugins.js` `ownerCards` (`memory_search`, ecf/crystal) | |
+| Store a memory to Crystal (`crystal_save`) | card | hidden, owner, **present** | `plugins.js` `ownerCards` | empty input refused client-side; receipt shown with a "confirm readback" notice, never "saved" on its own. Prime `memory_save` stays in Private preferences |
+| Automatic journal hooks, delivery status | card | hidden, owner, **present** (status) | `plugins.js` `syncSummary` | reads saved sync counts; the "Retry pending records" button belongs to the journal slice |
+| Personality Forge assets (`personality_assets`) | card, if `voice.configured` | hidden, owner, **present** | `plugins.js` `ownerCards` | card text uses the backend voice label, not a hardcoded name |
+| BloodlinePrime directive | card | hidden, owner, **present** | `plugins.js` `ownerCards` "Directive profile" | |
+| ESH action card | `app.js` | hidden, owner, present | `workspace.js:156-185,348`; `plugins.js` button opens the dock | Prime requires review-then-run (preserve) |
+| Non-owner view | `app.js:259` | **present** | `plugins.js` `render` (MCP + private preferences only; owner actions revalidate admission at click time) | |
 
 ## 5. Composer and chat controls
 
 | Feature | WS ref | Prime | PR ref | Notes |
 |---|---|---|---|---|
 | Message box | `app.js:121`, 100,000 chars | reduced | `index.html:57`, 12,000 chars | |
-| Attach | `app.js:140-144` chips | reduced | `workspace.js:199` | no composer button/chips |
-| Mic / "◉ Voice" | `voice.js:10-14`, `app.js:124-127` | reduced | `workspace.js:341,428` | dialog-driven, 10-turn cap (preserve) |
-| "◈ Memory · automatic" chip | `app.js:~133` | **missing** | none | |
-| Send, hint "Enter to send · Shift+Enter for a new line" | `app.js:~136` | reduced/present | `index.html:57-58` | |
-| Context meter `7,657 / 262,144 · 2.9% · estimate` + progress bar | `app.js:81-94`, `model_usage` events | reduced | `workspace.js:60-65` | text only, no % / bar / measured path |
-| Toolbar: Project, Personality, Rename, Compact, Continue, Journal | `app.js:98-110` | hidden, reduced | `index.html:72`, `workspace.js:419-423` | Personality select missing |
-| Checkpoint banner | `app.js:~112` | **missing** | none | |
-| Message actions Copy / Save to library / ▶ Listen; code blocks "Save file" | `app.js:57-73` | **missing** | none | |
+| Attach | `app.js:140-144` chips | **present** | `composer.js` `attachDialog`, `renderChips` | shares `state.attachments` with the Library view |
+| Mic / "◉ Voice" | `voice.js:10-14`, `app.js:124-127` | reduced, **◉ Voice present** | `composer.js` Voice toggle (`bridge.startConversation`, 10-turn cap kept in `workspace.js`); mic button still opens the Voice panel | hidden unless `voice.configured`; hands-free re-listen now also runs while the voice bar is visible (`workspace.js` `scheduleListening`) |
+| "◈ Memory · automatic" chip | `app.js:~133` | **present** | `composer.js` `build` | |
+| Send, hint "Enter to send · Shift+Enter for a new line" | `app.js:~136` | **present** (Workspace mode) | `composer.js` sets `.keyboard-hint` | |
+| Context meter `7,657 / 262,144 · 2.9% · estimate` + progress bar | `app.js:81-94`, `model_usage` events | **present** | `composer.js` `contextMeter`, `composer.css` | measured from the last saved `model_usage` event after the final checkpoint (same arithmetic as WS), otherwise an estimate labelled as such. Reads the saved chat readback; live-stream `model_usage` events are still dropped by `workspace-client.js` |
+| Toolbar: Project, Personality, Rename, Compact, Continue, Journal | `app.js:98-110` | hidden, **present** | `index.html:72` controls + Personality select `composer.js` `syncPersonality` (`personality_select`) | |
+| Checkpoint banner | `app.js:~112` | **present** | `composer.js` `syncCheckpoint` | |
+| Message actions Copy / Save to library / ▶ Listen; code blocks "Save file" | `app.js:57-73` | **present** | `composer.js` `decorate`, `messageActions`, `splitBlocks` | applied to saved messages after each readback; streaming text is decorated once saved. Listen only when `voice.configured` |
 | Empty state / starters | `app.js:113-118` | reduced | `index.html:53` | |
 | Mode tabs (Image, Video, Music, SFX, Voice) | none | extra | `index.html:56` | preserve |
 
@@ -83,14 +83,14 @@ Update this file as each row lands. Visual comparison (screenshots) is tracked i
 
 | Feature | WS ref | Prime | PR ref | Notes |
 |---|---|---|---|---|
-| Persistent bar under composer (only when `voice.configured`) | `voice.js:156-168` | **missing** as bar | dialog `workspace.js:333-342` | |
-| Interrupt & speak | `voice.js:163` | **missing** | none | |
-| Stop voice | `voice.js:163` | reduced | `workspace.js:339`, `#stop-chat` | |
-| Spoken replies | `voice.js:164`, persisted `echo-spoken-replies` | reduced | `workspace.js:338` | Prime: off each session (preserve default) |
-| Brief speech | `voice.js:165` | reduced | `workspace.js:338` | |
-| Send speech automatically | `voice.js:166` | reduced | `workspace.js:338` | |
-| Status line "M Freeman · ElevenLabs · Microphone off" | `voice.js:167-168` | reduced | `workspace.js:260,265,330,312` | Prime reports backend voice/provider, not hardcoded |
-| Footer "Personality Forge · …ElevenLabs." | `voice.js:168` | **missing** | none | |
+| Persistent bar under composer (only when `voice.configured`) | `voice.js:156-168` | **present** | `voicebar.js` | shown only when the backend reports `configured === true` |
+| Interrupt & speak | `voice.js:163` | **present** | `voicebar.js`, `workspace.js` `bridge.interrupt` | |
+| Stop voice | `voice.js:163` | **present** | `voicebar.js`, `workspace.js` `bridge.stopVoice` | also ends a hands-free conversation and cancels the provider session |
+| Spoken replies | `voice.js:164`, persisted `echo-spoken-replies` | **present** | `voicebar.js` | WS defaults ON and persists; Prime is OFF every session and never touches browser storage (preserve) |
+| Brief speech | `voice.js:165` | **present** | `voicebar.js` | off each session |
+| Send speech automatically | `voice.js:166` | **present** | `voicebar.js` | off each session |
+| Status line "M Freeman · ElevenLabs · Microphone off" | `voice.js:167-168` | **present** | `voicebar.js` `model` | built from the backend `voice.label` and `voice.provider`, plus Listening / Transcribing / Speaking; never hardcoded |
+| Footer "Personality Forge · …ElevenLabs." | `voice.js:168` | **present** | `voicebar.js` | uses backend `provider_usage` text |
 | Capture limit | 120 s chunked | reduced | 8 s cap (`workspace.js:271,328`) | |
 | Endpoints | `/api/voice/*` | present | `workspace.ts:61,66` | |
 
@@ -111,7 +111,7 @@ Update this file as each row lands. Visual comparison (screenshots) is tracked i
 
 All Workspace `/api/*` routes are on Prime's allowlist (`workspace.ts:60-63`). Not proxied: static pages and `/login`. Prime allowlists `/api/auth/refresh` and `/api/auth/verify`, which the Workspace does not implement (would 404).
 
-Actions: Prime UI calls `personality_select`, `memory_save`, `memory_forget`, `memory_search`, `esh`, `sdk`, `sdk_detail`, `vault` (put). Never called: `personality_assets`, `crystal_save`, `vault` get/locate/list, SDK invoke. `/api/catalog` unused. `/api/health` and `/api/fleet` are now polled by `fleet.js`; `/api/diagnostics` and `/api/sync` are used by `logs.js`.
+Actions: Prime UI calls `personality_select`, `memory_save`, `memory_forget`, `memory_search`, `esh`, `sdk`, `sdk_detail`, `vault` (put), plus (composer slice) `personality_assets` and `crystal_save` from `plugins.js`. Never called: `vault` get/locate/list, SDK invoke. `/api/catalog` unused; `/api/health` and `/api/fleet` are now polled by `fleet.js`; `/api/diagnostics` and `/api/sync` are used by `logs.js`.
 
 ## Gaps by size
 
