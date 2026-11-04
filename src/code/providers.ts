@@ -17,10 +17,10 @@ export interface RunResult { code: number | null; stdout: string; stderr: string
 export type Runner = (cmd: string, args: string[], options: RunOptions) => Promise<RunResult>;
 export interface Answered { provider: ProviderId; requested: string | null; model: string | null; reported: boolean }
 export class ProviderUnavailableError extends Error {
-  constructor(readonly provider: ProviderId, detail: string) { super(`${LABEL[provider]} is unavailable: ${detail}; no fallback was used`); this.name = 'ProviderUnavailableError'; }
+  constructor(readonly provider: ProviderId, detail: string) { super(`${PROVIDER_LABEL[provider]} is unavailable: ${detail}; no fallback was used`); this.name = 'ProviderUnavailableError'; }
 }
-const LABEL: Record<ProviderId, string> = { claude: 'Claude (claude CLI)', gpt: 'GPT (codex CLI)', grok: 'Grok (grok CLI)' };
-const BIN: Record<ProviderId, string> = { claude: 'claude', gpt: 'codex', grok: 'grok' };
+export const PROVIDER_LABEL: Record<ProviderId, string> = { claude: 'Claude (claude CLI)', gpt: 'GPT (codex CLI)', grok: 'Grok (grok CLI)' };
+export const PROVIDER_BIN: Record<ProviderId, string> = { claude: 'claude', gpt: 'codex', grok: 'grok' };
 const MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$/;
 // Only what a CLI needs to find its own login and run. Nothing named like a key, token or secret ever passes through.
 const ENV_ALLOW = ['PATH', 'Path', 'PATHEXT', 'SystemRoot', 'SYSTEMROOT', 'windir', 'ComSpec', 'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA', 'LOCALAPPDATA', 'USERNAME', 'LANG', 'TERM'];
@@ -113,7 +113,7 @@ export class CliModel implements Model {
     if (options.model !== undefined && !MODEL_NAME.test(options.model)) throw new Error('Invalid model name');
     const timeout = options.timeoutMs ?? 180000;
     if (!Number.isFinite(timeout) || timeout < 1 || timeout > 600000) throw new Error('Invalid model timeout');
-    this.requested = options.model ?? null; this.runner = options.runner ?? run; this.bin = options.bin ?? BIN[provider]; this.timeoutMs = timeout;
+    this.requested = options.model ?? null; this.runner = options.runner ?? run; this.bin = options.bin ?? PROVIDER_BIN[provider]; this.timeoutMs = timeout;
   }
   async next(messages: Message[], signal?: AbortSignal): Promise<Action> {
     if (Buffer.byteLength(JSON.stringify(messages)) > 180000) throw new Error('Context limit reached; start a focused session');
@@ -136,7 +136,7 @@ export class CliModel implements Model {
     if (result.code) throw new ProviderUnavailableError(this.provider, `exited with code ${result.code}`);
     let action: Action;
     try { action = parseAction(JSON.parse(extractJson(redact(parsed.text)))); }
-    catch { throw new Error(`${LABEL[this.provider]} returned an invalid action; no tools were executed for that response`); }
+    catch { throw new Error(`${PROVIDER_LABEL[this.provider]} returned an invalid action; no tools were executed for that response`); }
     this.last = { provider: this.provider, requested: this.requested, model: parsed.model, reported: parsed.model !== null };
     return action;
   }

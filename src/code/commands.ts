@@ -10,6 +10,8 @@ import { join } from 'node:path';
 import { SessionStore, previewProposal } from './sessions.js';
 import { Workspace } from './workspace.js';
 import { LocalModel } from './model.js';
+import { DEFAULT_MODELS, MODEL_IDS, buildModel, sessionModelName } from './model-factory.js';
+import type { ModelId } from './model-factory.js';
 import { runTurn } from './agent.js';
 import type { TaskMode } from './agent.js';
 import { listCheckpoints, prepareCheckpoint, syncCheckpoint } from './continuity.js';
@@ -18,7 +20,15 @@ import { dispatchMcp } from './mcp.js';
 import { collectOwnerReadiness, ownerContracts } from './owners.js';
 import type { RpcRequest } from './mcp.js';
 
-interface Options { workspace: string; stateDir: string; model: string; endpoint: string; steps: string; session?: string; mode: TaskMode }
+interface Options { workspace: string; stateDir: string; model: string; endpoint: string; steps: string; session?: string; mode: TaskMode; provider?: ModelId }
+/** The one place the CLI builds its Model: qwen = local Ollama (flags as before), claude/gpt/grok = that vendor's own CLI, no fallback. */
+function selectModel(opts: Options, command: Command) {
+  const id = opts.provider ?? 'qwen';
+  if (id === 'qwen') return { model: new LocalModel(opts.endpoint, opts.model), name: opts.model };
+  const config = { ...DEFAULT_MODELS, cli: command.getOptionValueSource('model') === 'cli' ? { [id]: { model: opts.model } } : {} };
+  return { model: buildModel(id, config), name: sessionModelName(id, config) };
+}
+const providerOption = () => new Option('--provider <id>', 'Model provider: qwen (local Ollama) or a subscription CLI; never falls back').choices([...MODEL_IDS]).default('qwen');
 function common(command: Command) {
   return command.option('-w, --workspace <path>', 'Workspace directory', process.cwd())
     .option('--state-dir <path>', 'Private local session directory', join(process.env.LOCALAPPDATA || join(homedir(), '.local', 'share'), 'EchoCode', 'sessions'));
@@ -65,10 +75,11 @@ export function registerCodeCommands(code: Command, integrations: { continuityIn
     .option('--steps <count>', 'Maximum model steps (1-30)', '10')
     .addOption(new Option('--mode <mode>', 'Read-only inspection or explicitly enabled edit proposals').choices(['read-only', 'propose']).default('read-only'))
     .option('--session <id>', 'Resume this existing session')
-    .action(async (prompt: string, opts: Options) => {
-      const { store, workspace } = context(opts), model = new LocalModel(opts.endpoint, opts.model);
-      const session = opts.session ? store.get(opts.session) : store.create(workspace.root, opts.model);
-      if (session.model !== opts.model) throw new Error('Resume model mismatch; select the original model');
+    .addOption(providerOption())
+    .action(async (prompt: string, opts: Options, command: Command) => {
+      const { store, workspace } = context(opts), { model, name } = selectModel(opts, command);
+      const session = opts.session ? store.get(opts.session) : store.create(workspace.root, name);
+      if (session.model !== name) throw new Error('Resume model mismatch; select the original model');
       const abort = new AbortController(); const onInterrupt = () => abort.abort(); process.on('SIGINT', onInterrupt);
       try {
         const result = await runTurn({ workspace, store, sessionId: session.id, model, prompt, mode: opts.mode, maxSteps: Number(opts.steps), signal: abort.signal,
@@ -82,11 +93,12 @@ export function registerCodeCommands(code: Command, integrations: { continuityIn
     .option('--endpoint <origin>', 'Loopback Ollama origin', 'http://127.0.0.1:11434')
     .addOption(new Option('--mode <mode>', 'Mode for every turn in this chat invocation').choices(['read-only', 'propose']).default('read-only'))
     .option('--session <id>', 'Resume a session')
-    .action(async (opts: Options) => {
+    .addOption(providerOption())
+    .action(async (opts: Options, command: Command) => {
       if (!process.stdin.isTTY) throw new Error('Interactive chat needs a terminal; use run for scripts');
-      const { workspace, store } = context(opts), model = new LocalModel(opts.endpoint, opts.model);
-      const s = opts.session ? store.get(opts.session) : store.create(workspace.root, opts.model);
-      if (s.workspace !== workspace.root || s.model !== opts.model) throw new Error('Resume workspace/model mismatch');
+      const { workspace, store } = context(opts), { model, name } = selectModel(opts, command);
+      const s = opts.session ? store.get(opts.session) : store.create(workspace.root, name);
+      if (s.workspace !== workspace.root || s.model !== name) throw new Error('Resume workspace/model mismatch');
       const prompt = createPrompt({ input: process.stdin, output: process.stdout });
       output({ sessionId: s.id, mode: opts.mode, approval: 'Edits remain staged; inspect with show and apply with approve in a separate invocation.' });
       try { for (;;) {

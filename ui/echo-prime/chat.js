@@ -32,13 +32,13 @@
     if(status.chat?.state!=='attached')return {sent:false,detail:status.chat?.detail||'Shared chat host is not connected. The prompt remains in this tab.'};
     if(status.chat.busy)return {sent:false,detail:'The host is finishing another turn. The prompt remains in this tab.'};
     line('user',text);submitted=true;
-    const result=await api('chat',{requestId:crypto.randomUUID(),prompt:text,...(sessionId?{sessionId}:{})},controller.signal);
+    const result=await api('chat',{requestId:crypto.randomUUID(),prompt:text,...(sessionId?{sessionId}:{}),...(window.EchoPrimeModels?.provider()?{provider:window.EchoPrimeModels.provider()}:{})},controller.signal);
     if(current!==generation)return {cancelled:true};
     sessionId=result.sessionId;
     const evidence=Array.isArray(result.evidence)?result.evidence.map(e=>e.path+' ['+e.sha256+']').join('; '):'';
     line('assistant',result.answer||'Turn ended without an answer.',
      (result.answerVerification==='unverified_model_text'?'Model text; verify claims. ':'Application result. ')+
-     'Read-only · '+result.status+' · Session '+sessionId+(evidence?' · Sources: '+evidence:''));
+     'Read-only · '+result.status+' · Session '+sessionId+(evidence?' · Sources: '+evidence:'')+(result.model&&window.EchoPrimeModels?' · '+window.EchoPrimeModels.describe(result.model):''));
     console.debug('[echo.code]',{schema_version:1,event:'coding_turn',outcome:result.status==='completed'?'completed':'returned'});
     return {sent:result.status==='completed',detail:result.status==='completed'?'Answer received.':'Turn '+result.status+'. No automatic retry was made.'};
    }catch(error){
