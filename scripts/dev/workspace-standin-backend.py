@@ -22,10 +22,11 @@ ap.add_argument("--data", required=True)
 ap.add_argument("--port", type=int, required=True)
 ap.add_argument("--owner-uid", required=True)
 ap.add_argument("--model-name", default="stand-in-model (no FORGE)")
+ap.add_argument("--google-client-id", default=None, help="use the REAL canonical identity service (auth.echo-op.com) with this registered public Google client ID instead of the stand-in issuer")
 ap.add_argument("--model-url", default=None, help="loopback Ollama endpoint; when set the real Workspace Model is used instead of the stand-in")
 args = ap.parse_args()
 password = os.environ.get("ECHO_STANDIN_PASSWORD", "")
-if len(password) < 12:
+if args.google_client_id is None and len(password) < 12:
     sys.exit("ECHO_STANDIN_PASSWORD (>= 12 chars) is required")
 if args.port in (8768, 18767):
     sys.exit("refusing protected port")
@@ -69,14 +70,16 @@ class StandInModel:
 if args.model_url is None:
     app.Model = StandInModel
 cfg = {
-    "auth": {"enabled": True, "owner_uids": [args.owner_uid], "legacy_data_owner_uid": args.owner_uid},
+    "auth": {"enabled": True, "owner_uids": [args.owner_uid], "legacy_data_owner_uid": args.owner_uid,
+             **({"google_client_id": args.google_client_id} if args.google_client_id else {})},
     "model_url": args.model_url or "http://127.0.0.1:1",
     "model": args.model_name,
     "context_length": 262144,
 }
 application = app.Application(Path(args.data), cfg)
 server = app.make_server(application, args.port)
-server.accounts.accounts.provider = StandInIssuer()
+if args.google_client_id is None:
+    server.accounts.accounts.provider = StandInIssuer()
 print(json.dumps({"ready": True, "port": server.server_port, "standin": True}), flush=True)
 try:
     server.serve_forever()

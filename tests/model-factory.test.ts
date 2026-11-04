@@ -41,7 +41,7 @@ describe('models config', () => {
   it('defaults to Qwen 3.8 256K on the loopback tunnel with no secret in it', () => {
     expect(DEFAULT_MODELS).toEqual({ default: 'qwen', endpoint: 'http://127.0.0.1:11450', model: 'c3po-code:echo-qwen38-abliterated-256k', contextTokens: 262144, cli: {} });
     expect(JSON.stringify(DEFAULT_MODELS)).not.toMatch(/api[_-]?key|secret|password|bearer|\btoken\b/i);
-    expect(MODEL_IDS).toEqual(['qwen', 'claude', 'gpt', 'grok']);
+    expect(MODEL_IDS).toEqual(['qwen', 'claude', 'gpt', 'grok', 'argon']);
   });
   it('parses a reviewed section and fills the rest from defaults', () => {
     expect(parseModelsConfig(undefined)).toEqual(DEFAULT_MODELS);
@@ -57,7 +57,7 @@ describe('models config', () => {
 describe('buildModel', () => {
   it('builds Local for qwen and a CLI model for each subscription provider', () => {
     expect(buildModel('qwen', DEFAULT_MODELS)).toBeInstanceOf(LocalModel);
-    for (const id of ['claude', 'gpt', 'grok'] as const) {
+    for (const id of ['claude', 'gpt', 'grok', 'argon'] as const) {
       const m = buildModel(id, DEFAULT_MODELS);
       expect(m).toBeInstanceOf(CliModel); expect((m as CliModel).provider).toBe(id);
     }
@@ -119,9 +119,9 @@ describe('availability report', () => {
     let now = 1_000_000; const r = runner(() => ok());
     const router = new ModelRouter({ ...DEFAULT_MODELS, endpoint: fake.url }, { runner: r.run, now: () => now });
     await router.report(); await router.report();
-    expect(r.calls).toHaveLength(3); expect(fake.tags()).toBe(1);
-    now += 59_000; await router.report(); expect(r.calls).toHaveLength(3);
-    now += 2_000; await router.report(); expect(r.calls).toHaveLength(6); expect(fake.tags()).toBe(2);
+    expect(r.calls).toHaveLength(4); expect(fake.tags()).toBe(1);
+    now += 59_000; await router.report(); expect(r.calls).toHaveLength(4);
+    now += 2_000; await router.report(); expect(r.calls).toHaveLength(8); expect(fake.tags()).toBe(2);
   });
   it('exposes the model that actually answered the last turn and keeps it after a failed turn', async () => {
     const fake = await ollama([DEFAULT_MODELS.model]);

@@ -5,12 +5,12 @@ import { CliModel, PROVIDER_BIN, PROVIDER_LABEL, childEnv, run, type ProviderId,
 /**
  * The one place a Model is built from a provider id.
  * qwen = LocalModel on a loopback Ollama endpoint (an SSH tunnel to FORGE in the default config).
- * claude / gpt / grok = CliModel, each vendor's own CLI as a subprocess; Prime never touches a token.
+ * claude / gpt / grok / argon = CliModel, each vendor's own CLI as a subprocess; Prime never touches a token.
  * There is no fallback: an id that is unknown, or a provider that fails, fails the turn and says so.
  */
 export type ModelId = 'qwen' | ProviderId;
-export const MODEL_IDS: readonly ModelId[] = ['qwen', 'claude', 'gpt', 'grok'];
-const CLI_IDS: readonly ProviderId[] = ['claude', 'gpt', 'grok'];
+export const MODEL_IDS: readonly ModelId[] = ['qwen', 'claude', 'gpt', 'grok', 'argon'];
+const CLI_IDS: readonly ProviderId[] = ['claude', 'gpt', 'grok', 'argon'];
 export const isModelId = (value: unknown): value is ModelId => typeof value === 'string' && (MODEL_IDS as readonly string[]).includes(value);
 
 export interface ModelsConfig {
@@ -35,7 +35,7 @@ export function parseModelsConfig(value: unknown): ModelsConfig {
   const input = plain(value, 'models');
   only(input, ['default', 'endpoint', 'model', 'contextTokens', 'cli'], 'models');
   const config: ModelsConfig = { ...DEFAULT_MODELS, cli: {} };
-  if (input.default !== undefined) { if (!isModelId(input.default)) throw new Error('Invalid models configuration: default must be qwen, claude, gpt or grok'); config.default = input.default; }
+  if (input.default !== undefined) { if (!isModelId(input.default)) throw new Error('Invalid models configuration: default must be qwen, claude, gpt, grok or argon'); config.default = input.default; }
   if (input.endpoint !== undefined) { if (typeof input.endpoint !== 'string') throw new Error('Invalid models configuration: endpoint'); config.endpoint = input.endpoint; }
   if (input.model !== undefined) { if (typeof input.model !== 'string') throw new Error('Invalid models configuration: model'); config.model = input.model; }
   if (input.contextTokens !== undefined) {

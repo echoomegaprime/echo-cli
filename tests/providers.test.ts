@@ -97,3 +97,39 @@ describe('CLI provider models', () => {
     for (const bad of ['', 'x'.repeat(200), 'a b', '--flag', 'a\nb']) expect(() => new CliModel('claude', { model: bad, runner: recorder(ok('')).runner })).toThrow();
   });
 });
+
+describe('argon (Antigravity agy CLI)', () => {
+  const agy = (response: string, status = 'SUCCESS') => JSON.stringify({ conversation_id: 'c', status, response, num_turns: 1 });
+  it('parses the action, defaults to Gemini 4 Argon and says the CLI does not report the answering model', async () => {
+    const { calls, runner } = recorder(ok(agy(action)));
+    const model = new CliModel('argon', { runner });
+    expect(await model.next(messages)).toEqual({ action: 'final', content: 'done' });
+    expect(model.last).toMatchObject({ provider: 'argon', requested: 'gemini-4-argon-medium', model: null, reported: false });
+    const { args, input } = calls[0];
+    expect(args).toEqual(expect.arrayContaining(['--output-format', 'json', '--mode', 'plan', '--model', 'gemini-4-argon-medium']));
+    expect(args.some(a => a.startsWith('-p=') && a.includes('hello'))).toBe(true);
+    expect(args).not.toContain('--dangerously-skip-permissions');
+    expect(input).toBeUndefined();
+  });
+  it('uses the requested model', async () => {
+    const { calls, runner } = recorder(ok(agy(action)));
+    const model = new CliModel('argon', { model: 'gemini-4-argon-high', runner });
+    await model.next(messages);
+    expect(calls[0].args).toEqual(expect.arrayContaining(['--model', 'gemini-4-argon-high']));
+    expect(model.last?.requested).toBe('gemini-4-argon-high');
+  });
+  it('fails loudly when the CLI reports a non-success status', async () => {
+    const { runner } = recorder(ok(agy('', 'ERROR')));
+    const err = await new CliModel('argon', { runner }).next(messages).catch(e => e);
+    expect(err).toBeInstanceOf(ProviderUnavailableError);
+    expect(String(err.message)).toMatch(/argon/i); expect(String(err.message)).toMatch(/no fallback/i);
+  });
+  it('refuses a prompt too large for the command line instead of truncating or falling back', async () => {
+    const { calls, runner } = recorder(ok(agy(action)));
+    const big = [{ role: 'user' as const, content: 'x'.repeat(40000) }];
+    const err = await new CliModel('argon', { runner }).next(big).catch(e => e);
+    expect(err).toBeInstanceOf(ProviderUnavailableError);
+    expect(String(err.message)).toMatch(/command line|too large/i); expect(String(err.message)).toMatch(/no fallback/i);
+    expect(calls.length).toBe(0);
+  });
+});

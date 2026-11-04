@@ -2,8 +2,8 @@
  'use strict';
  // Model picker. The server decides what each provider id means; this file only offers the reviewed ids,
  // remembers the choice in this browser, and states plainly which model answered or why one is unavailable.
- const storageKey='echo-prime-model-v1',ids=['qwen','claude','gpt','grok'];
- const fallbackLabels={qwen:'Qwen (FORGE, 256K)',claude:'Claude (claude CLI)',gpt:'GPT (codex CLI)',grok:'Grok (grok CLI)'};
+ const storageKey='echo-prime-model-v1',ids=['qwen','claude','gpt','grok','argon'];
+ const fallbackLabels={qwen:'Qwen (FORGE, 256K)',claude:'Claude (claude CLI)',gpt:'GPT (codex CLI)',grok:'Grok (grok CLI)',argon:'Argon (Gemini 4, agy CLI)'};
  let chosen=null,report=null,failed=false,generation=0;
  try{const stored=localStorage.getItem(storageKey);if(ids.includes(stored))chosen=stored;}catch{}
  const wrap=document.createElement('div'),label=document.createElement('label'),select=document.createElement('select'),note=document.createElement('small');

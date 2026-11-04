@@ -11,7 +11,7 @@ import type { Message } from './sessions.js';
  * Prime never reads, copies, logs or forwards a token: the child process finds its own login in its own store.
  * There is no fallback. A provider that is missing, signed out or timed out fails the turn and says so.
  */
-export type ProviderId = 'claude' | 'gpt' | 'grok';
+export type ProviderId = 'claude' | 'gpt' | 'grok' | 'argon';
 export interface RunOptions { cwd: string; env: NodeJS.ProcessEnv; input?: string; timeoutMs: number; signal?: AbortSignal; maxBytes: number }
 export interface RunResult { code: number | null; stdout: string; stderr: string; timedOut: boolean }
 export type Runner = (cmd: string, args: string[], options: RunOptions) => Promise<RunResult>;
@@ -19,8 +19,8 @@ export interface Answered { provider: ProviderId; requested: string | null; mode
 export class ProviderUnavailableError extends Error {
   constructor(readonly provider: ProviderId, detail: string) { super(`${PROVIDER_LABEL[provider]} is unavailable: ${detail}; no fallback was used`); this.name = 'ProviderUnavailableError'; }
 }
-export const PROVIDER_LABEL: Record<ProviderId, string> = { claude: 'Claude (claude CLI)', gpt: 'GPT (codex CLI)', grok: 'Grok (grok CLI)' };
-export const PROVIDER_BIN: Record<ProviderId, string> = { claude: 'claude', gpt: 'codex', grok: 'grok' };
+export const PROVIDER_LABEL: Record<ProviderId, string> = { claude: 'Claude (claude CLI)', gpt: 'GPT (codex CLI)', grok: 'Grok (grok CLI)', argon: 'Argon (agy CLI)' };
+export const PROVIDER_BIN: Record<ProviderId, string> = { claude: 'claude', gpt: 'codex', grok: 'grok', argon: 'agy' };
 const MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$/;
 // Only what a CLI needs to find its own login and run. Nothing named like a key, token or secret ever passes through.
 const ENV_ALLOW = ['PATH', 'Path', 'PATHEXT', 'SystemRoot', 'SYSTEMROOT', 'windir', 'ComSpec', 'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA', 'LOCALAPPDATA', 'USERNAME', 'LANG', 'TERM'];
@@ -54,7 +54,9 @@ const mostOutput = (usage: unknown): string | null => {
   return best;
 };
 interface Parsed { text: string; model: string | null }
-interface Spec { args(model: string | null, dir: string): string[]; stdin: boolean; prompt?: string; parse(stdout: string, provider: ProviderId): Parsed }
+/** Gemini 4 Argon through Google's Antigravity CLI. Used when no model is requested. */
+export const DEFAULT_MODEL: Partial<Record<ProviderId, string>> = { argon: 'gemini-4-argon-medium' };
+interface Spec { args(model: string | null, dir: string, prompt: string): string[]; maxPromptChars?: number; stdin: boolean; prompt?: string; parse(stdout: string, provider: ProviderId): Parsed }
 const SPECS: Record<ProviderId, Spec> = {
   claude: {
     stdin: true,
@@ -89,6 +91,17 @@ const SPECS: Record<ProviderId, Spec> = {
       return { text: v.text, model: mostOutput(v.modelUsage) };
     },
   },
+  argon: {
+    // agy takes the prompt only on its command line (stdin is ignored), so the prompt must fit Windows' argv limit.
+    stdin: false, maxPromptChars: 28000,
+    args: (model, _dir, prompt) => ['--output-format', 'json', '--mode', 'plan', '--model', model ?? DEFAULT_MODEL.argon!, '--print-timeout', '150s', `-p=${prompt}`],
+    parse(stdout) {
+      let v: { status?: unknown; response?: unknown };
+      try { v = JSON.parse(stdout); } catch { throw new ProviderUnavailableError('argon', 'returned unreadable output'); }
+      if (v.status !== 'SUCCESS' || typeof v.response !== 'string') throw new ProviderUnavailableError('argon', `the CLI reported status ${typeof v.status === 'string' ? v.status : 'unknown'}`);
+      return { text: v.response, model: null }; // agy does not say which model answered
+    },
+  },
 };
 export const run: Runner = (cmd, args, o) => new Promise((resolve, reject) => {
   const child = spawn(cmd, args, { cwd: o.cwd, env: o.env, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
@@ -117,11 +130,13 @@ export class CliModel implements Model {
   }
   async next(messages: Message[], signal?: AbortSignal): Promise<Action> {
     if (Buffer.byteLength(JSON.stringify(messages)) > 180000) throw new Error('Context limit reached; start a focused session');
-    const spec = SPECS[this.provider], dir = mkdtempSync(join(tmpdir(), 'echo-prime-provider-')), prompt = render(messages);
+    const spec = SPECS[this.provider], prompt = render(messages);
+    if (spec.maxPromptChars && prompt.length > spec.maxPromptChars) throw new ProviderUnavailableError(this.provider, `the prompt is too large for this CLI's command line (${prompt.length} > ${spec.maxPromptChars} characters); start a focused session`);
+    const dir = mkdtempSync(join(tmpdir(), 'echo-prime-provider-'));
     let result: RunResult;
     try {
       if (!spec.stdin) writeFileSync(join(dir, 'prompt.txt'), prompt, { mode: 0o600 });
-      result = await this.runner(this.bin, spec.args(this.requested, dir), { cwd: dir, env: childEnv(), input: spec.stdin ? prompt : undefined, timeoutMs: this.timeoutMs, signal, maxBytes: 4_000_000 });
+      result = await this.runner(this.bin, spec.args(this.requested, dir, prompt), { cwd: dir, env: childEnv(), input: spec.stdin ? prompt : undefined, timeoutMs: this.timeoutMs, signal, maxBytes: 4_000_000 });
     } catch (error) {
       if (signal?.aborted) throw new Error('Interrupted');
       throw new ProviderUnavailableError(this.provider, (error as { spawnFailed?: boolean }).spawnFailed ? `could not start "${this.bin}"` : 'could not run');
@@ -137,7 +152,7 @@ export class CliModel implements Model {
     let action: Action;
     try { action = parseAction(JSON.parse(extractJson(redact(parsed.text)))); }
     catch { throw new Error(`${PROVIDER_LABEL[this.provider]} returned an invalid action; no tools were executed for that response`); }
-    this.last = { provider: this.provider, requested: this.requested, model: parsed.model, reported: parsed.model !== null };
+    this.last = { provider: this.provider, requested: this.requested ?? DEFAULT_MODEL[this.provider] ?? null, model: parsed.model, reported: parsed.model !== null };
     return action;
   }
 }

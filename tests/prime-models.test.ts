@@ -124,7 +124,7 @@ describe('GET /api/prime/models', () => {
     expect(r.authed.status).toBe(200);
     const body = await r.authed.json() as { configured: boolean; routing: boolean; default: string; providers: { id: string; available: boolean; reason?: string }[] };
     expect(body).toMatchObject({ configured: true, routing: true, default: 'qwen' });
-    expect(body.providers.map(p => p.id)).toEqual(['qwen', 'claude', 'gpt', 'grok']);
+    expect(body.providers.map(p => p.id)).toEqual(['qwen', 'claude', 'gpt', 'grok', 'argon']);
     expect(body.providers.find(p => p.id === 'qwen')!.available).toBe(true);
     expect(body.providers.find(p => p.id === 'grok')).toMatchObject({ available: false, reason: expect.stringContaining('could not start') });
   });
