@@ -14,10 +14,10 @@ Update this file as each row lands. Visual comparison (screenshots) is tracked i
 
 | Feature | WS ref | Prime | PR ref | Notes |
 |---|---|---|---|---|
-| Node bar QUENCH, FORGE, ANVIL, HAMMER, TEMPER, CRUCIBLE | `app.js:313-322`, polls `/api/fleet` every 15 s (`app.js:352`); `fleet.py` probes every 60 s | **missing** | `index.html:39-46` shows FORGE, SWARM, MEMORY, CREATIVE, CERTFORGE, AGENTS | WS state is live (QUENCH via `platform.node()`, others via SDK `echo.monitor.health.node`). Click opens an evidence modal. `/api/fleet` is owner-only upstream. |
-| Node LED state | `style.css` `.fleet-node.connected/.disconnected/.unknown` | **missing** (hardcoded) | `styles.css:1` `.node-led` colours | Prime LEDs are decoration. |
+| Node bar QUENCH, FORGE, ANVIL, HAMMER, TEMPER, CRUCIBLE | `app.js:313-322`, polls `/api/fleet` every 15 s (`app.js:352`); `fleet.py` probes every 60 s | **present** (2026-11-04, synthetic-tested) | `fleet.js` (bar, 15 s poll, evidence dialog), `fleet.css`; the six hardcoded scene nodes and their connector SVG were removed from `index.html` | Live from `/api/fleet`, owner-only: a member, a signed-out visitor, an unconfigured backend or a failed request shows every node **unknown** with the reason in the evidence view, never green. A probe older than five minutes is shown unknown. Click opens an evidence dialog (connection, evidence, role, latency, host, addresses, probe output as inert text, raw record). Tests: `tests/prime-fleet-ui.test.ts`. Creative Studio stays reachable from the sidebar and mode tabs. |
+| Node LED state | `style.css` `.fleet-node.connected/.disconnected/.unknown` | **present** | `fleet.css` `.fleet-node.*` | Green connected, red disconnected, grey unknown. Only the literal strings `connected` and `disconnected` are honoured. |
 | Systems dialog (12 rows) | none | extra | `app.js:32-46`, `index.html:63` | Static "Awaiting connection"; only ESH row updates. |
-| FORGE connection text | `app.js:350-351` "FORGE · Model loaded" / "FORGE · Connection needed", re-poll 60 s on `/api/health` `model.loaded` | **missing** | `index.html:40-41` static labels | `/api/health` is allowlisted (`workspace.ts:60`) but never called. |
+| FORGE connection text | `app.js:350-351` "FORGE · Model loaded" / "FORGE · Connection needed", re-poll 60 s on `/api/health` `model.loaded` | **present** | `fleet.js` `#forge-connection` | Re-polled every 60 s for any approved account. Extra honest states: "FORGE · Not connected" (no backend or not signed in), "FORGE · Status unknown" (failed or malformed reply). |
 | Page title/subtitle | `app.js:96` e.g. "Echo Prime · 256K context · Automatic memory" | reduced | `index.html:6`, `#conversation-title` | No per-view subtitle. |
 | Brand | "ECHO / YOUR PRIVATE WORKSPACE" + badge | reduced | `index.html:27` | |
 | Sidebar toggle, New chat | `#menu`, "＋ New chat" | present | `index.html:28,39`, `app.js:57,78` | Prime: "New conversation", Ctrl/Cmd+K. |
@@ -33,7 +33,7 @@ Update this file as each row lands. Visual comparison (screenshots) is tracked i
 | SDK | `app.js:277-289` | hidden, owner, reduced | `workspace.js:345-348` | search + read schema only; no `/api/catalog`, no invoke |
 | Vault | `app.js:290-303` | hidden, owner, reduced | `workspace.js:349-350` | put only; no locate/get/list |
 | Code review | `app.js:304-312` | hidden, reduced | `workspace.js:200` | per-file only; no paste/project pick |
-| Logs & debugging | `app.js:324-330,344` | hidden, reduced | `workspace.js:343-347` | raw JSON buttons |
+| Logs & debugging | `app.js:324-330,344` | hidden, owner, **present** | `logs.js` (nav button "Logs & debugging" added to `#workspace-navigation`) | see section 3; `workspace.js` "Tools & diagnostics" raw-JSON buttons remain |
 | Recent chats | `.side-label` + `#chat-list` (50) | hidden | `index.html:34-35` "YOUR SPACE" + `#history` (500) | heading differs |
 | Chat search | `#chat-search`, 250 ms debounce | hidden, present | `workspace.js:425-426` | same endpoint |
 | Creative, Systems, Steward, ESH, Account, Appearance | none | extra | `index.html:29-37` | preserve |
@@ -42,9 +42,9 @@ Update this file as each row lands. Visual comparison (screenshots) is tracked i
 
 | Feature | WS ref | Prime | PR ref | Notes |
 |---|---|---|---|---|
-| Logs & debugging page (Refresh, "Mission & memory sync", "Recent operations") | `app.js:324-330` | reduced | `workspace.js:343-347` | raw JSON via buttons, no cards/auto-load |
-| Sidebar "Journal & ECF receipts" | `#journal-status`, `app.js:36-43` | **missing** | none | label varies: "Private journal & memories" / "Journal saved · N awaiting ECF" |
-| Sync dialog "Journal & ECF delivery" | `app.js:248-256` | reduced, owner | `workspace.js:222,225` | raw JSON; no counts or "Retry pending records" |
+| Logs & debugging page (Refresh, "Mission & memory sync", "Recent operations") | `app.js:324-330` | **present**, owner-only (synthetic-tested) | `logs.js`, `fleet.css` `.logs-*` | Loads `/api/diagnostics` on open, Refresh re-reads. Mission and sync as labelled rows, operations as readable cards (newest first, status tone, UTC time, capability, HTTP, duration, error category). Empty, error (no auto retry) and late-response-after-account-change states covered by tests. |
+| Sidebar "Journal & ECF receipts" | `#journal-status`, `app.js:36-43` | **present** | `logs.js` (button inserted above `.sidebar-bottom`) | Same three labels, refreshed by the 60 s `/api/health` poll; hidden when no approved account. |
+| Sync dialog "Journal & ECF delivery" | `app.js:248-256` | **present** (synthetic-tested) | `logs.js` | Verified / awaiting counts, per-state breakdown, latest issue; owner gets "Retry pending records" (POST `/api/sync`, then `/api/health` readback; a failed retry is reported, never retried automatically). Members get the "Your private memories" text and no retry. |
 | Journal link | `app.js:~111` | reduced | `workspace.js:187` | |
 | Activity/tool cards, thinking panel | `app.js:145-208` | reduced | `workspace.js:111-115` | plain status lines |
 | Streaming | NDJSON | present | `workspace-client.js:73-107` | Prime renders tokens progressively |
@@ -111,15 +111,15 @@ Update this file as each row lands. Visual comparison (screenshots) is tracked i
 
 All Workspace `/api/*` routes are on Prime's allowlist (`workspace.ts:60-63`). Not proxied: static pages and `/login`. Prime allowlists `/api/auth/refresh` and `/api/auth/verify`, which the Workspace does not implement (would 404).
 
-Actions: Prime UI calls `personality_select`, `memory_save`, `memory_forget`, `memory_search`, `esh`, `sdk`, `sdk_detail`, `vault` (put). Never called: `personality_assets`, `crystal_save`, `vault` get/locate/list, SDK invoke. `/api/catalog` unused; `/api/health` unused; `/api/fleet` only as raw JSON.
+Actions: Prime UI calls `personality_select`, `memory_save`, `memory_forget`, `memory_search`, `esh`, `sdk`, `sdk_detail`, `vault` (put). Never called: `personality_assets`, `crystal_save`, `vault` get/locate/list, SDK invoke. `/api/catalog` unused. `/api/health` and `/api/fleet` are now polled by `fleet.js`; `/api/diagnostics` and `/api/sync` are used by `logs.js`.
 
 ## Gaps by size
 
-1. Live node bar and FORGE connection state (owner-only fleet).
+1. ~~Live node bar and FORGE connection state (owner-only fleet).~~ Done 2026-11-04 (`fleet.js`); not yet exercised against a live backend.
 2. First-class views: Projects (per-project chats), Library (search, note, Save file), Plugins & memory, SDK (+invoke), Vault (locate/get/list/put), Code review page.
 3. Chat surface: message actions, code-block Save file, checkpoint banner, Personality select, activity cards, Memory chip, composer Attach chips, context meter with %/bar/measured.
 4. Voice bar with persisted toggles and status line; longer capture.
-5. Logs & debugging cards; Journal & ECF receipts button and sync dialog.
+5. ~~Logs & debugging cards; Journal & ECF receipts button and sync dialog.~~ Done 2026-11-04 (`logs.js`); not yet exercised against a live backend.
 6. Layout system and ESH dock status.
 7. Import source/file, password reset UI, branding strings, allowlist cleanup.
 
