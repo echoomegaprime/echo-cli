@@ -14,7 +14,7 @@ The responsive shell follows the user-provided emerald desktop, ECHO Prime deskt
 
 ## Current capabilities
 
-- Responsive sidebar, six scene nodes, twelve distinct system entries, six creation modes and appearance controls.
+- Responsive sidebar, a live six-node fleet bar (`fleet.js`: unknown unless the owner's Workspace backend reports otherwise), twelve distinct system entries, six creation modes and appearance controls.
 - Creative Studio with 183 registry capabilities and NSFW-capable model metadata, searchable by medium or provider.
 - Local drafts and preferences stored only in this browser under `echo-prime-interface-v1`.
 - In Chat, Enter saves the current draft. In creative modes it opens the matching studio request. Shift+Enter inserts a newline; Ctrl/Cmd+K starts a fresh composer.
