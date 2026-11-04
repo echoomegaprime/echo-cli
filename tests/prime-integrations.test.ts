@@ -56,7 +56,8 @@ describe('ESH stdio transport',()=>{
     try {expect((await client.listTools()).map(t=>t.name)).toEqual(['esh_status']);expect(unwrap(await client.call('esh_status',{}))).toEqual({ok:true,version:'fixture'});}finally{client.close();}
   });
   it('bounds a nonresponsive server and closes pending calls',async()=>{
-    const client=await StdioMcp.connect({command:process.execPath,args:[fileURLToPath(new URL('./fixtures/prime-mcp.mjs',import.meta.url))]},300);
-    try {await expect(client.call('never',{})).rejects.toThrow(/timed out/i);}finally{client.close();}
+    const client=await StdioMcp.connect({command:process.execPath,args:[fileURLToPath(new URL('./fixtures/prime-mcp.mjs',import.meta.url))]},1000);
+    const started=Date.now();
+    try {await expect(client.call('never',{})).rejects.toThrow(/timed out/i);expect(Date.now()-started).toBeLessThan(2000);}finally{client.close();}
   });
 });

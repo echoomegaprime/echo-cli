@@ -1,128 +1,118 @@
 # Prime ↔ Workspace feature parity matrix
 
-Status: living document. Created 2026-11-04 on `agent/prime-workspace-parity-20261104` (base 8672697, PR #6).
-Reference Workspace source: `echo-omnipresence-runtime` @ `8de99d98521787c9580c84e1645dfb5b7aadfd88`, `SYSTEMS/echo_qwen_chat` (the running 8768 copy is identical except older `accounts.py`, `accounts_http.py`, `AUTH.md`).
+Status: integrated source candidate, updated 2026-11-04 in `QUENCH-prime-live-20261104` on `agent/prime-parity-live-20261104`. This replaces the initial inventory from the parity branch; it does not assert a deployed release or complete visual parity.
 
-Terms: **present** same label and behaviour · **hidden** exists but only shown once a Workspace backend is configured and the account is approved · **reduced** partly there · **missing** absent · **extra** Prime-only.
-Refs: WS = `SYSTEMS/echo_qwen_chat` (`static/index.html` and `style.css` are minified, so refs are element ids). PR = this repo; `ui/` = `ui/echo-prime/`.
+Reference: canonical `echoomegaprime/echo-omnipresence-runtime` source `8de99d98521787c9580c84e1645dfb5b7aadfd88`, `SYSTEMS/echo_qwen_chat`, is imported under `backend/workspace/`. `backend/workspace/SOURCE_PROVENANCE.json` records its original file hashes. Provider routing and reviewed integration changes extend that imported baseline. The older running Workspace installation is not the provenance authority for this candidate.
 
-Gating: `workspace.js:434-435` enables Workspace features only when `/api/session` reports `workspaceConfigured:true` and the account is approved; owner-only items use `[data-owner-only]` (`workspace.js:47-52`). Without a backend Prime is the older ECHO Code / Creative Studio shell.
+Terms: **implemented** means present in this source; **gated** requires the configured canonical authenticated Workspace and approved account, with primary-owner checks where specified; **different** records an intentional or remaining UX difference; **extra** is Prime-only. None of these labels proves a live provider, production deployment, screenshot comparison, or certification. Paths below are source anchors rather than unstable line numbers. WS means the imported canonical `backend/workspace/static/` interface; UI means `ui/echo-prime/`.
 
-Update this file as each row lands. Visual comparison (screenshots) is tracked in `docs/echo-code/parity/` once captured.
+Admission remains canonical: `/api/session`, current account status, CSRF, primary-owner pin and tenant-isolation checks control access. The shared browser transport revalidates private requests and clears private UI on identity loss. Fleet, diagnostics, SDK, Vault and ESH remain primary-owner surfaces. Without an admitted Workspace backend, Prime retains its separate local shell, coding and creative surfaces.
 
-## 1. Shell, header, node status
+## 1. Shell, header and node status
 
-| Feature | WS ref | Prime | PR ref | Notes |
-|---|---|---|---|---|
-| Node bar QUENCH, FORGE, ANVIL, HAMMER, TEMPER, CRUCIBLE | `app.js:313-322`, polls `/api/fleet` every 15 s (`app.js:352`); `fleet.py` probes every 60 s | **missing** | `index.html:39-46` shows FORGE, SWARM, MEMORY, CREATIVE, CERTFORGE, AGENTS | WS state is live (QUENCH via `platform.node()`, others via SDK `echo.monitor.health.node`). Click opens an evidence modal. `/api/fleet` is owner-only upstream. |
-| Node LED state | `style.css` `.fleet-node.connected/.disconnected/.unknown` | **missing** (hardcoded) | `styles.css:1` `.node-led` colours | Prime LEDs are decoration. |
-| Systems dialog (12 rows) | none | extra | `app.js:32-46`, `index.html:63` | Static "Awaiting connection"; only ESH row updates. |
-| FORGE connection text | `app.js:350-351` "FORGE · Model loaded" / "FORGE · Connection needed", re-poll 60 s on `/api/health` `model.loaded` | **missing** | `index.html:40-41` static labels | `/api/health` is allowlisted (`workspace.ts:60`) but never called. |
-| Page title/subtitle | `app.js:96` e.g. "Echo Prime · 256K context · Automatic memory" | reduced | `index.html:6`, `#conversation-title` | No per-view subtitle. |
-| Brand | "ECHO / YOUR PRIVATE WORKSPACE" + badge | reduced | `index.html:27` | |
-| Sidebar toggle, New chat | `#menu`, "＋ New chat" | present | `index.html:28,39`, `app.js:57,78` | Prime: "New conversation", Ctrl/Cmd+K. |
+| Feature | Prime source state | Source anchor | Behavior and remaining difference |
+|---|---|---|---|
+| Six-node bar: QUENCH, FORGE, ANVIL, HAMMER, TEMPER, CRUCIBLE | Implemented, owner gated | UI `fleet.js`, `fleet.css` | `/api/workspace/fleet` observations refresh every 15 seconds while visible. Connected requires explicit fresh probe evidence; missing, stale, malformed or unavailable evidence is unknown. Inventory enrollment does not imply connectivity. |
+| Node LEDs and evidence | Implemented, owner gated | `normalizeFleet`, node evidence dialog | Connected/disconnected/unknown states and probe timestamp/source/latency/identity metadata; observations older than 120 seconds become unknown. Raw probe stdout and errors are not displayed. The orb's decorative system nodes remain a separate surface. |
+| FORGE model status | Implemented, owner gated | `modelState`, `/api/workspace/health` | Health refreshes at 60-second intervals and on explicit inspection. Ready requires loaded, `ok`, exclusive model and matching actual/configured context; loaded with configuration issues, connection needed and unknown remain distinct. No inference prompt is sent by this status check. |
+| Systems dialog | Extra, partly static | UI `app.js`, `#systems-dialog` | Preserved systems inventory and connection controls; static labels are not fleet-health proof. |
+| Page title, subtitle and branding | Different | UI `index.html`, `#conversation-title` | Prime branding and orb remain; main pages have titles/subtitles while preserving the existing conversation DOM. Exact typography and screenshot parity remain unverified. |
+| Sidebar and new chat | Implemented | UI `app.js`, `workspace.js` | Existing navigation toggle, New conversation and keyboard shortcut remain. |
 
-## 2. Navigation
+## 2. Navigation and content panels
 
-| Feature | WS ref | Prime | PR ref | Notes |
-|---|---|---|---|---|
-| Chats | `data-view=chats` | reduced | `index.html:29` "Conversation" | label differs |
-| Projects | `app.js:209-216` | hidden, reduced | `workspace.js:188-192` | dialog only; no per-project chat list / start chat |
-| Library | `app.js:237-247` | hidden, reduced | `workspace.js:193-205` | no search box, no "Write a note", no Save-to-library per code block; upload 500 KB vs 100 KB |
-| Plugins & memory | `app.js:257-276` | hidden, split | `index.html:31` Memory + MCP | label does not exist |
-| SDK | `app.js:277-289` | hidden, owner, reduced | `workspace.js:345-348` | search + read schema only; no `/api/catalog`, no invoke |
-| Vault | `app.js:290-303` | hidden, owner, reduced | `workspace.js:349-350` | put only; no locate/get/list |
-| Code review | `app.js:304-312` | hidden, reduced | `workspace.js:200` | per-file only; no paste/project pick |
-| Logs & debugging | `app.js:324-330,344` | hidden, reduced | `workspace.js:343-347` | raw JSON buttons |
-| Recent chats | `.side-label` + `#chat-list` (50) | hidden | `index.html:34-35` "YOUR SPACE" + `#history` (500) | heading differs |
-| Chat search | `#chat-search`, 250 ms debounce | hidden, present | `workspace.js:425-426` | same endpoint |
-| Creative, Systems, Steward, ESH, Account, Appearance | none | extra | `index.html:29-37` | preserve |
+Projects, Library, Plugins & memory, Memory, SDK, Vault, Code review, Logs and Journal use the main content area with titles, subtitles, active navigation and Back/Escape/Alt+Left. The existing conversation and draft are retained while a page is open; account changes invalidate pending navigation and receipt handles. Account, appearance, voice settings and small fleet details retain dialogs.
 
-## 3. Logs & debugging, Journal & ECF receipts
+| Feature | Prime source state | Source anchor | Behavior and remaining difference |
+|---|---|---|---|
+| Chats, recent history and search | Implemented, gated | `renderHistory`, `openChat`, `newChat` | Canonical saved conversations, search, project association and history; Prime retains Conversation and YOUR SPACE labels and a bounded 500-row history view. |
+| Projects | Implemented, gated, main page | `projects` | Create/update project instructions, list its saved chats and start a project conversation. Project conversations open in the existing chat surface. |
+| Library | Implemented, gated, main page | `library`, `saveMessage`, `renderMessageBody` | Name/path search, write note/save file, upload text up to 100,000 bytes, attachment selection, read/download, linked chat and code review. Message save verifies exact readback. Code-block Save file is a local download; it is distinct from saving a whole message to the canonical library. |
+| Plugins & memory | Implemented, gated, main page | `plugins`, `memory` | Combined main page includes private preferences, admitted memory connections, journal status and per-account MCP controls. Shared ECF/Crystal actions remain owner-only. |
+| SDK | Implemented, owner gated, main page | `sdk` | Search registry, read catalog/schema, select a capability, review exact command/options and run that reviewed request once. A changed request requires review again. No postcondition is inferred from a receipt. |
+| Vault | Implemented, owner gated, main page | `vault` | List, locate, read reference metadata and isolated put. Credential values are not returned to the UI or inserted into chats. |
+| Code review | Implemented, gated, main page | `review`, library Review code | Paste up to 40,000 characters, choose project context, or review a library file; canonical result opens as a saved chat. Results become canonical saved conversations. |
+| Logs & debugging | Implemented, owner gated, main page | UI `fleet.js` | Auto-load and Refresh, Mission & memory sync, bounded Recent operations metadata cards. |
+| Creative, Systems, Steward, ESH, Account, Appearance | Extra/preserved | UI `index.html` and corresponding controllers | Their own connection, policy and model-admission requirements remain. Visible navigation does not prove the service is admitted. |
 
-| Feature | WS ref | Prime | PR ref | Notes |
-|---|---|---|---|---|
-| Logs & debugging page (Refresh, "Mission & memory sync", "Recent operations") | `app.js:324-330` | reduced | `workspace.js:343-347` | raw JSON via buttons, no cards/auto-load |
-| Sidebar "Journal & ECF receipts" | `#journal-status`, `app.js:36-43` | **missing** | none | label varies: "Private journal & memories" / "Journal saved · N awaiting ECF" |
-| Sync dialog "Journal & ECF delivery" | `app.js:248-256` | reduced, owner | `workspace.js:222,225` | raw JSON; no counts or "Retry pending records" |
-| Journal link | `app.js:~111` | reduced | `workspace.js:187` | |
-| Activity/tool cards, thinking panel | `app.js:145-208` | reduced | `workspace.js:111-115` | plain status lines |
-| Streaming | NDJSON | present | `workspace-client.js:73-107` | Prime renders tokens progressively |
+## 3. Logs, journal and receipts
 
-## 4. Plugins & memory
+| Feature | Prime source state | Source anchor | Behavior and remaining difference |
+|---|---|---|---|
+| Journal & ECF receipts sidebar control | Implemented, owner gated | UI `fleet.js` | Shows verified readback/pending counts from health; unavailable counters remain unavailable rather than zero. |
+| Journal & ECF delivery | Implemented, owner gated, main page | `syncSummary`, `retrySync` | Exact ECF readback and remaining delivery are separate. Explicit Retry pending records runs one pass followed by an independent health read; ambiguous writes are not automatically retried. |
+| Per-conversation journal | Implemented, gated | `journal`, `#workspace-journal` | Canonical journal read and download remain separate from verified remote ingestion. |
+| Activity/tool receipts | Implemented, different presentation | `activityCard`, `receiptCard` | Started/returned/gated/unconfirmed cards with safe receipt details; not a claim of identical canonical thinking-panel visuals or successful external side effects. |
+| NDJSON streaming | Implemented, gated | `workspace-client.js`, `workspace.ts` | Progressive tokens and bounded canonical saved-chat completion; identity changes and contradictory/truncated streams fail closed. |
 
-| Feature | WS ref | Prime | PR ref | Notes |
-|---|---|---|---|---|
-| MCP list / add / enable / remove | `mcp.js` | hidden, present | `workspace.js:228-233` | raw schema JSON |
-| Check connections (Crystal, ECF, ESH cards) | `app.js:257-275` | reduced | `workspace.js:345` | raw JSON |
-| Recall a memory | card | hidden, present, owner | `workspace.js:223-225` | |
-| Store a memory to Crystal (`crystal_save`) | card | **missing** | none | Prime `memory_save` is the preference store |
-| Automatic journal hooks, delivery status | card | **missing** | none | |
-| Personality Forge assets (`personality_assets`) | card, if `voice.configured` | **missing** | `workspace.js:335` | |
-| BloodlinePrime directive | card | **missing** | none | |
-| ESH action card | `app.js` | hidden, owner, present | `workspace.js:156-185,348` | Prime requires review-then-run (preserve) |
-| Non-owner view | `app.js:259` | present | `workspace.js:47` | |
+## 4. Plugins, memory and personalities
+
+| Feature | Prime source state | Source anchor | Behavior and remaining difference |
+|---|---|---|---|
+| MCP list/add/enable/remove and schema inspection | Implemented, per-account gated | `plugins`, backend `remote_mcp.py` | Streamable HTTP connections and encrypted credential entry. OAuth onboarding and legacy SSE remain unsupported by this form. |
+| Connection checks | Implemented, owner gated | Plugins & memory Check connections | Crystal, ECF and ESH receipts use cards/details. Configuration and successful actions remain distinct. |
+| Recall memory | Implemented, owner gated | `memory_search` action | ECF/Crystal results retain their returned provenance. |
+| Store Crystal memory | Implemented, owner gated | `crystal_save` action | UI requires `readback_verified` before reporting an exact saved/readback result. This is separate from local preference storage. |
+| Automatic journal hooks and delivery status | Implemented in canonical backend, surfaced in main pages | backend `workspace.py`, UI `plugins`, `fleet.js` | Local persistence, pending delivery, ECF verification and Knowledge state remain separate observations. The memory chip says automatic only when current state declares that mode. |
+| Personality selection/assets and directive status | Implemented, gated; assets owner-only | `personalityControl`, `personality_assets`, `directive_loaded` | Saved personality selection is read back and must preserve permissions. The panel shows directive-loaded status; it does not reproduce the complete canonical Bloodline directive presentation. |
+| ESH | Implemented, owner gated, manual review | ESH panel; backend `agent_tools.py` | The model's ESH execution path is disabled. The user reviews the exact current-chat command before one manual dispatch through the existing owner policy. No grant or shell authority is added. |
+| Member isolation | Preserved | browser identity clearing, backend accounts, `workspace.ts` | Members receive their isolated account data and admitted actions; the owner's shared fleet, diagnostics, SDK, Vault, ESH and memory services are not inherited. |
 
 ## 5. Composer and chat controls
 
-| Feature | WS ref | Prime | PR ref | Notes |
-|---|---|---|---|---|
-| Message box | `app.js:121`, 100,000 chars | reduced | `index.html:57`, 12,000 chars | |
-| Attach | `app.js:140-144` chips | reduced | `workspace.js:199` | no composer button/chips |
-| Mic / "◉ Voice" | `voice.js:10-14`, `app.js:124-127` | reduced | `workspace.js:341,428` | dialog-driven, 10-turn cap (preserve) |
-| "◈ Memory · automatic" chip | `app.js:~133` | **missing** | none | |
-| Send, hint "Enter to send · Shift+Enter for a new line" | `app.js:~136` | reduced/present | `index.html:57-58` | |
-| Context meter `7,657 / 262,144 · 2.9% · estimate` + progress bar | `app.js:81-94`, `model_usage` events | reduced | `workspace.js:60-65` | text only, no % / bar / measured path |
-| Toolbar: Project, Personality, Rename, Compact, Continue, Journal | `app.js:98-110` | hidden, reduced | `index.html:72`, `workspace.js:419-423` | Personality select missing |
-| Checkpoint banner | `app.js:~112` | **missing** | none | |
-| Message actions Copy / Save to library / ▶ Listen; code blocks "Save file" | `app.js:57-73` | **missing** | none | |
-| Empty state / starters | `app.js:113-118` | reduced | `index.html:53` | |
-| Mode tabs (Image, Video, Music, SFX, Voice) | none | extra | `index.html:56` | preserve |
+| Feature | Prime source state | Source anchor | Behavior and remaining difference |
+|---|---|---|---|
+| Message size | Implemented | `updateComposerLimit` | Workspace general chat accepts up to 100,000 characters; separate ECHO Code remains 12,000. |
+| Attach button and chips | Implemented, gated | `renderComposer`, `updateContext` | Select canonical library files and remove attachment chips before sending. |
+| Memory chip | Implemented, gated | `renderComposer` | Automatic memory or private-preference wording follows current state. Opens Plugins & memory. |
+| Context percentage and bar | Implemented, bounded evidence | `updateContext` | Distinguishes estimates from matched Qwen measured prompt usage; provider-managed CLI context is labeled without inventing capacity or percentage. Failed/latest unmatched requests do not inherit another turn's measurement. |
+| Project, personality, rename, compact, continue, journal | Implemented, gated | conversation toolbar and handlers | Saved personality readback, project selection and canonical chat operations; controls remain Prime's toolbar. |
+| Checkpoint banner | Implemented | `#workspace-checkpoint` | Saved summary preview and full checkpoint download; original messages remain saved. |
+| Copy, Save to library, Listen; code Save file | Implemented, gated where applicable | `line`, `saveMessage`, `renderMessageBody` | Actions attach to saved messages; Listen requires configured voice. Exact library readback and local file download are distinct outcomes. |
+| Empty state and creative mode tabs | Different/extra | UI `index.html` | Prime's starters, orb and Image/Video/Music/SFX/Voice modes remain. |
+| Tool-requested UI navigation | Implemented, restricted | `navigationIntent`, `applyNavigation` | Only recognized chat/view targets; owner admission still required for restricted views. Navigation grants no execution permission. |
 
 ## 6. Voice bar
 
-| Feature | WS ref | Prime | PR ref | Notes |
-|---|---|---|---|---|
-| Persistent bar under composer (only when `voice.configured`) | `voice.js:156-168` | **missing** as bar | dialog `workspace.js:333-342` | |
-| Interrupt & speak | `voice.js:163` | **missing** | none | |
-| Stop voice | `voice.js:163` | reduced | `workspace.js:339`, `#stop-chat` | |
-| Spoken replies | `voice.js:164`, persisted `echo-spoken-replies` | reduced | `workspace.js:338` | Prime: off each session (preserve default) |
-| Brief speech | `voice.js:165` | reduced | `workspace.js:338` | |
-| Send speech automatically | `voice.js:166` | reduced | `workspace.js:338` | |
-| Status line "M Freeman · ElevenLabs · Microphone off" | `voice.js:167-168` | reduced | `workspace.js:260,265,330,312` | Prime reports backend voice/provider, not hardcoded |
-| Footer "Personality Forge · …ElevenLabs." | `voice.js:168` | **missing** | none | |
-| Capture limit | 120 s chunked | reduced | 8 s cap (`workspace.js:271,328`) | |
-| Endpoints | `/api/voice/*` | present | `workspace.ts:61,66` | |
+| Feature | Prime source state | Source anchor | Behavior and remaining difference |
+|---|---|---|---|
+| Persistent voice controls | Implemented when voice configured and authenticated | `renderComposer`, `#workspace-voice-bar` | Dictate, finish/transcribe, Interrupt & speak, Stop voice, bounded conversation and provider-derived status. |
+| Spoken replies, brief speech, automatic send | Implemented with intentional defaults | `voiceOptions`, `voiceToggle` | All start off for each session; no automatic restoration of microphone or spoken-reply opt-in. |
+| Hands-free safety | Preserved | `startVoiceConversation`, account/page/visibility handlers | Explicit start, at most ten captured turns, and stop/identity/visibility invalidation. |
+| Capture duration and transport | Implemented, different transport | `dictate`, `encodeWav` | Select 8/30/60/120 seconds, default 8. Audio is split into sequential requests of at most 8 seconds; bounded transcripts join into one draft. This is not a single 120-second upload. |
+| Voice name/provider and Personality Forge footer | Different | `voiceDescription`, voice bar text | Name/provider comes from backend state; no hardcoded Freeman voice or identical canonical provider footer. Real microphone/provider acceptance remains pending. |
 
-## 7. Models, themes, layout, other
+## 7. Models, layout and accounts
 
-| Feature | WS ref | Prime | PR ref | Notes |
-|---|---|---|---|---|
-| Model picker | none (fixed `config['model']`, `app.py:82`) | n/a | `index.html:72` conversation select | Job 3 adds a picker in Prime; nothing to port |
-| Themes | none | extra | `index.html:62`, `app.js:4-20` | preserve |
-| Layout (nav side, resize, dock, 8-edge resizers, Reset, persist) | `layout.js:1-142` | reduced | `workspace.js:150-185` | |
-| ESH dock (status badge, `PS >` prompt, Ctrl+Enter, receipts) | `esh-panel.js:1-122` | hidden, reduced | `workspace.js:133-185` | |
-| Import chat (source select, file picker 1.9 MB) | `app.js:217-236` | hidden, reduced | `workspace.js:203-217` | |
-| Accounts / approvals | `login.html`, `auth.js`, `/api/auth/*` | hidden, reduced | `workspace.js:352-403` | no password-reset button (`reset` wired, `workspace-client.js:65`) |
-| Fork, compact | `app.js:~108` | hidden, present | `workspace.js:422` | |
-| `ui_action` navigation after reply | `app.js:182-185` | **missing** | none | |
+| Feature | Prime source state | Source anchor | Behavior and remaining difference |
+|---|---|---|---|
+| Qwen default and model picker | Implemented, configured providers only | backend `providers.py`, UI `models.js` | Default is `c3po-code:echo-qwen38-abliterated-256k` on FORGE, configured context 262,144. Claude, GPT and Grok use their reviewed official CLI subprocess configurations and their own supported logins; no token copying, metered fallback or silent provider fallback. |
+| Model metadata and answer attribution | Implemented source contract; live acceptance separate | backend saved `model_identity`/usage events, UI `models.js` | Commander-supplied embedded metadata identifies Huihui-Qwen3.8, abliterated, 27,320,697,856 parameters, Q4_K_M, 262,144 context. The picker label is not independent runtime verification. Saved replies show matched reported identity; unreported CLI identity is explicitly unreported. |
+| Provider cancellation | Implemented, fixture verified | backend `providers.py` | Cancellation polling can terminate the owned subprocess; timeout/nonzero/malformed/cancelled turns fail without provider replay. Live account/provider calls still need runtime acceptance. |
+| Themes and orb | Extra/preserved | UI `app.js`, `orb.js`, appearance controls | Existing palettes, adaptive quality and reduced-motion behavior remain. |
+| Navigation/layout | Implemented | UI `layout.js`, `layout.css` | Left/right navigation, width, dock height, floating geometry, eight edge/corner resize controls, keyboard controls, reset and appearance-only persistence. No account data or command storage in layout preferences. |
+| ESH dock | Implemented | `workspace.js` ESH handlers, `layout.js` | Current-chat receipts, review/run, float/move/resize/dock. The `PS >` prompt and status badge are present. Ctrl+Enter reviews first, then executes only the unchanged, current-account reviewed command; repeated key events cannot dispatch it. |
+| Import | Implemented, gated | `library`, `normalizeImport` | Source choice, selected-file import up to 1,900,000 bytes, bounded paste and selected conversation branch validation. Imports remain authorized historical copies, not provider account migration. |
+| Accounts and recovery | Implemented, canonical admission | `account`, `signOut`, backend accounts | Password/Google routes, signup, owner approvals, password-recovery request, session invalidation and positive anonymous logout readback. Actual identity/email acceptance remains separate. |
 
-## 8. Route coverage
+## 8. Route and delivery evidence
 
-All Workspace `/api/*` routes are on Prime's allowlist (`workspace.ts:60-63`). Not proxied: static pages and `/login`. Prime allowlists `/api/auth/refresh` and `/api/auth/verify`, which the Workspace does not implement (would 404).
+Prime proxies its fixed canonical Workspace API allowlist, not arbitrary upstream paths, static pages or `/login`. Fleet/health/diagnostics/catalog and the reviewed SDK, Vault, personality-assets, Crystal and memory actions are now used by source UI. Upstream availability is still checked per request. Allowlisted `/api/auth/refresh` and `/api/auth/verify` do not establish upstream implementation; unsupported endpoints can still return 404.
 
-Actions: Prime UI calls `personality_select`, `memory_save`, `memory_forget`, `memory_search`, `esh`, `sdk`, `sdk_detail`, `vault` (put). Never called: `personality_assets`, `crystal_save`, `vault` get/locate/list, SDK invoke. `/api/catalog` unused; `/api/health` unused; `/api/fleet` only as raw JSON.
+Parent verification checkpoint for this integrated source on 2026-11-04:
 
-## Gaps by size
+- The final canonical backend check passed **211 Python tests**; root Node/Vitest passed **374 tests in 30 files**; the deployment boundary suite passed **8 tests**. Canonical native browser logic and lint/build checks are recorded separately in the release receipts, with exact-candidate identity at delivery.
+- New focused checks passed: 57 main-page/composer/legacy UI tests, 16 fleet tests, 74 real-HTTP account/ingress tests and 25 provider tests. Regression cases reproduced failures before their fixes.
+- Real CLI canaries passed plain reply and canonical tool-proposal calls for Claude and GPT through the canonical backend adapter. Claude reported `claude-sonnet-5-5`; Codex did not report its model. Native harness tools were not executed and no login material was copied.
+- One guarded Qwen load on FORGE returned the exact requested 262,144-token model with 38 healthy gate checks, followed by passing plain and canonical tool-proposal calls through the Workspace adapter. This is actual short-request inference, not a full 256K-window benchmark or long-duration stability claim.
+- Grok native-hook isolation and its final installed-client acceptance remain pending. A provider that fails its configuration admission is unavailable; it never silently falls back.
 
-1. Live node bar and FORGE connection state (owner-only fleet).
-2. First-class views: Projects (per-project chats), Library (search, note, Save file), Plugins & memory, SDK (+invoke), Vault (locate/get/list/put), Code review page.
-3. Chat surface: message actions, code-block Save file, checkpoint banner, Personality select, activity cards, Memory chip, composer Attach chips, context meter with %/bar/measured.
-4. Voice bar with persisted toggles and status line; longer capture.
-5. Logs & debugging cards; Journal & ECF receipts button and sync dialog.
-6. Layout system and ESH dock status.
-7. Import source/file, password reset UI, branding strings, allowlist cleanup.
+The current apex and www HTTP route serves **Echo Desktop**, not this Prime candidate. A default Python User-Agent receives Cloudflare 1010/403; a browser-compatible HTTP request receives 200 with title Echo Desktop. Both verified target tunnel connectors report applied configuration version **257 with 193 rules**; the intended domains and `desktop-web.echo-op.com` share the existing FORGE 8781 origin. That service and ingress remain untouched. The opaque Cloudflare API-token broker currently returns provider errors 6003/6111 for an invalid Authorization-header format; its cause and target-account binding are unverified. No protection or credential scope was changed.
 
-## Preserve (Prime-intentional)
+## Remaining differences and gates
 
-ESH review-then-run, voice off by default each session, 10-turn voice cap, owner-only gating of fleet/diagnostics/SDK/Vault/ESH, orb, palettes, Steward, Creative Studio.
+1. Exact canonical branding/typography and thinking-panel visuals differ. Complete screenshot comparison and real authenticated browser workflows remain unverified.
+2. Real identity/email, voice, remote memory/MCP, creative operations and Steward admission require their actual runtime evidence. Provider canaries do not establish those separate services.
+3. Final exact-SHA checks, independent review, dual certification, genuine required signatures, target/TLS/configuration admission, tested rollback and public acceptance must be resolved before a production-complete claim. The runtime staging package is preparation; it does not provide certification or deployment approval.
+
+Preserved intentionally: approved-account and primary-owner boundaries, manual ESH review with model execution disabled, voice off each session and ten-turn cap, bounded segmented audio, no automatic paid/provider fallback, original data/runtimes, orb/palettes, Steward and Creative Studio. No public cutover or release approval is created by this document.

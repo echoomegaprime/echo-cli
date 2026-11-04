@@ -1,0 +1,69 @@
+# Prime production runtime package
+
+This package stages and supervises the consolidated Prime frontend and authenticated Workspace backend on QUENCH. It prepares a dedicated FORGE HTTP proxy configuration and an unregistered Windows task definition. Staging does not install a task, start a listener, change public ingress, certify a release, or establish public acceptance.
+
+The source includes Workspace imported from `echo-omnipresence-runtime` commit `8de99d98521787c9580c84e1645dfb5b7aadfd88`; its original file hashes are recorded in `backend/workspace/SOURCE_PROVENANCE.json`. The release commit and the complete acquired artifact manifest identify the modified integration. The imported source hash alone does not identify this release.
+
+## Topology and measured ports
+
+The intended path is public TLS ingress → a dedicated exact-domain FORGE proxy → an owned SSH reverse forward → Prime on QUENCH loopback → Workspace on QUENCH loopback. A second forward in the same SSH process connects QUENCH loopback to the existing FORGE Qwen listener. The Workspace listener, Qwen listener and administrative services are never public ingress targets.
+
+The parent builder measured QUENCH ports **28771** (Workspace), **28772** (Prime), **28775** (new owned Qwen forward), and FORGE ports **28773** (reverse forward), **28774** (dedicated domain proxy) unused on 2026-11-04 around 12:39–12:42 CST. These observations do not reserve a port. The supervisor checks local listeners again and refuses collisions; OpenSSH `ExitOnForwardFailure=yes` checks the reverse listener. Ports 8768, 18767, 8771, 8772 and 8781 are explicitly refused. The existing Qwen forward on 11450 belongs to another process and is neither reused nor stopped by this package.
+
+FORGE remains the Qwen host, serving `c3po-code:echo-qwen38-abliterated-256k` on its existing loopback port 11441, with configured context 262144. This package never starts, unloads or reconfigures a model/container. Model readiness and its impact on the SDK gate require separate live measurements.
+
+## Private settings contract
+
+Prepare one reviewed private JSON object with these fields. Do not commit the populated settings, account identifiers, paths or receipts. Runtime literal password, API-key and OAuth-token fields are refused. Official CLI credentials remain in their existing QUENCH user homes.
+
+| Field | Required value or source |
+| --- | --- |
+| `schema_version` | `1` |
+| `source_sha` | Exact reviewed 40-character integration commit, after merge/rebase and final verification |
+| `release_root` | Absolute path to an acquired artifact, including built `dist`, UI assets, Workspace sources, deployment entry points, package/lock and installed production dependencies; no `.git`, symlinks or junctions |
+| `data_root` | Absolute private runtime data directory outside the artifact and stage; preserve the owner's existing chats through a separately verified SQLite backup/migration |
+| `windows_user` | Measured `DOMAIN\\user` owning the already authenticated native Claude, Codex and Grok installations |
+| `public_origin` | Exactly `https://echoomegaprime.com` |
+| `ports` | Exactly `workspace`, `prime`, `qwen_tunnel`, `forge_forward`, `forge_proxy`, each freshly measured and unprotected |
+| `executables` | Exactly `python`, `node`, `ssh`: reviewed absolute native `.exe` paths; the same Python installation must provide `pythonw.exe` |
+| `ssh` | Literal SDK-observed FORGE `host`, verified `user`, absolute existing `identity_file`, absolute existing `known_hosts_file`, and measured `qwen_remote_port` |
+| `workspace_config` | Reviewed canonical Workspace config with real owner connections; `auth.enabled=true`, issuer `https://auth.echo-op.com`, verified `owner_uids`, explicit `legacy_data_owner_uid`, `trusted_proxy_ips=["127.0.0.1"]`; exact model and `context_length=262144` |
+| `prime_config` | Reviewed Prime owner connections; `workspace.ownerUid` equals the explicit legacy owner; `trustedIngressProxyIps=["127.0.0.1"]` for the measured loopback reverse-forward peer |
+| `min_start_memory_mib` | At least 2048; a higher reviewed budget may be used |
+| `min_runtime_memory_mib` | At least 1024; the owned runtime stops below this floor |
+
+The stage derives Workspace `model_url`, `public_origins` and 600-second inference deadline, plus Prime `publicOrigin` and loopback Workspace `baseUrl`. It does not infer an owner UID from a cookie or request, lower account approval, or replace canonical identity with a fixture issuer. No stand-in model or synthetic identity belongs in the production settings.
+
+Configure native providers only after successful installed CLI and isolation checks. `workspace_config.model_providers` accepts `claude`, `gpt`, `grok` with their reviewed executable command, optional model and timeout. GPT requires a fresh reviewed `codex_isolation` snapshot (hash and MCP server-name coverage); its current configuration is rechecked before every spawn. Grok requires a fresh `grok_isolation.sha256`; unsupported native hooks or sources fail closed and hide that choice. Snapshot hashes prove configuration continuity, not provider login, completion or release approval. Every actual failure remains explicit; no provider fallback is configured.
+
+Owner SDK/MCP connections and the directive/catalog are separate reviewed settings. Copying a browser OAuth file, adding a raw gate key to this JSON, or borrowing another process's SOL session environment is not a deployment configuration path. The runtime keeps the existing Windows login homes but does not import arbitrary parent credentials or broker environment variables.
+
+When `workspace_config.sol_cli` is configured, the package requires its absolute reviewed installed path, `workspace_config.python` equal to the pinned native Python, and `mission.enabled=true` with absolute `state`/`workspace`, explicit `owner_session`, and role `builder`. The existing canonical `Mission.ensure` uses the normal installed SOL mission start/preflight/token-issuance/renewal lifecycle. It stores only token hashes in the Workspace data directory and rechecks revocation/expiry before SDK dispatch; the task does not borrow or persist another process's token. Before Prime is started, the supervisor reads only its own `data_root/sol-mission.json` metadata, requires the completed token hash, and runs installed `mission show` for that exact run through the configured state. It requires the reviewed role/workspace and a live, unpaused, unhalted mission. The backend gets a bounded 300-second startup allowance for this normal lifecycle; the metadata read itself has a 20-second limit. A standalone configuration with no SDK CLI remains supported. A source-valid bootstrap contract still requires actual service admission and successful governed SDK operations in live acceptance.
+
+## Stage, review and launch
+
+Invoke `scripts/deploy/prime_runtime.py stage --settings <private-settings-file> --output <new-private-stage-directory>` with the reviewed Python executable. The directory must be new and outside artifact/data roots. On Windows, inherited ACLs are removed while the directory is empty, then only the pinned Windows account and SYSTEM receive full inherited access. The command writes `settings.json`, `workspace.json`, `prime.json`, `artifact-manifest.json`, `launch-plan.json` and `forge-nginx.conf`. Its structured receipt reports the settings and manifest SHA256 and explicitly reports `installed=false`, `started=false`, `approved=false`.
+
+The manifest records every artifact file and byte hash, including production dependencies and both `prime_runtime.py` and `prime_runtimew.pyw`. Startup refuses missing, modified or additional files, redirected paths, changed generated settings, or a different pinned source. Acquire and protect the artifact before generating this manifest. Source and installed dependency provenance remain release-review responsibilities; a file hash cannot certify itself.
+
+The runtime command is `run --stage <stage> --manifest-sha256 <observed-hash> --settings-sha256 <observed-hash> --admission <reviewed-receipt> --admission-sha256 <observed-receipt-hash>`. The receipt must name the exact `source_sha`. This package binds reviewed receipt bytes; the parent release workflow must separately validate the actual Echo Preflight/CertForge semantics, current authority and release conditions. A hand-written JSON object containing `source_sha` is not certification or deployment authority.
+
+For persistent headless operation, run `task` with the same five binding arguments and `--output <new-task-xml-path>`. This produces an **unregistered** Task Scheduler XML document. It uses the pinned existing account with `InteractiveToken`, least privilege, a logon trigger, `IgnoreNew`, hidden task metadata, and the matching `pythonw.exe` entry point. It never requests a password or changes a CLI login. The task deliberately has no automatic crash-restart loop: a host memory incident or stop request must not repeatedly relaunch competing inference clients. Registration and starting the prepared task are explicit parent deployment actions after release admission.
+
+The supervisor holds an OS file lock for its stage, pins the actual Windows account, checks memory, launches native argv arrays with `shell=false`/`CREATE_NO_WINDOW`, and establishes a kill-on-close Windows Job containing itself before any child starts. The job contains only this runtime and its descendants. On child failure, memory-floor breach, supervisor exit or hard crash, the owned tree is released; unrelated processes are not selected by name or PID. Existing stages with a stop request refuse restart. Remove such a request only as a deliberate reviewed restart decision after checking ownership and health.
+
+Windows account admission comes from `GetUserNameExW(NameSamCompatible)` on the actual process token, never caller-editable `USERDOMAIN` or `USERNAME`. The artifact manifest, settings and admission receipt must all name the same exact source SHA as well as match their separately pinned byte hashes.
+
+The FORGE proxy file is a standalone dedicated process configuration; do not replace shared nginx configuration. Syntax-check it with the installed reviewed Linux nginx executable before activation. Bind only its measured loopback port, provide private writable log/PID directories and use an owned least-privilege service identity. Its exact-domain rules return 421 for unknown hosts, redirect `www` to the canonical HTTPS apex, preserve the fixed apex Host and a single valid upstream client IP, discard forwarding chains, and keep streaming unbuffered with a 620-second bound. Prime independently rejects a missing/duplicate/invalid `CF-Connecting-IP` or an untrusted socket peer; Workspace independently preserves canonical account/rate-limit identity. This assumes the TLS ingress overwrites client IP metadata and is the only public path to the dedicated FORGE listener.
+
+Change only the reviewed apex/`www` ingress rules to this dedicated proxy. Preserve the full observed old rules and their exact version/hash, every unrelated hostname (including `desktop-web.echo-op.com`), the old origin and protected existing listeners. A locally cached YAML file is not proof of the active ingress configuration. Before changing ingress, prove loopback backend authentication, exact-host proxying, real provider calls and the whole streaming/tool/journal path through the prepared topology.
+
+## Verification, logs and rollback
+
+Offline boundary checks: `python -m unittest discover -s scripts/deploy -p test_prime_runtime.py`. These create only synthetic files and task XML; they start no app, tunnel, CLI or model. Also run the repository lint, TypeScript build/tests and canonical backend tests on the exact candidate through the parent resource scheduler. Offline tests do not establish task installation, Windows Job behavior, native login, model availability, certificate acceptance or public functionality.
+
+Live acceptance must record the deployed artifact/source identity; installed task action and account; all measured socket peers; anonymous refusal on private routes; real canonical login and approval; tenant separation; real Qwen/Claude/GPT/Grok responses and durable provider identity; governed tool proposals; streamed completion/cancel/disconnect; saved chats/projects/library and journal readback after fresh load; visible node/model readiness; voice consent and cancellation; public apex/`www` TLS behavior; and preservation of unrelated ingress hosts. Neither HTTP 200 nor a successful tiny model prompt establishes these properties.
+
+Structured supervisor logs contain component PIDs, failure categories, memory measurements and source/manifest identities. Native component stdout/stderr are private stage files and may contain sensitive upstream diagnostics; export only bounded, redacted metadata. Public HTTP access logs contain timestamp/status/duration and omit URLs, query strings, client addresses and cookies. The runtime does not log argv, prompts, access tokens or configuration objects.
+
+Rollback first restores the previously captured exact apex/`www` ingress routes with version-aware readback and verifies the prior public response. Then invoke `stop --stage <owned-stage>` and observe its stop receipt, supervisor exit, owned Job descendants and listeners disappearing, protected listeners surviving and the backend data remaining intact. Disable/unregister only this newly registered task, stop only this dedicated FORGE proxy/service, and remove only this owned stage/tunnel after evidence is preserved. Keep pre-deployment SQLite backups and data migration receipts. Never reset a shared checkout, kill unrelated CLI sessions, replace an entire ingress configuration from a partial snapshot, or delete the owner's live data as rollback.

@@ -1,0 +1,6 @@
+{
+  "model_url": "http://127.0.0.1:11439",
+  "model": "c3po-code:echo-qwen38-abliterated-256k",
+  "context_length": 262144,
+  "plugins": {}
+}

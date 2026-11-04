@@ -2,7 +2,8 @@
 
 Usage: copy-workspace-data.py <source-data-root> <dest-data-root>
 SQLite files go through the online backup API (consistent snapshot, source never written).
-voice/ artifacts and operation logs are not copied. No data is modified or deleted at the source.
+Identity/session stores, connection credentials, voice artifacts and operation logs are not copied.
+Configure reviewed connector references separately. No source data is modified or deleted.
 """
 import shutil, sqlite3, sys
 from pathlib import Path
@@ -22,7 +23,7 @@ for db in ("workspace.sqlite3", "knowledge.sqlite3"):
             a.backup(b)
         a.close(); b.close()
         print("backed up", db)
-for d in ("library", "journals", "connections"):
+for d in ("library", "journals"):
     if (src / d).is_dir():
         shutil.copytree(src / d, dst / d)
         print("copied", d)

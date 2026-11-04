@@ -1,6 +1,8 @@
-import type {IncomingMessage,ServerResponse} from 'node:http';
+import {request as httpRequest,type IncomingMessage,type ServerResponse} from 'node:http';
 import {debuglog} from 'node:util';
 import {randomUUID,timingSafeEqual} from 'node:crypto';
+import {isIP} from 'node:net';
+import {Readable} from 'node:stream';
 
 const debug=debuglog('echo-prime-workspace');
 const ordinaryEventBytes=256*1024,terminalEventBytes=8*1024*1024;
@@ -8,12 +10,13 @@ const ordinaryEventBytes=256*1024,terminalEventBytes=8*1024*1024;
 // receives a larger allowance; ordinary model/tool events remain bounded.
 const terminalPrefix=/^\s*\{\s*"type"\s*:\s*"done"\s*,/;
 const operationBudgets:Record<string,number>={
- '/api/chat':125000,'/api/review':610000,'/api/compact':610000,
+ '/api/chat':610000,'/api/review':610000,'/api/compact':610000,
  '/api/voice/start':455000,'/api/voice/next':305000,'/api/voice/transcribe':155000,
  '/api/sync':610000,
 };
 const tenantSafeActions=new Set(['memory_save','memory_forget','personality_select']);
 export interface WorkspaceConfig {baseUrl:string;ownerUid?:string}
+export interface WorkspaceIngressConfig {publicOrigin:string;trustedIngressProxyIps:string[]}
 export interface WorkspaceSession {
  authenticated:boolean;user:{uid:string;name?:string;role?:string;status?:string}|null;csrf:string|null;
 }
@@ -81,16 +84,71 @@ function checkCsrf(req:IncomingMessage,expected:string){
  const supplied=req.headers['x-echo-csrf'];
  if(typeof supplied!=='string'||Buffer.byteLength(supplied)!==Buffer.byteLength(expected)||!timingSafeEqual(Buffer.from(supplied),Buffer.from(expected)))throw new WorkspaceHttpError(403,'Account session check failed');
 }
+function canonicalIp(value:unknown):string|undefined {
+ if(typeof value!=='string'||value.length>45||value.includes('%'))return undefined;
+ const family=isIP(value);
+ if(family===4)return value;
+ if(family===6){try{return new URL(`http://[${value}]/`).hostname.slice(1,-1).toLowerCase();}catch{return undefined;}}
+ return undefined;
+}
 
 /** A fixed, authenticated canonical owner boundary. Never uses an owner cookie,
  * cached user, SDK credential, caller tenant ID or arbitrary upstream URL. */
 export class WorkspaceBridge {
  readonly origin:string;readonly ownerUid?:string;
- constructor(config:WorkspaceConfig,private readonly secureCookies=false){
+ private readonly ingress?:{origin:string;host:string;peers:Set<string>};
+ private readonly admittedClients=new WeakMap<IncomingMessage,string>();
+ constructor(config:WorkspaceConfig,private readonly secureCookies=false,ingress?:WorkspaceIngressConfig){
   const url=new URL(config.baseUrl);
   if(url.protocol!=='http:'||!['127.0.0.1','[::1]'].includes(url.hostname)||url.username||url.password||url.pathname!=='/'||url.search||url.hash)throw new Error('Workspace requires a fixed loopback HTTP origin');
   if(config.ownerUid!==undefined&&(typeof config.ownerUid!=='string'||!/^[A-Za-z0-9_.:@+-]{1,200}$/.test(config.ownerUid)))throw new Error('Invalid configured Workspace owner identity');
   this.origin=url.origin;this.ownerUid=config.ownerUid;
+  if(ingress){
+   const publicUrl=new URL(ingress.publicOrigin);
+   if(publicUrl.protocol!=='https:'||publicUrl.origin!==ingress.publicOrigin)throw new Error('Invalid public ingress origin');
+   const pins=ingress.trustedIngressProxyIps;
+   if(!Array.isArray(pins)||!pins.length||pins.length>16)throw new Error('Public ingress requires reviewed exact proxy IPs');
+   const peers=pins.map(canonicalIp);
+   if(peers.some(peer=>peer===undefined))throw new Error('Public ingress proxy pins must be exact literal IPs');
+   this.ingress={origin:publicUrl.origin,host:publicUrl.host,peers:new Set(peers as string[])};
+  }
+ }
+ validateIngress(req:IncomingMessage):void {
+  if(!this.ingress)return;
+  const peer=canonicalIp(req.socket.remoteAddress);
+  if(!peer||!this.ingress.peers.has(peer))throw new WorkspaceHttpError(403,'Untrusted ingress proxy');
+  const identity:string[]=[];
+  for(let index=0;index<req.rawHeaders.length;index+=2)if(req.rawHeaders[index].toLowerCase()==='cf-connecting-ip')identity.push(req.rawHeaders[index+1]);
+  const client=identity.length===1?canonicalIp(identity[0]):undefined;
+  if(!client)throw new WorkspaceHttpError(403,'Ingress requires one valid client IP header');
+  this.admittedClients.set(req,client);
+ }
+ private ingressHeaders(req:IncomingMessage):Record<string,string>{
+  if(!this.ingress)return {};
+  this.validateIngress(req);
+  return {host:this.ingress.host,origin:this.ingress.origin,'cf-connecting-ip':this.admittedClients.get(req)!};
+ }
+ private publicFetch(path:string,headers:Record<string,string>,signal:AbortSignal,body?:string):Promise<Response>{
+  // Native fetch rewrites Host to the loopback destination. This fixed-origin
+  // transport preserves the reviewed public Host without changing the socket
+  // destination or accepting a caller-selected authority or dispatcher.
+  return new Promise((resolve,reject)=>{
+   const request=httpRequest(this.origin+path,{method:body===undefined?'GET':'POST',signal,agent:false,setHost:false,
+    headers:{...headers,...(body===undefined?{}:{'content-length':String(Buffer.byteLength(body))})}},response=>{
+     try{
+      const responseHeaders=new Headers();
+      for(let index=0;index<response.rawHeaders.length;index+=2)responseHeaders.append(response.rawHeaders[index],response.rawHeaders[index+1]);
+      const status=response.statusCode??502;
+      const empty=[204,205,304].includes(status);
+      const stream=empty?null:Readable.toWeb(response) as ReadableStream<Uint8Array>;
+      if(empty)response.resume();
+      resolve(new Response(stream,{status,headers:responseHeaders}));
+     }catch(error){response.destroy();reject(error);}
+    });
+   request.once('error',reject);
+   request.once('upgrade',(_response,socket)=>{socket.destroy();reject(new WorkspaceHttpError(502,'Workspace upgrade refused'));});
+   request.end(body);
+  });
  }
  private async fetch(path:string,headers:Record<string,string>,signal?:AbortSignal,body?:string):Promise<Response>{
   const action=path==='/api/action'&&body?(JSON.parse(body) as {action?:unknown}).action:undefined;
@@ -100,7 +158,9 @@ export class WorkspaceBridge {
   const deadline=AbortSignal.timeout(actionBudget??operationBudgets[path]??20000);
   const combined=signal?AbortSignal.any([deadline,signal]):deadline;
   try{
-   const response=await fetch(this.origin+path,{method:body===undefined?'GET':'POST',headers,body,signal:combined,redirect:'manual'});
+   const response=this.ingress&&headers.host===this.ingress.host?
+    await this.publicFetch(path,headers,combined,body):
+    await fetch(this.origin+path,{method:body===undefined?'GET':'POST',headers,body,signal:combined,redirect:'manual'});
    if(response.status>=300&&response.status<400){await response.body?.cancel();throw new WorkspaceHttpError(502,'Workspace redirect refused');}
    return response;
   }catch(error){if(error instanceof WorkspaceHttpError)throw error;throw new WorkspaceHttpError(502,'Workspace transport unavailable; no automatic retry');}
@@ -114,7 +174,9 @@ export class WorkspaceBridge {
   }catch{throw new Error('An authenticated Workspace backend is required; owner-only installations cannot be bridged');}
  }
  async session(req:IncomingMessage,signal?:AbortSignal):Promise<WorkspaceSession>{
-  const cookie=sessionCookie(req),response=await this.fetch('/api/auth/session',cookie?{cookie}:{},signal);
+  const cookie=sessionCookie(req),headers=this.ingressHeaders(req);
+  if(cookie)headers.cookie=cookie;
+  const response=await this.fetch('/api/auth/session',headers,signal);
   if(response.status!==200){await response.body?.cancel();throw new WorkspaceHttpError(503,'Account admission unavailable');}
   return parseSession(await jsonResponse(response));
  }
@@ -141,17 +203,18 @@ export class WorkspaceBridge {
    if(localLogout){if(typeof req.headers['x-echo-csrf']!=='string'||!/^[A-Za-z0-9_-]{8,256}$/.test(req.headers['x-echo-csrf']))throw new WorkspaceHttpError(403,'Account session check failed');}
    else if(!publicRoute)checkCsrf(req,session!.csrf!);
    else if(req.method==='POST')checkCsrf(req,'login');
-   const cookie=sessionCookie(req),headers:Record<string,string>={accept:'application/json, application/x-ndjson, audio/wav, text/plain'};
+   const cookie=sessionCookie(req),headers:Record<string,string>={...this.ingressHeaders(req),accept:'application/json, application/x-ndjson, audio/wav, text/plain'};
    if(cookie)headers.cookie=cookie;
    let body:string|undefined;
-   if(req.method==='POST'){body=await requestBody(req);headers['content-type']='application/json';headers.origin=this.origin;headers['x-echo-csrf']=String(req.headers['x-echo-csrf']);}
+   if(req.method==='POST'){body=await requestBody(req);headers['content-type']='application/json';headers.origin=this.ingress?.origin??this.origin;headers['x-echo-csrf']=String(req.headers['x-echo-csrf']);}
    if(pathname==='/api/action'&&session&&!this.ownerAccess(session)&&!tenantSafeActions.has((JSON.parse(body!) as {action:string}).action))throw new WorkspaceHttpError(403,'Primary owner admission required');
    let admittedState:unknown;
    if(session&&!pathname.startsWith('/api/auth/')&&!this.ownerAccess(session)){
     // The canonical legacy owner application is selected by UID alone. A
     // demoted/misconfigured owner must never inherit its tools through chat.
     // Attest the actual application after current-session CSRF validation.
-    const stateResponse=await this.fetch('/api/state',cookie?{cookie,accept:'application/json'}:{accept:'application/json'},signal);
+    const stateHeaders={...this.ingressHeaders(req),accept:'application/json',...(cookie?{cookie}:{})};
+    const stateResponse=await this.fetch('/api/state',stateHeaders,signal);
     if(stateResponse.status!==200){await stateResponse.body?.cancel();throw new WorkspaceHttpError(503,'Private Workspace isolation unavailable');}
     const state=await jsonResponse(stateResponse,8*1024*1024) as {tenant_isolation?:unknown;auth_enabled?:unknown;user?:{uid?:unknown};csrf?:unknown};
     if(!state||state.tenant_isolation!==true||state.auth_enabled!==true||state.user?.uid!==session.user?.uid||state.csrf!==session.csrf)throw new WorkspaceHttpError(403,'Private Workspace isolation required');

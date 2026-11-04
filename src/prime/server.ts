@@ -9,12 +9,13 @@ import {WorkspaceBridge,WorkspaceHttpError,type WorkspaceConfig} from './workspa
 const assets:Record<string,string>={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/orb.js':'orb.js','/app.js':'app.js','/chat.js':'chat.js','/integrations.js':'integrations.js','/catalog.js':'catalog.js','/steward.js':'steward.js','/workspace-client.js':'workspace-client.js','/workspace.js':'workspace.js'};
 const debug=debuglog('echo-prime-server');
 assets['/privacy']='privacy.html';assets['/privacy.css']='privacy.css';
+for(const asset of ['models.js','fleet.js','fleet.css','composer.css','layout.js','layout.css'])assets['/'+asset]=asset;
 async function body(req:IncomingMessage){
  let size=0;const chunks:Buffer[]=[];
  for await(const part of req){size+=part.length;if(size>131072)throw new Error('Request exceeds 128 KiB');chunks.push(part);}
  return object(JSON.parse(Buffer.concat(chunks).toString('utf8')));
 }
-export interface PrimeServerOptions {workspace?:WorkspaceConfig;publicOrigin?:string}
+export interface PrimeServerOptions {workspace?:WorkspaceConfig;publicOrigin?:string;trustedIngressProxyIps?:string[]}
 function publicOrigin(value:string|undefined):string|undefined{
  if(value===undefined)return undefined;
  let origin:URL;try{origin=new URL(value);}catch{throw new Error('Invalid public HTTPS origin');}
@@ -25,7 +26,8 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
  if(!Number.isInteger(port)||port<0||port>65535)throw new Error('Invalid port');
  const externalOrigin=publicOrigin(options.publicOrigin);
  if(externalOrigin&&(!options.workspace||!options.workspace.ownerUid))throw new Error('Public origin requires an authenticated Workspace and pinned primary owner');
- const workspace=options.workspace?new WorkspaceBridge(options.workspace,!!externalOrigin):undefined;
+ const workspace=options.workspace?new WorkspaceBridge(options.workspace,!!externalOrigin,externalOrigin?
+  {publicOrigin:externalOrigin,trustedIngressProxyIps:options.trustedIngressProxyIps!}:undefined):undefined;
  if(workspace)await workspace.validateBackend();
  const token=randomBytes(32).toString('hex');let url='',active=0;
  const server=createServer(async(req,res)=>{
@@ -35,6 +37,10 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
   const send=(status:number,value:unknown)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(value));};
   const expectedOrigin=externalOrigin??url;
   if(req.headers.host!==new URL(expectedOrigin).host){send(403,{error:'Unrecognized host'});return;}
+  try{workspace?.validateIngress(req);}catch(error){
+   debug('%j',{schemaVersion:1,event:'prime_ingress_request',category:'identity_rejected',status:403});
+   send(error instanceof WorkspaceHttpError?error.status:403,{error:error instanceof WorkspaceHttpError?error.message:'Ingress identity unavailable'});return;
+  }
   const path=new URL(req.url??'/',url).pathname;
   if(path.startsWith('/api/')){
    const started=Date.now(),requestId=randomUUID();

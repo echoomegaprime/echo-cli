@@ -58,7 +58,9 @@ class StandInModel:
     def status(self):
         return {"ok": True, "model": args.model_name, "loaded": True}
 
-    def generate(self, messages, on_token=None, max_tokens=2048, tools=None):
+    def generate(self, messages, on_token=None, max_tokens=2048, tools=None, cancel_event=None):
+        if cancel_event is not None and cancel_event.is_set():
+            raise app.WorkspaceError('Stand-in request was cancelled.')
         text = f"[{args.model_name}] stand-in reply; the FORGE model is not connected."
         if on_token:
             on_token(text)

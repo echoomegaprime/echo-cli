@@ -150,7 +150,7 @@ const cleanup:Array<()=>Promise<void>>=[];
 afterEach(async()=>{for(const close of cleanup.splice(0).reverse())await close();});
 async function ownerFixture(authEnabled=true){
  const tokens={owner:randomBytes(32).toString('hex'),member:randomBytes(32).toString('hex'),admin:randomBytes(32).toString('hex')};
- const calls:Array<{path:string;cookie:string;origin:string|undefined;authorization:string|undefined}>=[];
+ const calls:Array<{path:string;cookie:string;origin:string|undefined;authorization:string|undefined;host:string|undefined;clientIp:string|string[]|undefined;forwarded:string|string[]|undefined;xff:string|string[]|undefined}>=[];
  const revoked=new Set<string>();
  const pending=new Set<string>();
  const roles=new Map<string,string>();
@@ -158,7 +158,8 @@ async function ownerFixture(authEnabled=true){
  const server=createServer(async(req,res)=>{
   const url=new URL(req.url??'/','http://localhost'),cookie=req.headers.cookie??'';
   const account=(Object.keys(tokens) as Array<keyof typeof tokens>).find(k=>cookie===`echo_workspace_session=${tokens[k]}`&&!revoked.has(k));
-  calls.push({path:url.pathname,cookie,origin:req.headers.origin,authorization:req.headers.authorization});
+  calls.push({path:url.pathname,cookie,origin:req.headers.origin,authorization:req.headers.authorization,host:req.headers.host,
+   clientIp:req.headers['cf-connecting-ip'],forwarded:req.headers.forwarded,xff:req.headers['x-forwarded-for']});
   const json=(status:number,data:unknown)=>{res.writeHead(status,{'content-type':'application/json'});res.end(JSON.stringify(data));};
   if(url.pathname==='/api/auth/session'){
    if(!authEnabled){json(404,{error:'Not found'});return;}
@@ -213,6 +214,77 @@ async function login(p:{url:string;cookie:string},account:string){
  const data=await response.json() as {csrf:string};
  return {...p,csrf:data.csrf,cookie:p.cookie+'; '+(response.headers.get('set-cookie')??'').split(';')[0]};
 }
+
+async function publicIngressFixture(trustedIngressProxyIps:unknown=['127.0.0.1']){
+ const upstream=await ownerFixture(),publicOrigin='https://echoomegaprime.com';
+ const server=await Reflect.apply(startPrimeServer,undefined,[new PrimeHub({capabilities:[]}),ui,0,
+  {workspace:{baseUrl:upstream.baseUrl,ownerUid:'owner'},publicOrigin,trustedIngressProxyIps}]) as Awaited<ReturnType<typeof startPrimeServer>>;
+ cleanup.push(server.close);
+ const request=(path:string,extra:Record<string,string|string[]|undefined>={},body?:unknown)=>new Promise<{status:number;cookie:string;body:string}>((resolve,reject)=>{
+  const input:Record<string,string|string[]|undefined>={host:'echoomegaprime.com','cf-connecting-ip':'203.0.113.9','x-prime-request':'1',
+   ...(body===undefined?{}:{'content-type':'application/json'}),...extra};
+  const admitted=Object.fromEntries(Object.entries(input).filter((entry):entry is [string,string|string[]]=>entry[1]!==undefined));
+  const req=httpRequest(server.url+path,{method:body===undefined?'GET':'POST',headers:admitted},res=>{
+   let text='';res.setEncoding('utf8');res.on('data',chunk=>{text+=chunk;});
+   res.on('end',()=>resolve({status:res.statusCode!,cookie:res.headers['set-cookie']?.[0]??'',body:text}));
+  });req.on('error',reject);req.end(body===undefined?undefined:JSON.stringify(body));
+ });
+ return {upstream,server,request,publicOrigin};
+}
+
+describe('trusted public ingress identity through real HTTP',()=>{
+ it.each(['203.0.113.17','2001:0db8:0:0:0:0:0:7'])('forwards one admitted %s with only the configured public Host and Origin',async clientIp=>{
+  const {upstream,request,publicOrigin}=await publicIngressFixture();
+  expect(upstream.calls).toHaveLength(1);
+  expect(upstream.calls[0]).toMatchObject({host:new URL(upstream.baseUrl).host,clientIp:undefined,origin:undefined});
+  const root=await request('/',{'cf-connecting-ip':clientIp});
+  expect(root.status).toBe(200);
+  const cookie=root.cookie.split(';')[0];
+  const signedIn=await request('/api/workspace/auth/login',{cookie,origin:publicOrigin,'x-echo-csrf':'login','cf-connecting-ip':clientIp,
+   forwarded:'for=198.51.100.99;host=attacker.example','x-forwarded-for':'198.51.100.99','x-forwarded-host':'attacker.example','x-forwarded-proto':'http'},{account:'member'});
+  expect(signedIn.status).toBe(200);expect(signedIn.cookie).toMatch(/; Secure(?:;|$)/);
+  const call=upstream.calls.find(entry=>entry.path==='/api/auth/login')!;
+  expect(call).toMatchObject({host:'echoomegaprime.com',origin:publicOrigin,
+   clientIp:clientIp.includes(':')?'2001:db8::7':clientIp,forwarded:undefined,xff:undefined});
+  expect(call.cookie).not.toContain('echo_prime=');expect(call.authorization).toBeUndefined();
+  const sessionCookie=cookie+'; '+signedIn.cookie.split(';')[0],csrf=(JSON.parse(signedIn.body) as {csrf:string}).csrf;
+  const state=await request('/api/workspace/state',{cookie:sessionCookie,'x-echo-csrf':csrf,'cf-connecting-ip':clientIp});
+  expect(state.status).toBe(200);expect(JSON.parse(state.body)).toMatchObject({tenant_isolation:true,user:{uid:'member'}});
+  expect(upstream.calls.slice(1).every(entry=>entry.host==='echoomegaprime.com'&&entry.origin===publicOrigin
+   &&entry.clientIp===(clientIp.includes(':')?'2001:db8::7':clientIp)&&entry.forwarded===undefined&&entry.xff===undefined)).toBe(true);
+ });
+ it.each([
+  ['missing',undefined],['duplicate',['203.0.113.10','203.0.113.11']],['comma list','203.0.113.10, 203.0.113.11'],
+  ['hostname','attacker.example'],['IPv4 port','203.0.113.10:443'],['bracketed IPv6','[2001:db8::7]'],['IPv6 zone','fe80::1%eth0'],['empty','']
+ ] as Array<[string,string|string[]|undefined]>)('rejects %s client identity before cookies or backend admission',async(_name,clientIp)=>{
+  const {upstream,request}=await publicIngressFixture();
+  for(const path of ['/','/api/session']){
+   const result=await request(path,{'cf-connecting-ip':clientIp});
+   expect(result.status).toBe(403);expect(result.cookie).toBe('');
+  }
+  expect(upstream.calls).toHaveLength(1);
+ });
+ it('rejects a valid client header from a peer outside the exact reviewed proxy set',async()=>{
+  const {upstream,request}=await publicIngressFixture(['127.0.0.2']);
+  expect((await request('/')).status).toBe(403);
+  expect((await request('/api/session')).status).toBe(403);
+  expect(upstream.calls).toHaveLength(1);
+ });
+ it.each([undefined,[],['*'],['127.0.0.0/8'],['localhost'],['fe80::1%eth0'],['127.0.0.1','invalid']])('requires a nonempty exact-IP proxy configuration (%j)',async trustedIngressProxyIps=>{
+  const upstream=await ownerFixture();
+  const started=Reflect.apply(startPrimeServer,undefined,[new PrimeHub({capabilities:[]}),ui,0,
+   {workspace:{baseUrl:upstream.baseUrl,ownerUid:'owner'},publicOrigin:'https://echoomegaprime.com',trustedIngressProxyIps}]) as ReturnType<typeof startPrimeServer>;
+  await expect(started.then(server=>{cleanup.push(server.close);return server;})).rejects.toThrow(/proxy|ingress/i);
+  expect(upstream.calls).toHaveLength(0);
+ });
+ it('ignores spoofed forwarding headers in local mode and keeps canonical requests loopback',async()=>{
+  const upstream=await ownerFixture(),p=await prime(upstream.baseUrl);
+  const result=await fetch(p.url+'/api/session',{headers:{...headers(p),'cf-connecting-ip':'198.51.100.4',
+   forwarded:'for=198.51.100.5','x-forwarded-for':'198.51.100.6'}});
+  expect(result.status).toBe(200);
+  expect(upstream.calls.every(call=>call.host===new URL(upstream.baseUrl).host&&call.clientIp===undefined&&call.forwarded===undefined&&call.xff===undefined)).toBe(true);
+ });
+});
 describe('canonical Workspace boundary in the existing Prime host',()=>{
  it.each(['http://echoomegaprime.com','https://127.0.0.1','https://localhost','https://user@example.test','https://echoomegaprime.com/path','https://echoomegaprime.com?x=1','https://echoomegaprime.com#fragment','https://echoomegaprime.com:444'])('refuses unsafe public origin %s',async publicOrigin=>{
   const upstream=await ownerFixture();
@@ -225,9 +297,9 @@ describe('canonical Workspace boundary in the existing Prime host',()=>{
  });
  it('binds public Host and Origin explicitly, secures both cookies, and retains current tenant/owner admission behind the TLS proxy',async()=>{
   const upstream=await ownerFixture(),publicOrigin='https://echoomegaprime.com';
-  const server=await startPrimeServer(new PrimeHub({capabilities:[]}),ui,0,{workspace:{baseUrl:upstream.baseUrl,ownerUid:'owner'},publicOrigin});cleanup.push(server.close);
+  const server=await startPrimeServer(new PrimeHub({capabilities:[]}),ui,0,{workspace:{baseUrl:upstream.baseUrl,ownerUid:'owner'},publicOrigin,trustedIngressProxyIps:['127.0.0.1']});cleanup.push(server.close);
   const request=(path:string,extra:Record<string,string>={},body?:unknown)=>new Promise<{status:number;cookie:string;body:string}>((resolve,reject)=>{
-   const req=httpRequest(server.url+path,{method:body===undefined?'GET':'POST',headers:{host:'echoomegaprime.com','x-prime-request':'1',...(body===undefined?{}:{'content-type':'application/json'}),...extra}},res=>{
+   const req=httpRequest(server.url+path,{method:body===undefined?'GET':'POST',headers:{host:'echoomegaprime.com','cf-connecting-ip':'203.0.113.8','x-prime-request':'1',...(body===undefined?{}:{'content-type':'application/json'}),...extra}},res=>{
     let text='';res.setEncoding('utf8');res.on('data',chunk=>{text+=chunk;});res.on('end',()=>resolve({status:res.statusCode!,cookie:res.headers['set-cookie']?.[0]??'',body:text}));
    });req.on('error',reject);req.end(body===undefined?undefined:JSON.stringify(body));
   });
