@@ -209,21 +209,36 @@ const report = (over: Record<string, unknown> = {}) => ({
     { id: 'grok', label: 'Grok (grok CLI)', kind: 'cli', available: true, requested: null, last: null },
   ], ...over,
 });
-async function pickerFixture(opts: { stored?: string; variantStored?: string; throwStorage?: boolean; body?: unknown; status?: number } = {}) {
+interface Session { workspaceConfigured: boolean; authenticated: boolean; ownerAccess: boolean; csrf: string | null; user: { uid: string; role: string; status: string } | null }
+const ownerSession = (): Session => ({ workspaceConfigured: true, authenticated: true, ownerAccess: true, csrf: 'csrf-owner', user: { uid: 'owner', role: 'owner', status: 'approved' } });
+const memberSession = (): Session => ({ workspaceConfigured: true, authenticated: true, ownerAccess: false, csrf: 'csrf-member', user: { uid: 'member', role: 'member', status: 'approved' } });
+const anonymousSession = (): Session => ({ workspaceConfigured: true, authenticated: false, ownerAccess: false, csrf: null, user: null });
+/** Stands in for workspace.js: the cached session, ownerHeaders() (which in production re-reads /api/session) and invalidate(). */
+function workspaceStub(session: Session | null, enabled = true) {
+  const ws = {
+    ready: Promise.resolve(enabled), enabled, session, sessionReads: 0,
+    ownerHeaders: vi.fn(async () => { ws.sessionReads++; if (!ws.session?.ownerAccess) throw new Error('Primary owner admission required.'); return { 'x-echo-csrf': ws.session.csrf! }; }),
+    invalidate: vi.fn(() => { ws.session = null; }),
+  };
+  return ws;
+}
+async function pickerFixture(opts: { stored?: string; variantStored?: string; throwStorage?: boolean; body?: unknown; status?: number; workspace?: ReturnType<typeof workspaceStub> } = {}) {
   const toolbar = element(), composer = element();
   const store: Record<string, string> = { ...(opts.stored ? { 'echo-prime-model-v1': opts.stored } : {}), ...(opts.variantStored ? { 'echo-prime-argon-model-v1': opts.variantStored } : {}) };
   const localStorage = opts.throwStorage
     ? { getItem() { throw new Error('blocked'); }, setItem() { throw new Error('blocked'); } }
     : { getItem: (k: string) => store[k] ?? null, setItem: (k: string, v: string) => { store[k] = v; } };
   const fetch = vi.fn(async () => ({ ok: (opts.status ?? 200) < 400, status: opts.status ?? 200, json: async () => opts.body ?? report() }));
-  const window = { addEventListener: vi.fn() } as Record<string, unknown>;
-  runInNewContext(modelsSource, { window, localStorage, fetch, Error, console, Promise, Array, JSON,
+  const handlers: Record<string, (() => void)[]> = {};
+  const window = { addEventListener: vi.fn((name: string, fn: () => void) => { (handlers[name] ??= []).push(fn); }), ...(opts.workspace ? { EchoPrimeWorkspace: opts.workspace } : {}) } as Record<string, unknown>;
+  runInNewContext(modelsSource, { window, localStorage, fetch, Error, console, Promise, Array, JSON, Date,
     document: { querySelector: (s: string) => s === '.composer-toolbar' ? toolbar : s === '#composer' ? composer : null, createElement: (t: string) => element(t) } });
   const api = window.EchoPrimeModels as { ready: Promise<void>; provider: () => string | undefined; model: () => string | undefined; describe: (m: unknown) => string };
   await api.ready;
-  return { api, toolbar, store, fetch };
+  return { api, toolbar, store, fetch, fire: (name: string) => { for (const fn of handlers[name] ?? []) fn(); } };
 }
 const flat = (e: El): El[] => [e, ...e.children.flatMap(flat)];
+const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
 
 describe('model picker (models.js)', () => {
   it('shows Qwen as the default with Claude, GPT and Grok selectable, and saves the choice', async () => {
@@ -263,6 +278,53 @@ describe('model picker (models.js)', () => {
     expect(api.describe({ id: 'claude', label: 'Claude (claude CLI)', answered: true, reported: false, model: null, requested: 'sonnet' })).toContain('(requested: sonnet)');
     expect(api.describe({ id: 'grok', label: 'Grok (grok CLI)', answered: false, reported: false, model: null, requested: null })).toMatch(/no model answered.*Grok/i);
     expect(api.describe(undefined)).toBe('');
+  });
+});
+
+describe('model picker: owner-only status before sign-in (models.js, the 2026-11-04 401 request storm)', () => {
+  const note = (toolbar: El) => flat(toolbar).map(e => e.textContent).join(' ');
+  it('anonymous visitor: no fetch, no session re-read, no invalidate, a sign-in note, and account events change nothing', async () => {
+    const ws = workspaceStub(anonymousSession());
+    const f = await pickerFixture({ workspace: ws, status: 401, body: { error: 'Sign in required' } });
+    expect(f.fetch).not.toHaveBeenCalled(); expect(ws.ownerHeaders).not.toHaveBeenCalled(); expect(ws.invalidate).not.toHaveBeenCalled();
+    expect(f.api.provider()).toBeUndefined(); expect(f.api.model()).toBeUndefined();
+    expect(flat(f.toolbar).find(e => e.tag === 'select')!.disabled).toBe(true);
+    expect(note(f.toolbar)).toContain('Sign in to choose a model');
+    for (let i = 0; i < 25; i++) f.fire('echo-account-changed');
+    await flush();
+    expect(f.fetch).not.toHaveBeenCalled(); expect(ws.ownerHeaders).not.toHaveBeenCalled(); expect(ws.invalidate).not.toHaveBeenCalled();
+  });
+  it('signed-in member: no fetch and an owner-only note', async () => {
+    const ws = workspaceStub(memberSession());
+    const f = await pickerFixture({ workspace: ws, status: 403, body: { error: 'Primary owner admission required' } });
+    expect(f.fetch).not.toHaveBeenCalled(); expect(ws.invalidate).not.toHaveBeenCalled(); expect(f.api.provider()).toBeUndefined();
+    expect(note(f.toolbar)).toContain('primary owner only');
+  });
+  it('owner whose session expired: one fetch, exactly one invalidate, then the sign-in state without a retry', async () => {
+    const ws = workspaceStub(ownerSession());
+    const f = await pickerFixture({ workspace: ws, status: 401, body: { error: 'Sign in required' } });
+    expect(f.fetch).toHaveBeenCalledTimes(1); expect(ws.sessionReads).toBe(1); expect(ws.invalidate).toHaveBeenCalledTimes(1); expect(ws.session).toBeNull();
+    f.fire('echo-account-changed'); await flush(); // what the invalidation dispatches in production
+    expect(f.fetch).toHaveBeenCalledTimes(1); expect(ws.sessionReads).toBe(1); expect(ws.invalidate).toHaveBeenCalledTimes(1);
+    expect(note(f.toolbar)).toContain('Sign in to choose a model'); expect(f.api.provider()).toBeUndefined();
+  });
+  it('host without an authenticated Workspace: a 403 is reported as unavailable and invalidates nothing', async () => {
+    const ws = workspaceStub({ workspaceConfigured: false, authenticated: false, ownerAccess: false, csrf: null, user: null }, false);
+    const f = await pickerFixture({ workspace: ws, status: 403, body: { error: 'Same-origin Prime session required' } });
+    expect(f.fetch).toHaveBeenCalledTimes(1); expect(ws.invalidate).not.toHaveBeenCalled();
+    expect(note(f.toolbar)).toMatch(/status unavailable/i); expect(f.api.provider()).toBeUndefined();
+  });
+  it('cools down for 5 s after a failed status read even while account events keep firing', async () => {
+    vi.useFakeTimers();
+    try {
+      const ws = workspaceStub(ownerSession());
+      const f = await pickerFixture({ workspace: ws, status: 500, body: { error: 'boom' } });
+      expect(f.fetch).toHaveBeenCalledTimes(1); expect(ws.invalidate).not.toHaveBeenCalled();
+      for (let i = 0; i < 5; i++) f.fire('echo-account-changed');
+      await flush(); expect(f.fetch).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(4900); f.fire('echo-account-changed'); await flush(); expect(f.fetch).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(200); f.fire('echo-account-changed'); await flush(); expect(f.fetch).toHaveBeenCalledTimes(2);
+    } finally { vi.useRealTimers(); }
   });
 });
 

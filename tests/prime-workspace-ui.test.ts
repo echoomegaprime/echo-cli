@@ -25,7 +25,7 @@ class Node {
 }
 const source=(name:string)=>readFileSync(new URL('../ui/echo-prime/'+name,import.meta.url),'utf8');
 function deferred<T=any>(){let resolve!:(value:T)=>void;const promise=new Promise<T>(r=>{resolve=r;});return {promise,resolve};}
-function harness(file:string,options:Record<string,any>={}){
+function harness(file:string|string[],options:Record<string,any>={}){
  const nodes=new Map<string,Node>(),events:Record<string,((event:any)=>unknown)[]>={},documentEvents:Record<string,((event:any)=>unknown)[]>={};
  const get=(selector:string)=>{if(!nodes.has(selector))nodes.set(selector,new Node());return nodes.get(selector)!;};
  const stored=new Map([['echo-prime-interface-v1',JSON.stringify({drafts:[{id:'owner-old',text:'OWNER PRIVATE LEGACY'}],palette:'aurora'})]]);
@@ -33,7 +33,8 @@ function harness(file:string,options:Record<string,any>={}){
  const window:any={addEventListener:(name:string,callback:(event:any)=>unknown)=>(events[name]??=[]).push(callback),dispatchEvent:(event:any)=>{for(const fn of events[event.type]||[])fn(event);},EchoPrimeChat:{reset:vi.fn(),send:vi.fn(async()=>({sent:true,detail:'coding reply'}))},EchoPrimeOrb:{mount:()=>({motion:true,setPalette(){},setQuality(){},setMotion(){},destroy(){}})},...options.window};
  const document:any={hidden:false,head:new Node(),querySelector:get,querySelectorAll:(selector:string)=>options.lists?.[selector]||[],createElement:(tag:string)=>new Node(tag),createTextNode:(text:string)=>Object.assign(new Node('text'),{textContent:text}),createElementNS:(_ns:string,tag:string)=>new Node(tag),addEventListener:(name:string,callback:(event:any)=>unknown)=>(documentEvents[name]??=[]).push(callback)};
  const context={window,document,localStorage:storage,matchMedia:()=>({matches:false,addEventListener(){}}),navigator:{userAgent:'fixture'},location:{protocol:'http:'},crypto:{randomUUID},setTimeout,clearTimeout,AbortController,AbortSignal,TextEncoder,TextDecoder,URL,Blob,Audio:vi.fn(),Event,Error,console:{debug:vi.fn()},fetch:options.fetch||vi.fn(),...options.globals};
- runInNewContext(source(file),context);return {get,nodes,window,stored,document,emit:(type:string)=>window.dispatchEvent(new Event(type)),emitDocument:(type:string)=>{for(const fn of documentEvents[type]||[])fn(new Event(type));}};
+ for(const name of [file].flat())runInNewContext(source(name),context);
+ return {get,nodes,window,stored,document,emit:(type:string)=>window.dispatchEvent(new Event(type)),emitDocument:(type:string)=>{for(const fn of documentEvents[type]||[])fn(new Event(type));}};
 }
 function descendants(node:Node):Node[]{return node.children.flatMap(child=>[child,...descendants(child)]);}
 function workspaceHarness(request=vi.fn(async(path:string,body?:any)=>path==='/state'?{chats:[],projects:[],library:[],preferences:[],personalities:[]}:path==='/import'?{id:'imported'}:path==='/auth/accounts'?{accounts:[{uid:'member',email:'member@example.test',role:'member',status:'pending'}]}:path.startsWith('/chats/')?{id:path.slice(7),messages:[]}:{}),globals:Record<string,any>={}){
@@ -118,6 +119,26 @@ it('stops a pending speech start before an old audio artifact can play',async()=
  const reply=descendants(h.get('#workspace-panel-content')).filter(n=>n.tagName==='SELECT').at(-1)!;reply.value='answer';
  const pending=h.find('Listen').fire('click');await vi.waitFor(()=>expect(request.mock.calls.some(c=>c[0]==='/voice/start')).toBe(true));await h.find('Stop speech').fire('click');
  done.resolve({audio_url:'/api/voice/audio/fixture',session_id:'speech',chunk_index:0,has_more:false});await pending;expect(play).not.toHaveBeenCalled();
+});
+it('dispatches echo-account-changed only on a real identity change: anonymous re-reads and invalidations are silent, a sign-in fires once',async()=>{
+ // The shipped transport runs here too, because the 2026-11-04 request storm was the pair of them:
+ // an owner-only 401 -> invalidate() -> /api/session re-read -> echo-account-changed -> refetch -> 401 ...
+ const anonymous={workspaceConfigured:true,authenticated:false,ownerAccess:false,csrf:null,user:null},owner={workspaceConfigured:true,authenticated:true,ownerAccess:true,csrf:'csrf-owner',user:{uid:'owner',role:'owner',status:'approved'}};
+ let current:any=anonymous;
+ const fetch=vi.fn(async(url:string)=>{if(url!=='/api/session')throw new Error('unexpected '+url);return new Response(JSON.stringify(current),{status:200,headers:{'content-type':'application/json'}});});
+ const h=harness(['workspace-client.js','workspace.js'],{window:{fetch}}),dispatched=vi.fn();h.window.addEventListener('echo-account-changed',dispatched);
+ const ws=h.window.EchoPrimeWorkspace;await ws.ready;
+ expect(fetch).toHaveBeenCalledTimes(1);expect(ws.session).toMatchObject({authenticated:false});expect(ws.enabled).toBe(true);
+ expect(dispatched).not.toHaveBeenCalled();// the first readback is an observation, not a change; every module bootstraps from the session itself
+ expect(h.get('#draft-notice').hidden).toBe(false);expect(h.get('#draft-notice').textContent).toContain('Sign in');
+ for(let i=0;i<5;i++){ws.invalidate();await expect(ws.ownerHeaders()).rejects.toThrow('Primary owner admission required.');}
+ expect(fetch).toHaveBeenCalledTimes(6);expect(dispatched).not.toHaveBeenCalled();
+ expect(h.get('#draft-notice').hidden).toBe(false);// an unchanged anonymous identity must not wipe the visitor's page either
+ current=owner;await ws.ownerHeaders();expect(dispatched).toHaveBeenCalledTimes(1);// anonymous -> owner
+ await ws.ownerHeaders();await ws.ownerHeaders();expect(dispatched).toHaveBeenCalledTimes(1);// owner -> owner
+ ws.invalidate();expect(dispatched).toHaveBeenCalledTimes(2);expect(ws.session).toBeNull();// owner -> signed out is a real change
+ ws.invalidate();expect(dispatched).toHaveBeenCalledTimes(2);
+ expect(h.get('.profile > span:nth-child(2)').textContent).toBe('Sign in');
 });
 it('hides owner entry points on the initial anonymous configured session',async()=>{
  class Transport {session=null;loadSession=async()=>({workspaceConfigured:true,authenticated:false,ownerAccess:false,user:null});}

@@ -36,13 +36,27 @@
   $('#chat-log').replaceChildren();$('#chat-log').hidden=true;$('#welcome').hidden=false;$('#prompt').value='';$('#conversation-title').textContent='New conversation';$('#draft-notice').hidden=true;setBusy(false);updateContext();
   clearESH();
  }
+ // One key per identity this page can render. A cleared session (null) and an anonymous readback are the same
+ // identity: both are "signed out".
+ const identityKey=session=>`${session?.authenticated===true}|${session?.user?.uid??''}|${session?.user?.status??''}|${session?.ownerAccess===true}`;
+ let identity=null;// key of the identity this page renders; null until the first /api/session readback
  function identityChanged(session){
+  // The transport calls this on every readback that differs from its cache and on every clear(); `ready` calls it once
+  // after the first readback. Only a real change clears the page and tells the other modules (`echo-account-changed`).
+  // Before 2026-11-04 every call did both, so an owner-only 401 for a visitor who was already signed out cleared the
+  // page and made models/swarm/fleet refetch, which produced another 401: 545 /api/session reads in one minute.
+  const key=identityKey(session),first=identity===null,changed=!first&&key!==identity;
+  identity=key;
+  if(!first&&!changed){log('identity','unchanged');return;}
+  log('identity',first?'observed':'changed');
   state.accountEpoch++;
   state.controller.abort();state.controller=new AbortController();clearFields();content.replaceChildren();status('');state.data=null;clearConversation();
   voiceOptions.spoken=false;voiceOptions.brief=false;voiceOptions.autoSend=false;
   $('#workspace-chat-search').value='';$('#workspace-project').replaceChildren(element('option',{value:''},'No project'));
   window.EchoPrimeChat?.reset();$('#history').replaceChildren();
-  window.dispatchEvent(new Event('echo-account-changed'));
+  // The first readback is an observation, not a change: models.js, swarm.js and fleet.js bootstrap from the session
+  // themselves (after `ready`), and every other listener only clears state that is still empty at that point.
+  if(changed)window.dispatchEvent(new Event('echo-account-changed'));
   if(session&&typeof session.workspaceConfigured==='boolean')state.enabled=session.workspaceConfigured;
   const owner=!!session?.ownerAccess;
   all('[data-owner-only]').forEach(node=>{node.hidden=state.enabled&&!owner;});
@@ -447,5 +461,7 @@
   async startConversation(){if(voiceOptions.conversation||state.capture||state.micPending)throw new Error('Stop the active microphone or voice conversation first.');voiceOptions.conversation=true;voiceOptions.remaining=10;voiceOptions.limitReached=false;try{await dictate();}catch(error){endConversation();stopAudio();throw error;}},
   async stopVoice(){endConversation();try{await haltSpeech();}finally{status('Voice stopped. Microphone off. No pending response will restart it.');}},
   async interrupt(){try{await haltSpeech();}catch{}await dictate();}});
- window.EchoPrimeWorkspace={ready,bridge,get enabled(){return state.enabled;},get generalMode(){return state.enabled&&$('#workspace-chat-kind').value==='workspace';},send,newChat,open,ownerHeaders,invalidate(){transport.clear();},cancel(){state.turn?.abort();}};
+ // `session` is the cached /api/session readback (null once cleared). Modules gate owner-only requests on it without
+ // another request; `ownerHeaders()` is the path that re-reads the session.
+ window.EchoPrimeWorkspace={ready,bridge,get enabled(){return state.enabled;},get session(){return transport.session;},get generalMode(){return state.enabled&&$('#workspace-chat-kind').value==='workspace';},send,newChat,open,ownerHeaders,invalidate(){transport.clear();},cancel(){state.turn?.abort();}};
 })();

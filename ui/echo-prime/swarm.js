@@ -7,8 +7,8 @@
  const $=s=>document.querySelector(s);
  const models=window.EchoPrimeModels,chat=window.EchoPrimeChat;
  if(!models||!chat||typeof models.setSwarm!=='function')return;
- const POLL_MS=3000,TICK_MS=1000,GRACE_S=120,MAX_FAILURES=5,MAX_CHARS=12000;
- let health=null,run=null,generation=0;
+ const POLL_MS=3000,TICK_MS=1000,GRACE_S=120,MAX_FAILURES=5,MAX_CHARS=12000,COOLDOWN_MS=5000;
+ let verdict={available:false,reason:'swarm status not loaded'},run=null,generation=0,healthGeneration=0,failedAt=-Infinity;
  const original={send:chat.send,cancel:chat.cancel,reset:chat.reset};
  const num=v=>typeof v==='number'&&Number.isFinite(v)?v:null;
  const pct=v=>num(v)===null?'unknown':Math.round(Math.min(1,Math.max(0,v))*100)+'%';
@@ -26,26 +26,53 @@
  async function headers(){
   try{return window.EchoPrimeWorkspace&&window.EchoPrimeWorkspace.ownerHeaders?await window.EchoPrimeWorkspace.ownerHeaders():{};}catch{return {};}
  }
+ function workspace(){const ws=window.EchoPrimeWorkspace;return ws&&typeof ws==='object'?ws:null;}
+ /** What the Workspace's cached session admits, read without a request: 'open' (this host has no authenticated
+  *  Workspace, so the Prime cookie alone decides), 'signin', 'member' or 'owner'. Every /api/prime/swarm route is owner-only. */
+ function admission(){
+  const ws=workspace();if(!ws||ws.enabled!==true)return 'open';
+  const session=ws.session;if(!session||session.authenticated!==true)return 'signin';
+  return session.ownerAccess===true?'owner':'member';
+ }
+ function debug(outcome,detail){console.debug('[echo.swarm]',{event:'swarm_health',outcome,...(detail||{})});}
+ function report(available,reason){verdict={available,reason};models.setSwarm(verdict);return verdict;}
  async function api(path,body,signal){
-  const response=await fetch('/api/prime/swarm/'+path,{method:body?'POST':'GET',credentials:'same-origin',
-   headers:{'x-prime-request':'1',...await headers(),...(body?{'content-type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{}),signal});
+  const sent={'x-prime-request':'1',...await headers(),...(body?{'content-type':'application/json'}:{})},owner=admission()==='owner';
+  const response=await fetch('/api/prime/swarm/'+path,{method:body?'POST':'GET',credentials:'same-origin',headers:sent,...(body?{body:JSON.stringify(body)}:{}),signal});
   let data=null;try{data=await response.json();}catch{}
   if(!response.ok){
-   if((response.status===401||response.status===403)&&window.EchoPrimeWorkspace&&window.EchoPrimeWorkspace.invalidate)window.EchoPrimeWorkspace.invalidate();
+   // Only a session that claimed owner admission has anything to invalidate (a real expiry or demotion). A signed-out
+   // visitor or a member is refused by design; clearing the page for them is what restarted the 401 loop.
+   const ws=workspace();
+   if((response.status===401||response.status===403)&&owner&&ws&&typeof ws.invalidate==='function'){ws.invalidate();debug('invalidated',{status:response.status,path});}
    const error=new Error(data&&typeof data.error==='string'?data.error:'Swarm request failed (HTTP '+response.status+')');error.status=response.status;throw error;
   }
   if(!data||typeof data!=='object')throw new Error('Swarm returned an unrecognized response');
   return data;
  }
+ /** Reads the worker's health once the Workspace knows who is signed in. Skips the owner-only request for anyone who is
+  *  not the owner, never retries a refusal, and after any failure waits COOLDOWN_MS before asking again, whatever events
+  *  fire. Resolves to the {available, reason} the picker shows. */
  async function refreshHealth(){
+  const mine=++healthGeneration,ws=workspace();
+  if(ws)await Promise.resolve(ws.ready).catch(()=>{});
+  if(mine!==healthGeneration)return verdict;
+  const access=admission();
+  if(access==='signin'){debug('skipped',{reason:'signin'});return report(false,'Sign in to use the Swarm.');}
+  if(access==='member'){debug('skipped',{reason:'owner_only'});return report(false,'The Swarm is available to the primary owner only.');}
+  if(Date.now()-failedAt<COOLDOWN_MS){debug('cooldown',{remaining_ms:COOLDOWN_MS-(Date.now()-failedAt)});return verdict;}
   try{
    const data=await api('health');
-   health=data;
-   models.setSwarm({available:data.available===true,reason:data.available===true?'':typeof data.reason==='string'?data.reason:'unavailable'});
+   if(mine!==healthGeneration)return verdict;
+   debug('returned',{available:data.available===true});
+   return report(data.available===true,data.available===true?'':typeof data.reason==='string'?data.reason:'unavailable');
   }catch(error){
-   health=null;models.setSwarm({available:false,reason:'Swarm status unavailable ('+(error instanceof Error?error.message:'request failed')+')'});
+   if(mine!==healthGeneration)return verdict;
+   failedAt=Date.now();
+   const message=error instanceof Error?error.message:'request failed';
+   debug('failed',{status:error&&typeof error.status==='number'?error.status:null,message});
+   return report(false,'Swarm status unavailable ('+message+')');
   }
-  return health;
  }
  /** The honest label every result carries. It is read from the result; nothing here assumes the values. */
  function badge(result){

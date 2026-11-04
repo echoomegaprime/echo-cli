@@ -2,9 +2,11 @@
  'use strict';
  // Model picker. The server decides what each provider id means; this file only offers the reviewed ids,
  // remembers the choice in this browser, and states plainly which model answered or why one is unavailable.
- const storageKey='echo-prime-model-v1',variantKey='echo-prime-argon-model-v1',ids=['qwen','claude','gpt','grok','argon','swarm'];
+ const storageKey='echo-prime-model-v1',variantKey='echo-prime-argon-model-v1',ids=['qwen','claude','gpt','grok','argon','swarm'],COOLDOWN_MS=5000;
  const fallbackLabels={qwen:'Qwen (FORGE, 256K)',claude:'Claude (claude CLI)',gpt:'GPT (codex CLI)',grok:'Grok (grok CLI)',argon:'Argon (Gemini 4, agy CLI)',swarm:'Swarm (40-seat brain)'};
- let swarmState=null,chosen=null,chosenVariant=null,report=null,failed=false,generation=0;
+ // `gate` is '' when the status route may be read, else 'signin' or 'member': the honest picker state for someone the
+ // owner-only route would refuse. `failedAt` starts the cool-down after a failed read.
+ let swarmState=null,chosen=null,chosenVariant=null,report=null,failed=false,gate='',generation=0,failedAt=-Infinity;
  try{const stored=localStorage.getItem(storageKey);if(ids.includes(stored))chosen=stored;}catch{}
  try{const stored=localStorage.getItem(variantKey);if(typeof stored==='string'&&/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(stored))chosenVariant=stored;}catch{}
  const wrap=document.createElement('div'),label=document.createElement('label'),select=document.createElement('select'),note=document.createElement('small');
@@ -48,29 +50,52 @@
   variantSelect.replaceChildren(...gemini.map(v=>{const option=document.createElement('option');option.value=v.id;option.textContent=typeof v.label==='string'&&v.label?v.label:v.id;return option;}));
   variantSelect.hidden=!gemini.length;
   if(shown)variantSelect.value=shown;
-  variantSelect.disabled=!!failed||(!!report&&!report.routing);
+  variantSelect.disabled=!!failed||!!gate||(!!report&&!report.routing);
   const row=list.find(e=>e.id===selected);
-  if(failed)note.textContent='Model status unavailable. Nothing will be sent to a model until the status route answers.';
+  if(gate==='signin')note.textContent='Sign in to choose a model. Nothing is sent to a model until you sign in.';
+  else if(gate==='member')note.textContent='Model choice is available to the primary owner only.';
+  else if(failed)note.textContent='Model status unavailable. Nothing will be sent to a model until the status route answers.';
   else if(!report)note.textContent='Checking models…';
   else if(!report.routing)note.textContent='Model choice is not enabled on this host.';
   else if(row&&!row.available)note.textContent=row.label+' is unavailable: '+(row.reason||'no reason given')+'. No other model will be used.';
   else if(selected==='argon'&&row&&!gemini.length){const why=argonRow()&&typeof argonRow().variantsReason==='string'?argonRow().variantsReason:'no Gemini models were listed';note.textContent=row.label+' selected. '+why+'; the agy default model is used. If it fails, the turn fails; no other model is used.';}
   else if(selected==='swarm')note.textContent=row.label+' selected. Runs can take many minutes and spend the shown budget; the worker has no cancel. If it fails the turn fails; no other model is used.';
   else note.textContent=row?row.label+' selected. If it fails, the turn fails; no other model is used.':'';
-  select.disabled=!!failed||(!!report&&!report.routing);
+  select.disabled=!!failed||!!gate||(!!report&&!report.routing);
  }
  async function headers(){
   try{return window.EchoPrimeWorkspace&&window.EchoPrimeWorkspace.ownerHeaders?await window.EchoPrimeWorkspace.ownerHeaders():{};}catch{return {};}
  }
+ function workspace(){const ws=window.EchoPrimeWorkspace;return ws&&typeof ws==='object'?ws:null;}
+ /** What the Workspace's cached session admits, read without a request: 'open' (this host has no authenticated
+  *  Workspace, so the Prime cookie alone decides), 'signin', 'member' or 'owner'. /api/prime/models is owner-only. */
+ function admission(){
+  const ws=workspace();if(!ws||ws.enabled!==true)return 'open';
+  const session=ws.session;if(!session||session.authenticated!==true)return 'signin';
+  return session.ownerAccess===true?'owner':'member';
+ }
+ function debug(outcome,detail){console.debug('[echo.models]',{event:'model_status',outcome,...(detail||{})});}
+ /** Reads the status route once the Workspace knows who is signed in. Anyone the owner-only route would refuse gets the
+  *  honest picker state without a request; a refusal is never retried; after any failure the next read waits COOLDOWN_MS,
+  *  whatever events fire. */
  async function refresh(){
-  const current=++generation;
+  const current=++generation,ws=workspace();
+  if(ws)await Promise.resolve(ws.ready).catch(()=>{});
+  if(current!==generation)return;
+  const access=admission();
+  if(access==='signin'||access==='member'){report=null;failed=false;gate=access;debug('skipped',{reason:access});render();return;}
+  if(Date.now()-failedAt<COOLDOWN_MS){debug('cooldown',{remaining_ms:COOLDOWN_MS-(Date.now()-failedAt)});return;}
   try{
-   const response=await fetch('/api/prime/models',{credentials:'same-origin',headers:{'x-prime-request':'1',...await headers()}});
+   const sent={'x-prime-request':'1',...await headers()},owner=admission()==='owner';
+   const response=await fetch('/api/prime/models',{credentials:'same-origin',headers:sent});
    const data=await response.json();
    if(current!==generation)return;
+   // Only a session that claimed owner admission has anything to invalidate (a real expiry or demotion). A signed-out
+   // visitor or a member is refused by design; clearing the page for them is what restarted the 401 loop.
+   if((response.status===401||response.status===403)&&owner&&ws&&typeof ws.invalidate==='function'){ws.invalidate();debug('invalidated',{status:response.status});}
    if(!response.ok||!data||typeof data!=='object'||!Array.isArray(data.providers))throw new Error('status');
-   report=data;failed=false;
-  }catch{if(current!==generation)return;report=null;failed=true;}
+   report=data;failed=false;gate='';debug('returned',{routing:data.routing===true,providers:data.providers.length});
+  }catch{if(current!==generation)return;failedAt=Date.now();report=null;failed=true;gate='';debug('failed');}
   render();
  }
  select.addEventListener('change',()=>{
@@ -93,7 +118,7 @@
   /** swarm.js reports the worker state here ({available,reason}); the picker never assumes the swarm is up. */
   setSwarm(state){swarmState=state&&typeof state==='object'?{available:state.available===true,reason:typeof state.reason==='string'?state.reason:''}:null;render();},
   /** True when the next message must go through the swarm instead of the chat route. */
-  swarm(){return report&&report.routing===true&&!failed&&current()==='swarm';},
+  swarm(){return !!(report&&report.routing===true&&!failed&&current()==='swarm');},
   /** The provider id to send with a chat turn, or undefined when the host does not route by provider. */
   provider(){return report&&report.routing===true&&!failed?current():undefined;},
   /** The Gemini model id to send with an Argon turn (validated by the server against agy's list), else undefined. */
