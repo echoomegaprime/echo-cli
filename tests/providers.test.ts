@@ -52,7 +52,7 @@ describe('CLI provider models', () => {
     expect(calls[0].args).not.toContain('--always-approve');
   });
   it('runs in an empty directory with a minimal environment and no secrets', async () => {
-    process.env.OPENAI_API_KEY = 'sk-should-not-leak-0000000000'; process.env.ANTHROPIC_API_KEY = 'sk-ant-should-not-leak-00000'; process.env.XAI_API_KEY = 'xai-nope';
+    process.env.OPENAI_API_KEY = 'fixture-should-not-leak-openai'; process.env.ANTHROPIC_API_KEY = 'fixture-should-not-leak-anthropic'; process.env.XAI_API_KEY = 'xai-nope';
     try {
       const { calls, runner } = recorder(ok(claudeJson(action)));
       await new CliModel('claude', { runner }).next(messages);
@@ -89,9 +89,12 @@ describe('CLI provider models', () => {
     await expect(new CliModel('claude', { runner }).next(messages)).rejects.toBeInstanceOf(ProviderUnavailableError);
   });
   it('redacts secrets that come back in model output', async () => {
-    const { runner } = recorder(ok(claudeJson(JSON.stringify({ action: 'final', content: 'key sk-abcdefghijklmnopqrstuvwx' }))));
+    // A deterministic synthetic value exercises the actual provider-key pattern
+    // without putting a credential-shaped literal into the source inventory.
+    const fixtureKey = 'sk-' + 'x'.repeat(32);
+    const { runner } = recorder(ok(claudeJson(JSON.stringify({ action: 'final', content: 'key ' + fixtureKey }))));
     const result = await new CliModel('claude', { runner }).next(messages);
-    expect(JSON.stringify(result)).not.toContain('sk-abcdefghijklmnopqrstuvwx');
+    expect(JSON.stringify(result)).not.toContain(fixtureKey);
   });
   it('refuses overlong or malformed model names', () => {
     for (const bad of ['', 'x'.repeat(200), 'a b', '--flag', 'a\nb']) expect(() => new CliModel('claude', { model: bad, runner: recorder(ok('')).runner })).toThrow();

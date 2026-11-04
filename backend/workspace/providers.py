@@ -128,9 +128,10 @@ def child_environment(source=None):
 def grok_isolation_snapshot(directory=None, environment=None):
     """Bounded Grok config metadata; never open OAuth, memory, or session files.
 
-    Native hooks have no invocation-scoped disable switch. Their presence,
-    registered source paths, dynamic config patches, or uncovered discovery
-    therefore block this provider. Configured plugin IDs and native MCP names
+    Native hooks have no invocation-scoped disable switch. Only well-formed
+    PreToolUse command hooks can use separately reviewed native branch evidence;
+    other hooks, source paths, dynamic patches and uncovered discovery block.
+    Configured plugin IDs and native MCP names
     are disabled in the request's own project config; other plugins default off.
     Only hashes, names and safety counts leave this function. Credential values
     are never selected, emitted, or copied into invocation configuration.
@@ -157,7 +158,8 @@ def grok_isolation_snapshot(directory=None, environment=None):
     if os.name != 'nt':
         configs.update(Path('/etc/grok') / name for name in ('managed_config.toml', 'requirements.toml'))
     files, servers, plugins, inventory = [], set(), set(), []
-    hooks, total = 0, 0
+    hooks, total, pretool_configs = 0, 0, 0
+    hook_events = set()
 
     def regular_bytes(path):
         nonlocal total
@@ -190,7 +192,43 @@ def grok_isolation_snapshot(directory=None, environment=None):
             if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
                 raise WorkspaceError('Grok isolation plugin inventory is malformed.')
             plugins.update(names)
-        hooks += int(bool(value.get('hooks')))
+        hook_map = value.get('hooks', {})
+        if hook_map:
+            hooks += 1
+            valid_pretool = isinstance(hook_map, dict) and set(hook_map) == {'PreToolUse'}
+            if isinstance(hook_map, dict):
+                hook_events.update(str(event) for event in hook_map)
+            else:
+                hook_events.add('unsupported')
+            groups = hook_map.get('PreToolUse') if isinstance(hook_map, dict) else None
+            valid_pretool = valid_pretool and isinstance(groups, list) and 1 <= len(groups) <= 512
+            if valid_pretool:
+                for group in groups:
+                    if (not isinstance(group, dict) or set(group) - {'matcher', 'hooks'}
+                            or 'matcher' in group and not isinstance(group['matcher'], str)):
+                        valid_pretool = False
+                        break
+                    try:
+                        re.compile(group.get('matcher', ''))
+                    except re.error:
+                        valid_pretool = False
+                        break
+                    handlers = group.get('hooks')
+                    if not isinstance(handlers, list) or not 1 <= len(handlers) <= 512:
+                        valid_pretool = False
+                        break
+                    for handler in handlers:
+                        if (not isinstance(handler, dict) or set(handler) - {'type', 'command', 'timeout'}
+                                or handler.get('type') != 'command' or not isinstance(handler.get('command'), str)
+                                or not 1 <= len(handler['command']) <= 8192
+                                or any(char in handler['command'] for char in '\0\r\n')
+                                or 'timeout' in handler and (type(handler['timeout']) not in (int, float)
+                                                           or not 0 < handler['timeout'] <= 300)):
+                            valid_pretool = False
+                            break
+                    if not valid_pretool:
+                        break
+            pretool_configs += int(valid_pretool)
         paths = value.get('paths', {})
         memory = value.get('memory', {})
         memory_v2 = value.get('memory_v2', {})
@@ -259,7 +297,9 @@ def grok_isolation_snapshot(directory=None, environment=None):
         raise WorkspaceError('Grok isolation plugin inventory is unsupported.')
     snapshot = {'schema_version': 1, 'grok_home': str(home.resolve()), 'config_files': files,
                 'mcp_servers': sorted(servers), 'plugins': sorted(plugins), 'inventory': inventory,
-                'native_hook_count': hooks, 'unsupported_source_count': unsupported}
+                'native_hook_count': hooks, 'native_hook_events': sorted(hook_events),
+                'native_pretool_only': hooks > 0 and hooks == pretool_configs,
+                'unsupported_source_count': unsupported}
     snapshot['sha256'] = hashlib.sha256(json.dumps(snapshot, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     return snapshot
 
@@ -278,10 +318,128 @@ def _grok_review(config, directory=None):
         current = grok_isolation_snapshot(directory)
     except (OSError, WorkspaceError):
         raise ProviderUnavailableError('grok', 'current configuration isolation could not be verified') from None
-    if (current['sha256'] != reviewed['sha256'] or current.get('native_hook_count') != 0
-            or current.get('unsupported_source_count') != 0):
+    if current['sha256'] != reviewed['sha256'] or current.get('unsupported_source_count') != 0:
         raise ProviderUnavailableError('grok', 'configuration isolation drifted or native hooks or discovery are uncovered')
+    if current.get('native_hook_count') != 0:
+        try:
+            _grok_pretool_receipt(config, current)
+        except (OSError, ValueError, TypeError, KeyError, WorkspaceError):
+            raise ProviderUnavailableError('grok', 'native PreToolUse isolation evidence is missing, changed or unsupported') from None
     return current
+
+
+_grok_recipe = {'tools': 'read_file', 'disallowed_tools': 'read_file,search_tool,use_tool',
+                'no_subagents': True, 'no_plan': True, 'disable_web_search': True, 'deny': 'MCPTool',
+                'permission_mode': 'dontAsk',
+                'agent_profile': 'injectDefaultTools:false; tools:[read_file]; disallowedTools:[search_tool,use_tool]; mcpInheritance:none',
+                'native_hooks': 'PreToolUse fixture remains configured in both cases'}
+
+
+def _grok_pretool_receipt(config, snapshot):
+    """Derive native reachability from reviewed bound traces, never a passed flag.
+
+    No hook is disabled and no real hook command is copied or executed. The
+    exception applies only to the measured binary and the fixed tool recipe.
+    """
+    if (snapshot.get('native_pretool_only') is not True or snapshot.get('native_hook_events') != ['PreToolUse']
+            or not isinstance(snapshot.get('inventory'), list)
+            or any(not isinstance(row, dict) or row.get('kind') == 'native_hook' for row in snapshot['inventory'])):
+        raise ValueError('Only classified native PreToolUse commands can use branch evidence.')
+    admission = config.get('native_pretool_isolation')
+    if not isinstance(admission, dict) or set(admission) != {'receipt_path', 'receipt_sha256'}:
+        raise ValueError('Reviewed native branch evidence is required.')
+    proof_path = Path(admission['receipt_path'])
+    if not proof_path.is_absolute():
+        raise ValueError('Native branch evidence must use an absolute reviewed path.')
+
+    def regular(path):
+        if (not path.is_file() or any(part.is_symlink() or bool(getattr(part, 'is_junction', lambda: False)())
+                                      for part in (path, *path.parents))):
+            raise ValueError('Evidence and native executable paths must be regular.')
+
+    def read(path, limit=2_000_000):
+        regular(path)
+        with path.open('rb') as stream:
+            data = stream.read(limit + 1)
+        if len(data) > limit:
+            raise ValueError('Native branch evidence exceeds its bound.')
+        return data
+
+    data = read(proof_path)
+    if (not isinstance(admission['receipt_sha256'], str)
+            or hashlib.sha256(data).hexdigest() != admission['receipt_sha256']):
+        raise ValueError('Reviewed native branch evidence changed.')
+    evidence = json.loads(data)
+    if (not isinstance(evidence, dict) or evidence.get('schema_version') != 1
+            or evidence.get('kind') != 'native_pretool_branch_reachability'
+            or evidence.get('isolation_recipe') != _grok_recipe
+            or evidence.get('synthetic_only') is not True or evidence.get('oauth_read_or_copied') is not False
+            or evidence.get('provider_subscription_acceptance') is not False or evidence.get('release_acceptance') is not False):
+        raise ValueError('Native branch evidence has an unsupported contract.')
+    binary = shutil.which(config.get('command', _commands['grok']))
+    if not binary or Path(binary).suffix.lower() != '.exe':
+        raise ValueError('The observed native binary is unavailable.')
+    binary = Path(binary)
+    regular(binary)
+    if binary.stat().st_size > 512_000_000:
+        raise ValueError('The native binary exceeds its measurement bound.')
+    binary_hash = hashlib.sha256()
+    with binary.open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            binary_hash.update(chunk)
+    if binary_hash.hexdigest() != evidence.get('installed_grok_sha256'):
+        raise ValueError('The native binary changed after the branch observation.')
+    required = {'receipt.json', 'positive/stderr.txt', 'positive/stdout.ndjson', 'positive/.grok/config.toml',
+                'positive/work/answer-model.md', 'isolated/stderr.txt', 'isolated/stdout.ndjson',
+                'isolated/.grok/config.toml', 'isolated/work/answer-model.md'}
+    rows = evidence.get('files')
+    if not isinstance(rows, list) or len(rows) != len(required):
+        raise ValueError('Native branch evidence inventory is incomplete.')
+    bound = {}
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get('path'), str):
+            raise ValueError('Native branch evidence inventory is malformed.')
+        name = row['path'].replace('\\', '/')
+        if name not in required or name in bound:
+            raise ValueError('Native branch evidence inventory contains an unexpected path.')
+        content = read(proof_path.parent.joinpath(*name.split('/')))
+        if hashlib.sha256(content).hexdigest() != row.get('sha256'):
+            raise ValueError('Bound native branch evidence changed.')
+        bound[name] = content
+    original = json.loads(bound['receipt.json'])
+    if (not isinstance(original, dict) or original.get('installed_grok_sha256') != evidence['installed_grok_sha256']
+            or original.get('harness_sha256') != evidence.get('harness_sha256')
+            or hashlib.sha256(read(proof_path.parent / 'harness.py')).hexdigest() != evidence.get('harness_sha256')
+            or original.get('synthetic_only') is not True or original.get('oauth_read_or_copied') is not False
+            or original.get('provider_subscription_acceptance') is not False or original.get('release_acceptance') is not False):
+        raise ValueError('The observed native harness and receipt are not bound.')
+    results = original.get('results')
+    if (not isinstance(results, list) or len(results) != 2 or any(not isinstance(row, dict) for row in results)
+            or {row.get('case') for row in results} != {'positive', 'isolated'}):
+        raise ValueError('Both native branch cases must have completed.')
+    if any(type(row.get('returncode')) is not int or row['returncode'] != 0 or row.get('abort') is not None
+           or type(row.get('local_model_requests')) is not int or row['local_model_requests'] < 1 for row in results):
+        raise ValueError('Both native branch cases must have completed within their bounds.')
+    negative = next(row for row in results if row['case'] == 'isolated')
+    if (negative.get('empty_advertised_catalog') is not True or negative.get('tool_not_found_observed') is not True
+            or negative.get('hook_marker') is not False):
+        raise ValueError('The negative native branch was not isolated.')
+    positive_error = bound['positive/stderr.txt'].decode('utf-8', errors='strict')
+    negative_error = bound['isolated/stderr.txt'].decode('utf-8', errors='strict')
+    native_dispatch = r'(?m)^\d{4}-\d{2}-\d{2}T[^\r\n]+ WARN gate hook failed; ignoring \(fail-open\) hook_name=user:pre_tool_use\[0\]\.hooks\[0\] elapsed_ms=\d+ hook_failure='
+    native_rejected = r'(?m)^\d{4}-\d{2}-\d{2}T[^\r\n]+ERROR tool_error: parse_failure[^\r\n]+error_message=Tool not found: read_file'
+    if (not re.search(native_dispatch, positive_error) or re.search(r'(?m)^\d{4}-\d{2}-\d{2}T[^\r\n]+(?:gate hook|hook_name=)', negative_error)
+            or not re.search(native_rejected, negative_error)):
+        raise ValueError('Native traces do not prove rejection before the PreToolUse branch.')
+    for case in ('positive', 'isolated'):
+        lines = bound[case + '/stdout.ndjson'].decode('utf-8', errors='strict').splitlines()
+        parsed = [json.loads(line) for line in lines if line.strip()]
+        if any(not isinstance(row, dict) for row in parsed):
+            raise ValueError('The native trace contains an unsupported event shape.')
+        catalogs = [row.get('tools') for row in parsed if row.get('type') == 'available_commands']
+        expected = ['read_file'] if case == 'positive' else []
+        if not catalogs or any(value != expected for value in catalogs):
+            raise ValueError('The observed native tool catalog does not match the reviewed recipe.')
 
 
 def _stop(process):

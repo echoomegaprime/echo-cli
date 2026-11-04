@@ -1,6 +1,9 @@
 """Real HTTP regressions for isolated extraction of the Workspace session cookie."""
 import http.client
+import json
+import time
 import unittest
+from unittest.mock import patch
 
 import test_auth_http as http_fixture
 
@@ -76,6 +79,56 @@ class CookieIsolationTests(unittest.TestCase):
         self.assertEqual(self.request('POST', '/api/chats', {'title': 'denied'}, raw, 'wrong')[0], 403)
         self.assertEqual(self.request('POST', '/api/chats', {'title': 'denied'}, raw, csrf, 'https://attacker.invalid')[0], 403)
         self.assertEqual(self.read_with_headers([('Cookie', raw), ('Origin', 'https://attacker.invalid')]), 403)
+
+    def test_early_origin_rejection_consumes_sent_body_without_private_admission(self):
+        handler = self.server.RequestHandlerClass
+        original_setup, original_start = handler.setup, handler.start
+        consumed = []
+        class CountBodyReads:
+            def __init__(self, reader, owner):
+                self.reader, self.owner = reader, owner
+            def __getattr__(self, name):
+                return getattr(self.reader, name)
+            def read(self, size=-1):
+                value = self.reader.read(size)
+                self.owner.body_bytes_read += len(value)
+                return value
+            def read1(self, size=-1):
+                value = self.reader.read1(size)
+                self.owner.body_bytes_read += len(value)
+                return value
+        def setup(h):
+            original_setup(h)
+            h.body_bytes_read = 0
+            h.rfile = CountBodyReads(h.rfile, h)
+        def start(h, status=200, *args, **kwargs):
+            if status == 403:
+                consumed.append(h.body_bytes_read)
+            return original_start(h, status, *args, **kwargs)
+        body = {'title': 'rejected', 'content': 'fixture ' * 1024}
+        expected = len(json.dumps(body).encode())
+        with patch.object(handler, 'setup', setup), patch.object(handler, 'start', start), \
+                patch.object(self.server.accounts, 'authorize', wraps=self.server.accounts.authorize) as authorize:
+            for _ in range(8):
+                self.assertEqual(self.request('POST', '/api/chats', body, origin='https://attacker.invalid')[0], 403)
+        self.assertEqual(consumed, [expected] * 8)
+        authorize.assert_not_called()
+        self.assertEqual(self.owner.store.chats(), [])
+
+    def test_rejected_incomplete_body_has_a_short_drain_deadline(self):
+        connection = http.client.HTTPConnection('127.0.0.1', self.port, timeout=2)
+        started = time.monotonic()
+        try:
+            connection.putrequest('POST', '/api/chats')
+            for name, value in [('Content-Type', 'application/json'), ('Content-Length', '12000'),
+                                ('Origin', 'https://attacker.invalid'), ('X-Echo-CSRF', 'login')]:
+                connection.putheader(name, value)
+            connection.endheaders()
+            response = connection.getresponse(); response.read()
+            self.assertEqual(response.status, 403)
+            self.assertLess(time.monotonic() - started, 1.5)
+        finally:
+            connection.close()
 
 
 if __name__ == '__main__':

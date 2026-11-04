@@ -17,6 +17,101 @@ def completed(value, code=0):
 
 
 class ProviderTests(unittest.TestCase):
+    def test_grok_hook_metadata_classifies_only_well_formed_native_pretool_commands(self):
+        from pathlib import Path
+        from providers import grok_isolation_snapshot
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            home = root / '.grok'
+            home.mkdir()
+            path = home / 'config.toml'
+            env = {'HOME': folder, 'USERPROFILE': folder, 'GROK_HOME': str(home)}
+            valid = '[[hooks.PreToolUse]]\nmatcher=".*"\n[[hooks.PreToolUse.hooks]]\ntype="command"\ncommand="fixture-only"\ntimeout=3\n'
+            path.write_text(valid, encoding='utf-8')
+            snapshot = grok_isolation_snapshot(directory=folder, environment=env)
+            self.assertTrue(snapshot['native_pretool_only'])
+            self.assertEqual(snapshot['native_hook_events'], ['PreToolUse'])
+            for content in [valid.replace('PreToolUse', 'Stop'), valid.replace('type="command"', 'type="http"'),
+                            '[[hooks.PreToolUse]]\nhooks=[]\n', valid + '[hooks.SessionStart]\nunexpected=true\n']:
+                path.write_text(content, encoding='utf-8')
+                self.assertFalse(grok_isolation_snapshot(directory=folder, environment=env)['native_pretool_only'])
+            path.write_text(valid, encoding='utf-8')
+            (home / 'hooks').mkdir()
+            (home / 'hooks' / 'uncovered.json').write_text('{}', encoding='utf-8')
+            self.assertFalse(grok_isolation_snapshot(directory=folder, environment=env)['native_pretool_only'])
+
+    def test_grok_pretool_exception_requires_bound_native_branch_evidence_and_current_binary(self):
+        import hashlib
+        from pathlib import Path
+        from providers import _grok_review
+        h = lambda data: hashlib.sha256(data).hexdigest()
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            binary = root / 'grok.exe'
+            binary.write_bytes(b'synthetic-native-binary')
+            binary.chmod(0o700)
+            proof_root = root / 'proof'
+            proof_root.mkdir()
+            files = {
+                'positive/stderr.txt': '2026-11-04T19:03:31.757555Z  WARN gate hook failed; ignoring (fail-open) hook_name=user:pre_tool_use[0].hooks[0] elapsed_ms=622 hook_failure=exit code 1: At line:1 char:32\n',
+                'isolated/stderr.txt': '2026-11-04T19:03:33.733879Z ERROR tool_error: parse_failure session_id=fixture tool_name="read_file" error_message=Tool not found: read_file\n',
+                'positive/stdout.ndjson': json.dumps({'type': 'available_commands', 'tools': ['read_file']}) + '\n',
+                'isolated/stdout.ndjson': json.dumps({'type': 'available_commands', 'tools': []}) + '\n',
+                'positive/.grok/config.toml': 'synthetic configured PreToolUse fixture',
+                'isolated/.grok/config.toml': 'synthetic configured PreToolUse fixture',
+                'positive/work/answer-model.md': 'synthetic positive profile',
+                'isolated/work/answer-model.md': 'synthetic isolated profile',
+            }
+            original = {'installed_grok_sha256': h(binary.read_bytes()), 'harness_sha256': h(b'fixture-harness'),
+                        'synthetic_only': True, 'oauth_read_or_copied': False,
+                        'provider_subscription_acceptance': False, 'release_acceptance': False,
+                        'results': [{'case': 'positive', 'returncode': 0, 'abort': None, 'local_model_requests': 2},
+                                    {'case': 'isolated', 'returncode': 0, 'abort': None, 'local_model_requests': 2,
+                                     'empty_advertised_catalog': True, 'tool_not_found_observed': True, 'hook_marker': False}]}
+            files['receipt.json'] = json.dumps(original)
+            for name, content in files.items():
+                path = proof_root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding='utf-8')
+            (proof_root / 'harness.py').write_bytes(b'fixture-harness')
+            recipe = {'tools': 'read_file', 'disallowed_tools': 'read_file,search_tool,use_tool',
+                      'no_subagents': True, 'no_plan': True, 'disable_web_search': True, 'deny': 'MCPTool',
+                      'permission_mode': 'dontAsk', 'agent_profile': 'injectDefaultTools:false; tools:[read_file]; disallowedTools:[search_tool,use_tool]; mcpInheritance:none',
+                      'native_hooks': 'PreToolUse fixture remains configured in both cases'}
+            evidence = {'schema_version': 1, 'kind': 'native_pretool_branch_reachability',
+                        'installed_grok_sha256': original['installed_grok_sha256'], 'harness_sha256': original['harness_sha256'],
+                        'isolation_recipe': recipe, 'synthetic_only': True, 'oauth_read_or_copied': False,
+                        'provider_subscription_acceptance': False, 'release_acceptance': False,
+                        'files': [{'path': name, 'sha256': h((proof_root / name).read_bytes())} for name in files]}
+            proof = proof_root / 'branch-proof.json'
+            proof.write_text(json.dumps(evidence), encoding='utf-8')
+            config = {'command': str(binary), 'grok_isolation': {'sha256': 'a' * 64},
+                      'native_pretool_isolation': {'receipt_path': str(proof), 'receipt_sha256': h(proof.read_bytes())}}
+            snapshot = {'sha256': 'a' * 64, 'mcp_servers': [], 'plugins': [], 'unsupported_source_count': 0,
+                        'native_hook_count': 1, 'native_pretool_only': True, 'native_hook_events': ['PreToolUse'], 'inventory': []}
+            with patch('providers.grok_isolation_snapshot', return_value=snapshot):
+                self.assertEqual(_grok_review(config)['sha256'], 'a' * 64)
+                for bad in ({**config, 'native_pretool_isolation': None},
+                            {**config, 'native_pretool_isolation': {**config['native_pretool_isolation'], 'receipt_sha256': '0' * 64}}):
+                    with self.assertRaises(ProviderUnavailableError): _grok_review(bad)
+                binary.write_bytes(b'changed-native-binary')
+                with self.assertRaises(ProviderUnavailableError): _grok_review(config)
+                binary.write_bytes(b'synthetic-native-binary')
+            for changed in ({'native_hook_events': ['Stop']}, {'native_pretool_only': False},
+                            {'inventory': [{'kind': 'native_hook', 'path': 'unreviewed-hook-file'}]}):
+                with patch('providers.grok_isolation_snapshot', return_value={**snapshot, **changed}):
+                    with self.assertRaises(ProviderUnavailableError): _grok_review(config)
+            # Updating an operator's claimed result/hash cannot hide actual
+            # negative native dispatch: derive the decision from bound traces.
+            negative = proof_root / 'isolated' / 'stderr.txt'
+            negative.write_text(negative.read_text() + files['positive/stderr.txt'], encoding='utf-8')
+            for row in evidence['files']:
+                if row['path'] == 'isolated/stderr.txt': row['sha256'] = h(negative.read_bytes())
+            proof.write_text(json.dumps(evidence), encoding='utf-8')
+            config['native_pretool_isolation']['receipt_sha256'] = h(proof.read_bytes())
+            with patch('providers.grok_isolation_snapshot', return_value=snapshot):
+                with self.assertRaises(ProviderUnavailableError): _grok_review(config)
+
     def test_grok_native_catalog_uses_recognized_nonempty_allowlist_then_explicitly_denies_it(self):
         # Installed Grok1.0.62 treats an empty --tools argument as defaults.
         # A clean home must not admit that broad native catalog either.

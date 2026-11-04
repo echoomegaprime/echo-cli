@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -595,6 +596,71 @@ def make_server(app, port):
                     return False
             return True
 
+        def read_body(self, size):
+            """Read a framed body within one absolute server read budget."""
+            previous_timeout = self.connection.gettimeout()
+            deadline = time.monotonic() + self.server.read_timeout
+            parts, remaining = [], size
+            try:
+                while remaining:
+                    budget = deadline - time.monotonic()
+                    if budget <= 0:
+                        raise TimeoutError('Request body timed out.')
+                    self.connection.settimeout(budget)
+                    chunk = self.rfile.read1(min(remaining, 65536))
+                    if not chunk:
+                        raise WorkspaceError('Request body ended before its declared length.')
+                    self._body_consumed = getattr(self, '_body_consumed', 0) + len(chunk)
+                    parts.append(chunk)
+                    remaining -= len(chunk)
+                return b''.join(parts)
+            finally:
+                self.connection.settimeout(previous_timeout)
+
+        def drain_rejected_body(self):
+            """Discard bounded transport bytes without parsing or admitting them.
+
+            Closing a Windows socket with an unread, already-sent POST body can
+            reset the connection and discard the actual rejection response.
+            Slow or malformed senders never extend this short drain budget.
+            """
+            if self.command != 'POST' or getattr(self, '_rejection_drained', False):
+                return
+            self._rejection_drained = True
+            self.close_connection = True
+            lengths = self.headers.get_all('Content-Length', [])
+            try:
+                framed = len(lengths) == 1 and not self.headers.get('Transfer-Encoding')
+                size = int(lengths[0]) if framed else -1
+            except (TypeError, ValueError):
+                size = -1
+            consumed = getattr(self, '_body_consumed', 0)
+            remaining = max(0, size - consumed) if 0 <= size <= 2_000_000 else 65536
+            if not remaining:
+                return
+            previous_timeout = self.connection.gettimeout()
+            started = time.monotonic()
+            deadline = started + min(.25, self.server.read_timeout)
+            try:
+                while remaining:
+                    budget = deadline - time.monotonic()
+                    if budget <= 0:
+                        break
+                    self.connection.settimeout(budget)
+                    chunk = self.rfile.read1(min(remaining, 65536))
+                    if not chunk:
+                        break
+                    consumed += len(chunk)
+                    self._body_consumed = consumed
+                    remaining -= len(chunk)
+            except (OSError, ValueError):
+                pass  # Return the original rejection; never retry an input.
+            finally:
+                self.connection.settimeout(previous_timeout)
+                logging.getLogger('echo.workspace.http').debug('http_rejection_body_drain', extra={
+                    'schema_version': 1, 'framing_valid': framed and size >= 0,
+                    'body_complete': remaining == 0, 'duration_ms': round((time.monotonic() - started) * 1000)})
+
         def start(self, status=200, content_type='application/json; charset=utf-8', length=None):
             self.send_response(status)
             self.send_header('Content-Type', content_type)
@@ -611,6 +677,8 @@ def make_server(app, port):
             self.end_headers()
 
         def respond(self, value, code=200):
+            if code >= 400:
+                self.drain_rejected_body()
             data = json.dumps(value, ensure_ascii=False).encode()
             self.start(code, length=len(data))
             self.wfile.write(data)
@@ -767,10 +835,12 @@ def make_server(app, port):
                 return
             streaming = False
             try:
+                if self.headers.get('Transfer-Encoding') or len(self.headers.get_all('Content-Length', [])) != 1:
+                    raise WorkspaceError('Invalid request body framing.')
                 size = int(self.headers.get('Content-Length', '0'))
                 if not 0 < size <= 2_000_000 or not self.headers.get('Content-Type', '').startswith('application/json'):
                     raise WorkspaceError('Send a JSON object under 2 MB.')
-                b = json.loads(self.rfile.read(size))
+                b = json.loads(self.read_body(size))
                 if not isinstance(b, dict):
                     raise WorkspaceError('Expected a JSON object.')
                 path = urlsplit(self.path).path
@@ -867,6 +937,10 @@ def make_server(app, port):
                     self.respond({'error': 'Not found'}, 404)
                     return
                 self.respond(result)
+            except TimeoutError:
+                if self.client_disconnected(): return
+                if streaming: emit_error('The request timed out. Saved messages remain in your journal.')
+                else: self.respond({'error': 'Request body timed out.'}, 408)
             except AuthError as exc:
                 if self.client_disconnected(): return
                 if streaming:

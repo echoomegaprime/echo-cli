@@ -102,6 +102,8 @@ class WorkspaceAccounts:
                 record(self.accounts.audit,operation='tenant_workspace',status='created',tenant=key)
             return self.apps[key]
     def reply(self,h,value,status=200,cookie=None):
+        if status >= 400:
+            h.drain_rejected_body()
         data=json.dumps(value).encode()
         h.send_response(status)
         h.send_header('Content-Type','application/json; charset=utf-8')
@@ -147,7 +149,7 @@ class WorkspaceAccounts:
                 if not session:raise AuthError('Sign in required.',401)
                 if not secrets.compare_digest(supplied,session['csrf']):raise AuthError('Session check failed.',403)
             client_ip=self.client_ip(h)
-            body=json.loads(h.rfile.read(size))
+            body=json.loads(h.read_body(size))
             if not isinstance(body,dict):raise AuthError('Expected an object.',400)
             if path=='/api/auth/login':
                 token,user,csrf=self.accounts.login(body,client_ip)
