@@ -35,11 +35,11 @@ export function registerPrimeCommands(code:Command){
      steward=await connectSteward(owner,config.steward.tools);
     }catch{process.stderr.write(JSON.stringify({schemaVersion:1,event:'steward_owner_unavailable',category:'connection_or_contract'})+'\n');}
    }
-   // The models section is reviewed configuration (default Qwen on a loopback endpoint). The route always reports it;
-   // the code agent is attached only when the section is present, so a bare config never opens the working directory.
-   const router=new ModelRouter(parseModelsConfig(config.models));
+   // The reviewed `models` section (default Qwen on a loopback endpoint) is opt-in: without it no router exists, nothing is probed
+   // and the code agent is not attached, so a bare config never opens the working directory or starts a vendor CLI.
+   const router=config.models!==undefined?new ModelRouter(parseModelsConfig(config.models)):undefined;
    let chat:SharedChat|undefined;
-   if(config.models!==undefined){const store=new SessionStore(opts.codeStateDir);chat=new SharedChat({workspace:new Workspace(opts.codeWorkspace,[store.directory]),store,models:router});}
+   if(router){const store=new SessionStore(opts.codeStateDir);chat=new SharedChat({workspace:new Workspace(opts.codeWorkspace,[store.directory]),store,models:router});}
    const hub=new PrimeHub({capabilities:snapshot.capabilities,esh,steward,models:router,chat,sdk:sdk&&config.sdk?await sdkBroker(sdk,config.sdk.tools,config.sdk.fixedArguments):undefined});
    const server=await startPrimeServer(hub,ui,Number(opts.port),{workspace:config.workspace,publicOrigin:config.publicOrigin});
    process.stdout.write(JSON.stringify({url:server.url,publicOrigin:config.publicOrigin??null,esh:!!esh,sdk:!!sdk,steward:!!steward,scope:'loopback host; public ingress requires configured TLS proxy and release evidence'})+'\n');
