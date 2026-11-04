@@ -22,6 +22,7 @@ ap.add_argument("--data", required=True)
 ap.add_argument("--port", type=int, required=True)
 ap.add_argument("--owner-uid", required=True)
 ap.add_argument("--model-name", default="stand-in-model (no FORGE)")
+ap.add_argument("--model-url", default=None, help="loopback Ollama endpoint; when set the real Workspace Model is used instead of the stand-in")
 args = ap.parse_args()
 password = os.environ.get("ECHO_STANDIN_PASSWORD", "")
 if len(password) < 12:
@@ -65,10 +66,11 @@ class StandInModel:
         return text
 
 
-app.Model = StandInModel
+if args.model_url is None:
+    app.Model = StandInModel
 cfg = {
     "auth": {"enabled": True, "owner_uids": [args.owner_uid], "legacy_data_owner_uid": args.owner_uid},
-    "model_url": "http://127.0.0.1:1",
+    "model_url": args.model_url or "http://127.0.0.1:1",
     "model": args.model_name,
     "context_length": 262144,
 }
