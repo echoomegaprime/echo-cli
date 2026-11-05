@@ -35,6 +35,10 @@
   return session.ownerAccess===true?'owner':'member';
  }
  function debug(outcome,detail){console.debug('[echo.swarm]',{event:'swarm_health',outcome,...(detail||{})});}
+ // Living orb (additive, optional): a watched swarm run puts the orb in deep thought and orbits as one swarm moon.
+ function orbEvent(name,detail){try{if(typeof document.dispatchEvent==='function'&&typeof CustomEvent==='function')document.dispatchEvent(new CustomEvent(name,{detail}));}catch{}}
+ function orb(mode){orbEvent('echo-orb-state',{mode,source:'swarm'});}
+ function orbSatellites(r){orbEvent('echo-orb-satellites',{source:'swarm',satellites:r?[{id:'swarm:'+r.runId,kind:'swarm',name:'Swarm · run '+String(r.runId).slice(0,8),status:'running',busy:true}]:[]});}
  function report(available,reason){verdict={available,reason};models.setSwarm(verdict);return verdict;}
  async function api(path,body,signal){
   const sent={'x-prime-request':'1',...await headers(),...(body?{'content-type':'application/json'}:{})},owner=admission()==='owner';
@@ -123,6 +127,7 @@
  function finish(r,outcome){
   if(run!==r)return;
   run=null;stopTimers(r);busy(false);refreshHealth();r.resolve(outcome);
+  orb(outcome&&outcome.sent?'success':outcome&&outcome.cancelled?'idle':'error');orb('idle');orbSatellites(null);
  }
  async function poll(r){
   r.inflight=true;r.lastPoll=Date.now();
@@ -194,7 +199,7 @@
   if(current!==generation)return {cancelled:true};
   return new Promise(resolve=>{
    const r={runId:accepted.runId,phase:typeof accepted.phase==='string'?accepted.phase:'accepted',budget:accepted.budget,startedAt:Date.now(),lastPoll:0,inflight:false,failures:0,note:'',controller,article,timer:null,resolve};
-   run=r;
+   run=r;orb('deep');orbSatellites(r);
    const stop=el('button','Stop waiting','quiet-button swarm-stop');stop.setAttribute('type','button');stop.addEventListener('click',()=>stopWatching(r,false));
    r.statusLine=el('p',undefined,'swarm-status');r.statusLine.setAttribute('role','status');r.elapsed=el('span','0:00','swarm-elapsed');r.elapsed.setAttribute('aria-hidden','true');
    const pending=el('p',undefined,'swarm-badge');pending.append(el('strong','MAXIMALIST_RECONSTRUCTED · historical_parity: false'),el('span',' — a reconstruction, not the historical original. Confirmed from the result when it arrives.'));

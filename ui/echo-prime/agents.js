@@ -34,6 +34,11 @@
   return session.ownerAccess===true?'owner':'member';
  }
  function debug(event,outcome,detail){console.debug('[echo.agents]',{event,outcome,...(detail||{})});}
+ // Living orb (additive, optional): every agent definition orbits as a moon (running while its run is watched) and a
+ // watched run puts the orb in deep thought. Silent where no event can be dispatched; nothing is fetched for the orb.
+ function orbEvent(name,detail){try{if(typeof document.dispatchEvent==='function'&&typeof CustomEvent==='function')document.dispatchEvent(new CustomEvent(name,{detail}));}catch{}}
+ function orb(mode){orbEvent('echo-orb-state',{mode,source:'agents'});}
+ function publishSatellites(){orbEvent('echo-orb-satellites',{source:'agents',satellites:agents.slice(0,24).map(a=>{const busy=!!run&&run.agent===a.name;return {id:'agent:'+a.name,kind:'agent',name:String(a.name),status:busy?'running':'idle',busy};})});}
  async function api(path,body,signal,method){
   const sent={'x-prime-request':'1',...await headers(),...(body!==undefined?{'content-type':'application/json'}:{})},owner=admission()==='owner';
   const response=await fetch('/api/prime/adk/'+path,{method:method||(body!==undefined?'POST':'GET'),credentials:'same-origin',headers:sent,...(body!==undefined?{body:JSON.stringify(body)}:{}),signal});
@@ -75,6 +80,7 @@
   const wanted=remembered&&agents.some(a=>a.name===remembered.agent)?remembered.agent:agents.length?String(agents[0].name):'';
   select.value=wanted;
   if(remembered&&remembered.prompt&&!prompt.value)prompt.value=remembered.prompt;
+  publishSatellites();
  }
  function renderRuns(rows){
   const items=Array.isArray(rows)?rows.filter(r=>r&&typeof r==='object'&&typeof r.runId==='string'):[];
@@ -222,6 +228,7 @@
  function finish(r){
   if(run!==r)return;
   run=null;stopTimers(r);
+  orb(r.status==='done'?'success':r.status==='failed'?'error':'idle');orb('idle');publishSatellites();
   if(admission()!=='signin'&&admission()!=='member'&&health&&health.available===true)api('runs?limit=20',undefined,undefined).then(v=>{if(!run)renderRuns(v.runs);}).catch(()=>{});
  }
  async function poll(r){
@@ -261,6 +268,7 @@
   if(run!==r)return;
   if(!quiet)failBox(r,'Stopped watching.','Run '+r.runId+' continues on Echo ADK until it finishes or is stopped.');
   run=null;stopTimers(r);
+  orb('idle');publishSatellites();
  }
  async function requestStop(r){
   if(run!==r||r.stopping||r.stopRequested)return;
@@ -280,6 +288,7 @@
   run=r;
   renderRun(r,{status:'queued',agent,budget,steps:[],done:false});
   r.timer=setTimeout(()=>tick(r),0);
+  orb('deep');publishSatellites();
   return r;
  }
  // ---- form ---------------------------------------------------------------------
@@ -321,6 +330,7 @@
   agents=[];health=null;list.replaceChildren();select.replaceChildren();runsList.replaceChildren();runView.replaceChildren();runView.hidden=true;prompt.value='';calls.value='';cost.value='';wall.value='';
   status.textContent='Agents have not been checked.';lock(true);
   if(panel.open)panel.close();
+  publishSatellites();
  }
  opener.addEventListener('click',()=>{if(!panel.open)panel.showModal();return load();});
  $('#close-agents').addEventListener('click',()=>panel.close());
@@ -330,6 +340,12 @@
  document.addEventListener('visibilitychange',()=>{if(run){run.lastPoll=0;if(!document.hidden){if(run.timer)clearTimeout(run.timer);tick(run);}else statusLine(run);}});
  window.addEventListener('echo-account-changed',clearPrivate);
  window.addEventListener('pagehide',()=>{if(run)stopWatching(run,true);});
+ // A click on an agent moon opens this view and selects that agent (additive; the list is loaded by open() as usual).
+ document.addEventListener('echo-orb-open',event=>{
+  const d=event&&event.detail;if(!d||d.kind!=='agent'||typeof d.id!=='string'||!d.id.startsWith('agent:'))return;
+  const name=d.id.slice(6);
+  Promise.resolve(window.EchoPrimeAgents.open()).then(()=>{if(agents.some(a=>a.name===name)){select.value=name;remember();}}).catch(()=>{});
+ });
  runView.hidden=true;lock(true);
  window.EchoPrimeAgents={open(){if(!panel.open)panel.showModal();return load();},refresh:load,active(){return run?run.runId:null;},watch(id){return watch(String(id),'',null);}};
 })();
