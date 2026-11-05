@@ -123,18 +123,19 @@
   if(!state.chat)await newChat();if(!state.chat)return {handled:true,sent:false,detail:'Conversation was not created.'};
   const epoch=state.epoch,chatId=state.chat.id,controller=new AbortController();state.turn=controller;setBusy(true);line('user',text);
   let answer=null,answerText='',completed=false,verified=false,spoken=false;
+  const turn=crypto.randomUUID();// one id per turn: the chat request id, also the key speech.js uses for the streamed reply
   try{
-   const result=await transport.chat({chat_id:chatId,content:text,request_id:crypto.randomUUID(),attachments:[...state.attachments]},event=>{
+   const result=await transport.chat({chat_id:chatId,content:text,request_id:turn,attachments:[...state.attachments]},event=>{
     if(epoch!==state.epoch||controller.signal.aborted)return;
     if(event.type==='tool_started'||event.type==='tool_result')ingestESH(event);
     if(event.type==='status'){$('#draft-notice').textContent=String(event.text||'Echo is answering…').slice(0,600);$('#draft-notice').hidden=false;}
-    else if(event.type==='token'&&typeof event.text==='string'){if(!answer)answer=line('assistant','');answerText+=event.text;if(answerText.length>2_000_000)throw new Error('Answer exceeds display limit.');answer.textContent=answerText;announce('echo-reply-stream',{chatId,text:event.text});}
+    else if(event.type==='token'&&typeof event.text==='string'){if(!answer)answer=line('assistant','');answerText+=event.text;if(answerText.length>2_000_000)throw new Error('Answer exceeds display limit.');answer.textContent=answerText;announce('echo-reply-stream',{chatId,turn,text:event.text});}
     else if(event.type==='tool_started')line('activity','Using '+String(event.tool||'a tool').slice(0,100),'Request '+String(event.request_id||'').slice(0,100));
     else if(event.type==='tool_result')line('activity',String(event.tool||'Tool').slice(0,100)+' returned',String(event.evidence?.status||'Result received; postcondition may require separate verification.').slice(0,300));
    },controller.signal);
    if(epoch!==state.epoch)return {handled:true,cancelled:true};completed=true;state.chat=result;renderChat();
    // The saved reply is known here; speech.js starts Echo's voice now, two round trips before the readback finishes.
-   announce('echo-reply-saved',{chatId,message:[...(result.messages||[])].reverse().find(message=>message?.role==='assistant')||null});
+   announce('echo-reply-saved',{chatId,turn,message:[...(result.messages||[])].reverse().find(message=>message?.role==='assistant')||null});
    const readback=await api('/chats/'+encodeURIComponent(chatId));if(epoch!==state.epoch)return {handled:true,cancelled:true};
    state.chat=readback;renderChat();await refresh();verified=true;log('chat','returned_and_read_back');
    let detail='Reply returned and saved conversation read back.';

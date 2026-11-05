@@ -165,6 +165,7 @@
  // when it was interrupted). cancel() aborts the shared signal and drops every pending item.
  function createQueue({fetchNext,play,onEvent}){
   let cancelled=false,running=false;const controller=new AbortController();
+  const aborted=new Promise(resolve=>{try{controller.signal.addEventListener('abort',()=>resolve({cancelled:true}),{once:true});}catch{}});
   const emit=(event,detail)=>{try{onEvent?.(event,detail);}catch{}};
   return {
    get cancelled(){return cancelled;},get signal(){return controller.signal;},
@@ -180,7 +181,7 @@
       emit('item_finished',{index,played});
       if(played===false)return false;
       if(!ahead)return true;
-      const next=await ahead;if(cancelled)return false;
+      const next=await Promise.race([ahead,aborted]);if(cancelled||next.cancelled)return false;// a cancelled queue settles even while a prefetch is in flight
       if(next.error)throw next.error;
       item=next.value;index++;
      }
@@ -251,7 +252,7 @@
  const shouldAutoSpeak=()=>{const b=bridge();return !!b&&b.voiceOptions.spoken===true&&!prefs.muted&&signedIn();};
 
  // ---------------------------------------------------------------- runtime state
- const S={appliedEpoch:null,turns:0,spoken:new Map(),current:null,device:null,deferred:null,blocked:null,ctx:null,unlocked:false,stream:null,reasonShown:false,hidden:false,levelTimer:null};
+ const S={appliedEpoch:null,turns:0,spoken:new Map(),current:null,device:null,deferred:null,blocked:null,ctx:null,unlocked:false,stream:null,closedStreams:new Map(),reasonShown:false,hidden:false,levelTimer:null};
  let ui=null,conversation=null;
  const liveCurrent=current=>!!current&&S.current===current&&current.epoch===bridge()?.state.accountEpoch;
  function setStatus(text){if(ui)ui.status.textContent=String(text||'').slice(0,400);}
@@ -336,10 +337,13 @@
   }
   const key=message.id,prior=S.spoken.get(key);
   if(prior&&!options.force&&!prior.failed){debug('duplicate_suppressed',{message_id:key});return false;}
-  const requestId=prior&&!prior.failed?prior.requestId:uuid();
+  // Stop first: cancelling a playing session marks its record, and the id is reused only when the earlier
+  // attempt neither failed nor cancelled its session (the autoplay-blocked case).
   stop('replace',{quiet:true});
+  const requestId=prior&&!prior.failed&&!prior.cancelled&&typeof prior.requestId==='string'?prior.requestId:uuid();
   const current={message,chatId,requestId,session:{chat_id:chatId,session_id:null},epoch:b.state.accountEpoch,startedAt:clock(),ttfa:null,chunks:0,voice:voiceLabel(),provider:providerName(voiceInfo()?.provider),lang:detectLanguage(message.content||''),queue:null,key:'msg:'+key};
-  S.current=current;S.spoken.set(key,{requestId,at:Date.now(),failed:false});S.blocked=null;S.deferred=null;
+  S.current=current;S.spoken.set(key,{requestId,at:Date.now(),failed:false,cancelled:false});S.blocked=null;S.deferred=null;
+  while(S.spoken.size>500)S.spoken.delete(S.spoken.keys().next().value);
   b.state.speech=current.session;setStatus('Preparing '+current.voice+'…');sync();
   debug('speech_requested',{source:'echo',message_id:key,request_id:requestId,lang:current.lang,mode:b.voiceOptions.brief?'summary':'full'});
   let complete=false;
@@ -397,17 +401,21 @@
   const source=options.source||'text';
   if(!prefs.device){setStatus("Echo's voice speaks saved Workspace replies only. Turn on \"Device voice (not Echo's)\" to hear this "+(source==='code'?'ECHO Code reply':source==='swarm'?'Swarm result':source==='steward'?'Steward advice':'text')+'.');debug('device_voice_off',{source});return false;}
   if(!deviceAvailable()){setStatus('Device voice is unavailable in this browser.');return false;}
-  // Device engines drop very long utterances; keep each one short of ~240 characters.
-  const normalised=normalizeForSpeech(text),sentences=options.sentences||chunkSentences(normalised,{max:240});
-  if(!sentences.length){setStatus('Nothing to speak after screen-only details are removed.');return false;}
+  let first,fetchNext,count=null;
+  if(options.first&&options.fetchNext){first=options.first;fetchNext=options.fetchNext;}// an open stream feeds sentences as they arrive
+  else{
+   // Device engines drop very long utterances; keep each one short of ~240 characters.
+   const normalised=normalizeForSpeech(text),sentences=options.sentences||chunkSentences(normalised,{max:240});
+   if(!sentences.length){setStatus('Nothing to speak after screen-only details are removed.');return false;}
+   const items=sentences.map((sentence,i)=>({text:sentence,hasMore:i<sentences.length-1,index:i}));first=items[0];fetchNext=item=>items[item.index+1]||null;count=sentences.length;
+  }
   stop('replace',{quiet:true});
-  const lang=options.lang||detectLanguage(text),current={source,lang,startedAt:clock(),ttfa:null,chunks:0,key:options.key||null,queue:null,epoch:bridge()?.state?.accountEpoch};
+  const lang=options.lang||detectLanguage(text||first.text),current={source,lang,startedAt:clock(),ttfa:null,chunks:0,key:options.key||null,queue:null,epoch:bridge()?.state?.accountEpoch};
   S.device=current;setStatus("Device voice (not Echo's) · speaking");sync();
-  debug('speech_requested',{source:'device',origin:source,lang,sentences:sentences.length});
-  const items=sentences.map((sentence,i)=>({text:sentence,hasMore:i<sentences.length-1,index:i}));
-  const queue=createQueue({fetchNext:(item)=>items[item.index+1]||null,play:(item,signal,index)=>utter(item.text,lang,signal,current,index),onEvent:(event,detail)=>debug('queue_'+event,{source:'device',...detail})});
+  debug('speech_requested',{source:'device',origin:source,lang,sentences:count});
+  const queue=createQueue({fetchNext,play:(item,signal,index)=>utter(item.text,lang,signal,current,index),onEvent:(event,detail)=>debug('queue_'+event,{source:'device',...detail})});
   current.queue=queue;
-  try{const complete=await queue.run(items[0]);if(S.device===current){if(complete){setStatus("Device voice (not Echo's) finished.");debug('speech_finished',{source:'device',origin:source,chunks:current.chunks,ttfa_ms:current.ttfa});}}return complete;}
+  try{const complete=await queue.run(first);if(S.device===current){if(complete){setStatus("Device voice (not Echo's) finished.");debug('speech_finished',{source:'device',origin:source,chunks:current.chunks,ttfa_ms:current.ttfa});}}return complete;}
   catch(error){if(S.device===current){setStatus('Device voice failed: '+(error instanceof Error?error.message:'unknown')+'.');debug('speech_failed',{source:'device',origin:source});}return false;}
   finally{if(S.device===current){S.device=null;stopLevelLoop();emitState();sync();}}
  }
@@ -416,40 +424,65 @@
  function stop(reason,options={}){
   const b=bridge(),current=S.current,device=S.device;let stopped=false;
   if(current){S.current=null;stopped=true;try{current.queue?.cancel(reason);}catch{}
-   if(options.cancelBackend!==false&&current.session.session_id&&b)Promise.resolve().then(()=>b.api('/voice/cancel',{chat_id:current.session.chat_id,session_id:current.session.session_id})).catch(()=>{});
+   // The backend caches start() per request id. Once a session is cancelled (or its start was abandoned in
+   // flight) a replay must mint a fresh id, otherwise /voice/next answers "session ended".
+   const record=S.spoken.get(current.message.id);if(record)record.cancelled=true;
+   // Never cancel across an identity boundary: after an account change the old session belongs to another login.
+   if(options.cancelBackend!==false&&current.session.session_id&&b&&current.epoch===b.state.accountEpoch)Promise.resolve().then(()=>b.api('/voice/cancel',{chat_id:current.session.chat_id,session_id:current.session.session_id})).catch(()=>{});
    if(b&&b.state.speech===current.session)b.state.speech=null;}
   if(device){S.device=null;stopped=true;try{device.queue?.cancel(reason);}catch{}try{if(deviceAvailable())speechSynthesis.cancel();}catch{}}
-  if(S.stream&&reason!=='replace')S.stream=null;
+  if(S.stream&&reason!=='replace'){S.stream.cancelled=true;streamClose(S.stream);}
   if(stopped){stopLevelLoop();debug('stopped',{reason,had_echo:!!current,had_device:!!device});if(!options.quiet)setStatus(reason==='hidden'?'Paused while this tab was hidden.':reason==='barge-in'?'Listening · you interrupted Echo.':'Stopped. Microphone '+(conversation?.active?'listening':'off')+'.');}
   emitState();sync();return stopped;
  }
  const speakingKey=()=>S.current?.key||S.device?.key||null;
 
  // ---------------------------------------------------------------- reply hooks
+ // Streamed replies: one open device-voice queue per stream. Sentences are pushed as they complete and the
+ // queue waits for the next one (or the close) instead of restarting, so sentence 1 plays while the rest
+ // streams. Echo's own voice needs the saved reply and starts at `echo-reply-saved`.
+ function streamPush(stream,sentence){const text=normalizeForSpeech(sentence);if(!text)return;const item={text,hasMore:true,index:stream.queue.length};stream.queue.push(item);if(stream.waiter){const wake=stream.waiter;stream.waiter=null;wake(item);}}
+ function streamClose(stream){if(stream.closed)return;stream.closed=true;if(stream.waiter){const wake=stream.waiter;stream.waiter=null;wake(null);}}
+ function streamNext(stream,index){if(stream.queue[index])return Promise.resolve(stream.queue[index]);if(stream.closed||stream.cancelled)return Promise.resolve(null);return new Promise(resolve=>{stream.waiter=resolve;});}
+ async function speakStream(stream){
+  const first=await streamNext(stream,0);if(!first||stream.cancelled)return false;
+  return speakText(null,{source:'stream',key:'stream:'+stream.chatId,lang:detectLanguage(first.text),first,fetchNext:item=>streamNext(stream,item.index+1)});
+ }
  function onReplySaved(detail){
   const b=bridge();if(!b||!detail)return;
-  const message=detail.message,chatId=detail.chatId;
-  if(S.stream&&S.stream.chatId===chatId){const spokenByDevice=S.stream.spokenByDevice;debug('stream_closed',{sentences:S.stream.sentences,first_token_ms:S.stream.firstTokenMs});S.stream=null;if(spokenByDevice){if(message?.id)S.spoken.set(message.id,{requestId:null,at:Date.now(),failed:false,device:true});return;}}
-  if(conversation&&conversation.active&&conversation.pendingText){const text=conversation.pendingText;conversation.pendingText='';setTimeout(()=>void sendTranscript(text),0);}
+  const message=detail.message,chatId=detail.chatId,key=streamKey(detail);let closed=null;
+  if(S.stream&&S.stream.key===key){
+   const stream=S.stream;S.stream=null;
+   if(stream.spokenByDevice&&!stream.cancelled)for(const sentence of stream.chunker.flush())streamPush(stream,sentence);
+   streamClose(stream);debug('stream_closed',{sentences:stream.sentences,spoken_by_device:stream.spokenByDevice,cancelled:stream.cancelled});
+   closed={spokenByDevice:stream.spokenByDevice,cancelled:stream.cancelled};
+  }else if(S.closedStreams.has(key)){closed=S.closedStreams.get(key);S.closedStreams.delete(key);}// its stream was already replaced by a newer turn
+  // A reply the device voice already spoke, or that the user interrupted while it streamed, is not read again; Listen replays it.
+  if(closed&&(closed.spokenByDevice||closed.cancelled)){if(message?.id)S.spoken.set(message.id,{requestId:null,at:Date.now(),failed:false,cancelled:false,device:closed.spokenByDevice,interrupted:closed.cancelled});return;}
   if(b.voiceOptions.conversation===true)return;// the legacy hands-free loop owns this reply
   if(!message||!shouldAutoSpeak())return;
   if(document.hidden){S.deferred={message,chatId};sync();return;}
   void speakMessage(message,chatId);
  }
+ // Streams are keyed per turn (workspace.js passes the turn's request id) so an interrupted reply never poisons the next one.
+ const streamKey=detail=>String(detail.chatId)+(detail.turn?':'+detail.turn:'');
  function onReplyStream(detail){
   const b=bridge();if(!b||!detail||typeof detail.text!=='string')return;
-  if(!S.stream||S.stream.chatId!==detail.chatId){S.stream={chatId:detail.chatId,chunker:createChunker(),sentences:0,startedAt:clock(),firstTokenMs:null,spokenByDevice:false,buffer:[]};}
-  const stream=S.stream;if(stream.firstTokenMs===null){stream.firstTokenMs=0;stream.startedAt=clock();}
-  const sentences=stream.chunker.push(detail.text);
+  const key=streamKey(detail);
+  if(!S.stream||S.stream.key!==key){
+   if(S.stream){const old=S.stream;streamClose(old);S.closedStreams.set(old.key,{spokenByDevice:old.spokenByDevice,cancelled:old.cancelled});while(S.closedStreams.size>50)S.closedStreams.delete(S.closedStreams.keys().next().value);}
+   S.stream={key,chatId:detail.chatId,chunker:createChunker({max:240}),sentences:0,startedAt:clock(),spokenByDevice:false,cancelled:false,closed:false,queue:[],waiter:null};
+  }
+  const stream=S.stream,sentences=stream.chunker.push(detail.text);
   if(!sentences.length)return;
   stream.sentences+=sentences.length;
-  // Sentence 1 can be spoken while the rest streams only through the device voice; Echo's own
-  // voice needs the saved reply, which the backend synthesises from the journal.
-  if(prefs.device&&shouldAutoSpeak()&&!echoVoiceConfigured()&&b.voiceOptions.conversation!==true&&!document.hidden){
-   stream.spokenByDevice=true;
-   for(const sentence of sentences)void speakText(sentence,{source:'stream',lang:detectLanguage(sentence),sentences:[normalizeForSpeech(sentence)].filter(Boolean),key:'stream:'+detail.chatId});
-  }
   debug('sentence_ready',{chat_id:detail.chatId,count:sentences.length,since_first_token_ms:Math.round(clock()-stream.startedAt)});
+  if(stream.cancelled)return;// the user interrupted this reply; do not resume mid-stream
+  // Sentence 1 can be spoken while the rest streams only through the device voice; Echo's own voice
+  // needs the saved reply, which the backend synthesises from the journal.
+  if(!(prefs.device&&shouldAutoSpeak()&&!echoVoiceConfigured()&&b.voiceOptions.conversation!==true&&!document.hidden))return;
+  for(const sentence of sentences)streamPush(stream,sentence);
+  if(!stream.spokenByDevice){stream.spokenByDevice=true;void speakStream(stream);}
  }
  function registerSpeakButton(article,text,source,key){
   if(!article||typeof text!=='string'||!text.trim())return null;
@@ -468,8 +501,8 @@
   if(!detail||typeof detail.text!=='string')return;
   const key='code:'+(detail.sessionId||'')+':'+S.turns+':'+detail.text.length;
   registerSpeakButton(detail.article,detail.text,'code',key);
-  if(!shouldAutoSpeak())return;
-  if(document.hidden)return;
+  if(!shouldAutoSpeak()||document.hidden)return;
+  if(!prefs.device){if(S.reasonShown)return;S.reasonShown=true;}// explain once per identity why Echo's voice cannot speak this
   void speakText(detail.text,{source:'code',key});
  }
  function onResultRendered(detail){
@@ -489,19 +522,38 @@
 
  // ---------------------------------------------------------------- conversation mode (continuous)
  const endOfTurnMs=()=>{const value=Number(voiceInfo()?.end_of_turn_ms);return Number.isFinite(value)&&value>=400&&value<=5000?value:1500;};
- async function sendTranscript(text){
-  const b=bridge(),conv=conversation;if(!b||!conv||!conv.active)return;
-  if(b.state.turn){conv.pendingText=[conv.pendingText,text].filter(Boolean).join(' ');setStatus('Echo is still answering; your words are queued.');return;}
+ // Transcripts wait in an ordered outbox: `echo-reply-saved` fires before send() settles, so a turn can still
+ // be in flight when the next words are ready. The drain retries every 250 ms (bounded) and keeps order.
+ function queueTranscript(text){const conv=conversation;if(!conv||!conv.active||!text)return;conv.outbox.push(text);conv.drainTries=0;void drainOutbox();}
+ async function drainOutbox(){
+  const b=bridge(),conv=conversation;if(!b||!conv||!conv.active||!conv.outbox.length||conv.sending)return;
+  if(conv.drainTimer){clearTimeout(conv.drainTimer);conv.drainTimer=null;}
+  if(b.state.turn){
+   if(conv.drainTries===0)setStatus('Echo is still answering; your words are queued.');
+   if(++conv.drainTries<=480)conv.drainTimer=setTimeout(()=>void drainOutbox(),250);else setStatus('Still waiting for Echo; your words are kept until the turn ends.');
+   return;
+  }
+  const chatId=b.state.chat?.id;if(!chatId){setStatus('Open a saved conversation to keep talking.');return;}
+  conv.chatId=chatId;const text=conv.outbox.splice(0).join(' ');conv.sending=true;
   setStatus('Sending your words…');debug('conversation_send',{chars:text.length});
-  try{const outcome=await window.EchoPrimeWorkspace.send(text);if(!conversation||conversation!==conv)return;if(!outcome?.sent)setStatus('Not sent: '+(outcome?.detail||'the conversation refused the message')+' Still listening.');}
+  try{const outcome=await window.EchoPrimeWorkspace.send(text);if(conversation!==conv)return;if(!outcome?.sent)setStatus('Not sent: '+(outcome?.detail||'the conversation refused the message')+' Still listening.');}
   catch(error){if(conversation===conv)setStatus('Not sent: '+(error instanceof Error?error.message:'conversation failed')+' Still listening.');}
+  finally{if(conversation===conv){conv.sending=false;if(conv.outbox.length)void drainOutbox();}}
  }
  async function endUtterance(reason){
-  const b=bridge(),conv=conversation;if(!b||!conv||!conv.active||conv.transcribing)return;
-  conv.capturing=false;const chunks=conv.chunks;conv.chunks=[];conv.frames=0;
-  let samples;try{samples=resample(chunks,conv.sampleRate);}catch{return;}
-  if(samples.length<4800){debug('utterance_dropped',{reason,frames:samples.length});return;}
-  conv.transcribing=true;setStatus('Transcribing · '+(reason==='max'?'eight-second limit reached':'end of speech'));sync();
+  const b=bridge(),conv=conversation;if(!b||!conv||!conv.active)return;
+  if(conv.transcribing){if(reason!=='max')conv.endPending=true;return;}// finish this part first, then close the turn
+  const chatId=b.state.chat?.id;if(!chatId){setStatus('Open a saved conversation to keep talking.');return;}
+  conv.chatId=chatId;
+  const chunks=conv.chunks;conv.chunks=[];conv.frames=0;
+  conv.capturing=reason==='max';// a long utterance keeps recording while its first part is transcribed
+  let samples;try{samples=resample(chunks,conv.sampleRate);}catch{samples=new Float32Array(0);}
+  if(samples.length<4800){
+   debug('utterance_dropped',{reason,frames:samples.length});
+   if(reason!=='max'&&conv.pendingText){const whole=conv.pendingText;conv.pendingText='';queueTranscript(whole);}
+   return;
+  }
+  conv.transcribing=true;setStatus('Transcribing · '+(reason==='max'?'long utterance, still listening':'end of speech'));sync();
   const texts=[];
   try{
    for(let i=0;i<samples.length;i+=120000){
@@ -513,12 +565,12 @@
    }
    debug('utterance_transcribed',{reason,parts:texts.length,frames:samples.length});
    const text=texts.join(' ').trim();
-   if(!text){setStatus('No words were recognised. Still listening.');return;}
-   if(reason==='max'&&conv.vad.speaking){conv.pendingText=[conv.pendingText,text].filter(Boolean).join(' ');return;}
+   if(reason==='max'){conv.pendingText=[conv.pendingText,text].filter(Boolean).join(' ');return;}// more of this utterance is still being captured
    const whole=[conv.pendingText,text].filter(Boolean).join(' ');conv.pendingText='';
-   await sendTranscript(whole);
+   if(!whole){setStatus('No words were recognised. Still listening.');return;}
+   queueTranscript(whole);
   }catch(error){if(conversation===conv)setStatus((error instanceof Error?error.message:'Transcription unavailable.')+' Still listening; no automatic retry was made.');debug('utterance_failed',{reason});}
-  finally{if(conversation===conv){conv.transcribing=false;sync();}}
+  finally{if(conversation===conv){conv.transcribing=false;sync();if(conv.endPending){conv.endPending=false;void endUtterance('silence');}}}
  }
  function pump(dt){
   const conv=conversation;if(!conv||!conv.active||conv.paused)return null;
@@ -526,7 +578,7 @@
   const echoSpeaking=!!S.current||!!S.device,verdict=conv.vad.update(rms,dt,echoSpeaking);
   if(verdict==='start'){
    if(echoSpeaking)stop('barge-in',{quiet:false});
-   conv.chunks=conv.preroll.slice();conv.frames=conv.chunks.reduce((n,part)=>n+part.length,0);conv.capturing=true;
+   if(!conv.capturing){conv.chunks=conv.preroll.slice();conv.frames=conv.chunks.reduce((n,part)=>n+part.length,0);conv.capturing=true;}
    setStatus('Listening · speak, then pause to send');debug('utterance_started',{barge_in:echoSpeaking});emitState();
   }else if(verdict==='end')void endUtterance('silence');
   return verdict;
@@ -535,6 +587,7 @@
   const b=bridge();if(!b)return false;
   if(conversation?.active)return true;
   if(!signedIn()){setStatus('Sign in to an approved account before starting conversation mode.');return false;}
+  if(window.EchoPrimeWorkspace?.generalMode===false){setStatus('Switch the conversation to Echo (not ECHO Code) before starting conversation mode.');return false;}
   if(!echoVoiceConfigured()){setStatus("Conversation mode needs the Workspace voice backend for transcription: "+voiceReason()+'.');return false;}
   if(b.state.capture||b.state.micPending||b.voiceOptions.conversation){setStatus('Stop the active microphone or hands-free voice first.');return false;}
   if(!navigator.mediaDevices?.getUserMedia){setStatus('Microphone capture is unavailable in this browser.');return false;}
@@ -549,7 +602,7 @@
    ctx=new Context();if(!Number.isFinite(ctx.sampleRate)||ctx.sampleRate<8000||ctx.sampleRate>192000)throw new Error('Unsupported microphone sample rate.');
    const source=ctx.createMediaStreamSource(stream),analyser=ctx.createAnalyser();analyser.fftSize=1024;source.connect(analyser);
    const processor=ctx.createScriptProcessor(4096,1,1),mute=ctx.createGain();mute.gain.value=0;source.connect(processor);processor.connect(mute);mute.connect(ctx.destination);
-   const conv={active:true,paused:false,stream,ctx,source,analyser,processor,mute,buffer:new Float32Array(analyser.fftSize),vad:createVad({endOfTurnMs:endOfTurnMs()}),chunks:[],preroll:[],frames:0,capturing:false,transcribing:false,pendingText:'',chatId,epoch,sampleRate:ctx.sampleRate,timer:null};
+   const conv={active:true,paused:false,stream,ctx,source,analyser,processor,mute,buffer:new Float32Array(analyser.fftSize),vad:createVad({endOfTurnMs:endOfTurnMs()}),chunks:[],preroll:[],frames:0,capturing:false,transcribing:false,endPending:false,pendingText:'',outbox:[],drainTimer:null,drainTries:0,sending:false,chatId,epoch,sampleRate:ctx.sampleRate,timer:null};
    processor.onaudioprocess=event=>{
     if(!conv.active||conv.paused)return;const data=new Float32Array(event.inputBuffer.getChannelData(0));
     if(conv.capturing){conv.chunks.push(data);conv.frames+=data.length;if(conv.frames>=Math.floor(conv.sampleRate*7.5))void endUtterance('max');}
@@ -568,7 +621,7 @@
  }
  function stopConversation(reason){
   const conv=conversation;if(!conv)return false;conversation=null;conv.active=false;
-  if(conv.timer)clearTimeout(conv.timer);conv.processor.onaudioprocess=null;
+  if(conv.timer)clearTimeout(conv.timer);if(conv.drainTimer)clearTimeout(conv.drainTimer);conv.processor.onaudioprocess=null;
   for(const node of [conv.source,conv.processor,conv.mute])try{node.disconnect();}catch{}
   try{conv.stream.getTracks().forEach(track=>track.stop());}catch{}
   try{void conv.ctx.close?.();}catch{}
@@ -589,7 +642,7 @@
  }
  function setMuted(value){
   const b=bridge();prefs.muted=value===true;savePrefs();
-  if(b)b.voiceOptions.spoken=signedIn()&&!prefs.muted;
+  if(b){const before=b.voiceOptions.spoken;b.voiceOptions.spoken=signedIn()&&!prefs.muted;if(before!==b.voiceOptions.spoken)try{b.updateContext();}catch{}}// re-syncs the voice bar checkbox
   if(prefs.muted)stop('mute',{quiet:true});
   debug('mute_changed',{muted:prefs.muted});setStatus(prefs.muted?'Echo is muted. Replies stay silent until you unmute.':'Echo will speak replies.');announce('echo-speech-changed',{});sync();
  }
@@ -618,7 +671,9 @@
   window.addEventListener('echo-reply-stream',event=>onReplyStream(event?.detail));
   window.addEventListener('echo-code-reply',event=>onCodeReply(event?.detail));
   window.addEventListener('echo-result-rendered',event=>onResultRendered(event?.detail));
-  window.addEventListener('echo-voice-stop',()=>{if(S.current||S.device)stop('workspace',{quiet:true});});
+  // workspace.js calls stopAudio() from its own visibilitychange handler before ours runs; keep the hidden-tab
+  // reply so "Resume Echo" can offer it back.
+  window.addEventListener('echo-voice-stop',()=>{if(!(S.current||S.device))return;if(document.hidden&&S.current)S.deferred={message:S.current.message,chatId:S.current.chatId};stop(document.hidden?'hidden':'workspace',{quiet:!document.hidden});});
   window.addEventListener('pagehide',()=>{stop('pagehide',{quiet:true});stopConversation('pagehide');});
   for(const name of ['pointerdown','keydown','touchstart'])window.addEventListener(name,()=>{void unlock();},{once:true,capture:true,passive:true});
   document.addEventListener('visibilitychange',()=>{
@@ -634,7 +689,7 @@
   applyDefault();sync();
  }
  function onAccountChanged(){
-  S.spoken.clear();S.turns=0;S.deferred=null;S.blocked=null;S.stream=null;S.reasonShown=false;S.appliedEpoch=null;
+  S.spoken.clear();S.closedStreams.clear();S.turns=0;S.deferred=null;S.blocked=null;S.stream=null;S.reasonShown=false;S.appliedEpoch=null;
   stop('account',{quiet:true,cancelBackend:false});stopConversation('account');setStatus('');
  }
  function applyDefault(){
@@ -643,8 +698,9 @@
   // Commander directive 2026-11-04: spoken replies are ON for signed-in approved accounts unless
   // muted; anonymous visitors stay silent. workspace.js keeps its own default at false and resets
   // it per identity; this applies the directive after each identity readback.
-  b.voiceOptions.spoken=signedIn()&&!prefs.muted;
+  const before=b.voiceOptions.spoken;b.voiceOptions.spoken=signedIn()&&!prefs.muted;
   debug('default_applied',{signed_in:signedIn(),spoken:b.voiceOptions.spoken,muted:prefs.muted});
+  if(before!==b.voiceOptions.spoken)try{b.updateContext();}catch{}// the voice bar checkbox rendered before this default landed
  }
  function attachBarControl(){
   const bar=$('[data-voice-bar]');if(!bar||ui.barMute)return;

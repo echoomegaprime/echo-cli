@@ -65,7 +65,7 @@ function fakeBridge(over:Record<string,any>={}){
   startConversation:vi.fn(async()=>{}),stopVoice:vi.fn(async()=>{}),interrupt:vi.fn(async()=>{}),setChat:vi.fn(),onStatus:vi.fn((fn:(t:string)=>void)=>{hooks.push(fn);}),...over.bridge};
  return bridge;
 }
-async function world(files:string[],bridge:any,options:{enabled?:boolean;storage?:Map<string,string>;storageThrows?:boolean;rms?:{value:number}}={}):Promise<World>{
+async function world(files:string[],bridge:any,options:{enabled?:boolean;storage?:Map<string,string>;storageThrows?:boolean;rms?:{value:number};real?:{Transport:any}}={}):Promise<World>{
  const nodes=new Map<string,Node>(),events:Record<string,((event:any)=>unknown)[]>={},documentEvents:Record<string,((event:any)=>unknown)[]>={},orb:any[]=[],debug:any[]=[],utterances:any[]=[];
  const storage=options.storage??new Map<string,string>();
  const get=(selector:string)=>{if(!nodes.has(selector))nodes.set(selector,new Node());return nodes.get(selector)!;};
@@ -75,8 +75,10 @@ async function world(files:string[],bridge:any,options:{enabled?:boolean;storage
  const query=(selector:string)=>{const attribute=/^\[([\w-]+)\]$/.exec(selector);if(attribute)return all().find(n=>n.attributes[attribute[1]]!==undefined)||null;return get(selector);};
  FakeAudio.instances=[];FakeAudio.block=false;
  const send=vi.fn(async()=>({handled:true,sent:true,verified:true,detail:'ok'})),newChat=vi.fn(async()=>true);
- const window:any={addEventListener:(name:string,fn:(e:any)=>unknown)=>(events[name]??=[]).push(fn),removeEventListener(){},dispatchEvent:(event:any)=>{for(const fn of events[event.type]||[])fn(event);},
-  EchoPrimeWorkspace:{ready:Promise.resolve(options.enabled??true),get enabled(){return options.enabled??true;},bridge,get session(){return bridge.session;},send,newChat}};
+ const window:any={addEventListener:(name:string,fn:(e:any)=>unknown)=>(events[name]??=[]).push(fn),removeEventListener(){},dispatchEvent:(event:any)=>{for(const fn of events[event.type]||[])fn(event);}};
+ // Either a synthetic bridge (fast, isolated) or the real workspace.js on a Transport stand-in (`options.real`).
+ if(options.real){window.EchoPrimeWorkspaceTransport=options.real.Transport;window.EchoPrimeChat={reset:vi.fn()};}
+ else window.EchoPrimeWorkspace={ready:Promise.resolve(options.enabled??true),get enabled(){return options.enabled??true;},bridge,get session(){return bridge.session;},send,newChat};
  const document:any={body,head:new Node('head'),hidden:false,querySelector:query,querySelectorAll:()=>[],createElement:(t:string)=>new Node(t),createTextNode:(t:string)=>Object.assign(new Node('#text'),{_text:t}),
   addEventListener:(name:string,fn:(e:any)=>unknown)=>(documentEvents[name]??=[]).push(fn),dispatchEvent:(event:any)=>{orb.push(event.detail);}};
  const localStorage=options.storageThrows?{getItem(){throw new Error('blocked');},setItem(){throw new Error('blocked');},removeItem(){throw new Error('blocked');}}:{getItem:(k:string)=>storage.get(k)??null,setItem:(k:string,v:string)=>{storage.set(k,v);},removeItem:(k:string)=>{storage.delete(k);}};
@@ -93,8 +95,10 @@ async function world(files:string[],bridge:any,options:{enabled?:boolean;storage
  let urls=0;
  const context={window,document,localStorage,sessionStorage:localStorage,navigator:{mediaDevices:{getUserMedia:media.getUserMedia}},crypto:{randomUUID},Event,CustomEvent,setTimeout,clearTimeout,console:{debug:(_tag:string,event:any)=>debug.push(event),warn:vi.fn()},
   Audio:FakeAudio,URL:{createObjectURL:()=>'blob:echo-'+(++urls),revokeObjectURL:vi.fn()},Blob,atob:(x:string)=>Buffer.from(x,'base64').toString('binary'),btoa:(x:string)=>Buffer.from(x,'binary').toString('base64'),
-  speechSynthesis:synth,SpeechSynthesisUtterance,AudioContext,AbortController,Error,Number,Math,JSON,Set,Map,Array,Object,String,Promise,Boolean,Float32Array,Uint8Array,ArrayBuffer,DataView,Infinity};
+  speechSynthesis:synth,SpeechSynthesisUtterance,AudioContext,AbortController,AbortSignal,TextEncoder,TextDecoder,Error,Number,Math,JSON,Set,Map,Array,Object,String,Promise,Boolean,Float32Array,Uint8Array,ArrayBuffer,DataView,Infinity};
+ if(options.real)get('#workspace-chat-kind').value='workspace';
  for(const file of files)runInNewContext(source(file),context);
+ if(options.real)await window.EchoPrimeWorkspace.ready;
  await tick();
  const button=(label:string)=>all().find(n=>n.tagName==='BUTTON'&&n.textContent.trim()===label);
  const attr=(name:string)=>all().find(n=>n.attributes[name]!==undefined);
@@ -242,14 +246,17 @@ it('prefetches the next chunk while the current one plays and plays chunks in or
  expect(bridge.state.speech).toBeNull();expect(w.debug.find(e=>e.event==='speech_finished')).toMatchObject({chunks:3});
  expect(w.attr('data-speech-status')!.textContent).toContain('Spoke with Test Voice');
 });
-it('suppresses duplicate speech for the same saved reply and reuses the request id on an explicit replay',async()=>{
+it('suppresses duplicate speech for the same saved reply and mints a fresh request id after the session was cancelled',async()=>{
  const {w,bridge}=await voiceWorld();
  await speaking(w);w.emit('echo-reply-saved',{chatId:'c1',message:reply()});await tick();
  expect(bridge.api.mock.calls.filter((c:any[])=>c[0]==='/voice/start').length).toBe(1);
  expect(w.debug.find(e=>e.event==='duplicate_suppressed')).toMatchObject({message_id:'a1'});
+ // An explicit replay while speaking cancels the provider session; the backend caches start() per request id,
+ // so the replay must not reuse the cancelled session's id.
  void w.speech.speakMessage(reply(),'c1',{force:true});
  await vi.waitFor(()=>expect(bridge.api.mock.calls.filter((c:any[])=>c[0]==='/voice/start').length).toBe(2));
- const [a,b]=bridge.api.mock.calls.filter((c:any[])=>c[0]==='/voice/start');expect(a[1].request_id).toBe(b[1].request_id);
+ await vi.waitFor(()=>expect(bridge.api).toHaveBeenCalledWith('/voice/cancel',{chat_id:'c1',session_id:'s1'}));
+ const [a,b]=bridge.api.mock.calls.filter((c:any[])=>c[0]==='/voice/start');expect(a[1].request_id).not.toBe(b[1].request_id);
  w.dispose();
 });
 it('barges in when the user types, sends, presses Stop or the microphone: playback pauses and the provider session is cancelled',async()=>{
@@ -280,6 +287,8 @@ it('shows "Tap to hear Echo" when autoplay is blocked and never throws; tapping 
  FakeAudio.block=false;await w.attr('data-speech-tap')!.click();
  await vi.waitFor(()=>expect(bridge.api.mock.calls.filter((c:any[])=>c[0]==='/voice/start').length).toBe(2));
  await vi.waitFor(()=>expect(w.spoken().some(a=>!a.paused)).toBe(true));expect(w.attr('data-speech-tap')!.hidden).toBe(true);
+ // No session was cancelled by the block, so the replay reuses the request id and gets the backend's cached chunk 0.
+ const [a,b]=bridge.api.mock.calls.filter((c:any[])=>c[0]==='/voice/start');expect(a[1].request_id).toBe(b[1].request_id);expect(bridge.api).not.toHaveBeenCalledWith('/voice/cancel',expect.anything());
  w.dispose();
 });
 it('counts spoken turns, resets them with the account and clears duplicate memory',async()=>{
@@ -344,15 +353,32 @@ it('adds "Speak result" to Swarm answers and "Speak advice" beside Steward outpu
  await speak.click();await vi.waitFor(()=>expect(w.speech.speaking).toBe(true));expect(speak.textContent).toBe('⏹ Stop');
  await speak.click();expect(w.speech.speaking).toBe(false);expect(w.synth.cancel).toHaveBeenCalled();expect(speak.textContent).toBe('🔊 Speak result');
 });
-it('speaks the first streamed sentence while the rest streams when only the device voice can speak',async()=>{
+it('speaks the first streamed sentence while the rest streams when only the device voice can speak, then the flushed tail',async()=>{
  const {w}=await voiceWorld({state:{data:{voice:{configured:false}}}});
  w.attr('data-speech-device')!.checked=true;await w.attr('data-speech-device')!.fire('change');
  w.emit('echo-reply-stream',{chatId:'c1',text:'First sentence of the streamed reply is here'});expect(w.synth.speak).not.toHaveBeenCalled();
  w.emit('echo-reply-stream',{chatId:'c1',text:' indeed. Second part'});
  await vi.waitFor(()=>expect(w.synth.speak).toHaveBeenCalledTimes(1));expect(w.utterances[0].text).toBe('First sentence of the streamed reply is here indeed.');
  expect(w.debug.find(e=>e.event==='sentence_ready')).toMatchObject({count:1});
- w.emit('echo-reply-saved',{chatId:'c1',message:reply('a1','First sentence of the streamed reply is here indeed. Second part')});await tick();
- expect(w.synth.speak).toHaveBeenCalledTimes(1);expect(w.debug.find(e=>e.event==='stream_closed')).toBeTruthy();
+ await vi.waitFor(()=>expect(w.speech.speaking).toBe(true));// the queue stays open, waiting for the next sentence
+ w.emit('echo-reply-saved',{chatId:'c1',message:reply('a1','First sentence of the streamed reply is here indeed. Second part')});
+ await vi.waitFor(()=>expect(w.synth.speak).toHaveBeenCalledTimes(2));expect(w.utterances[1].text).toBe('Second part.');
+ await vi.waitFor(()=>expect(w.speech.speaking).toBe(false));expect(w.synth.cancel).not.toHaveBeenCalled();
+ expect(w.debug.find(e=>e.event==='stream_closed')).toMatchObject({spoken_by_device:true});expect(w.speech.snapshot().spoken).toEqual(['a1']);
+ w.dispose();
+});
+it('keeps one open queue per stream: two sentences in one delta play in order without restarting, and a barge-in silences the rest',async()=>{
+ const {w}=await voiceWorld({state:{data:{voice:{configured:false}}}});
+ w.attr('data-speech-device')!.checked=true;await w.attr('data-speech-device')!.fire('change');
+ w.emit('echo-reply-stream',{chatId:'c1',text:'First sentence is long enough here. Second sentence is long enough too. Tail without'});
+ await vi.waitFor(()=>expect(w.synth.speak).toHaveBeenCalledTimes(2));
+ expect(w.utterances.map(u=>u.text)).toEqual(['First sentence is long enough here.','Second sentence is long enough too.']);expect(w.synth.cancel).not.toHaveBeenCalled();
+ expect(w.debug.filter(e=>e.event==='speech_requested'&&e.source==='device').length).toBe(1);
+ await w.get('#prompt').fire('input');// barge-in: the rest of this reply stays silent
+ expect(w.speech.speaking).toBe(false);
+ w.emit('echo-reply-stream',{chatId:'c1',text:' a period. Third sentence is long enough as well.'});await tick();
+ w.emit('echo-reply-saved',{chatId:'c1',message:reply('a1','full')});await tick();
+ expect(w.synth.speak).toHaveBeenCalledTimes(2);expect(w.debug.find(e=>e.event==='stream_closed')).toMatchObject({cancelled:true});
  w.dispose();
 });
 
@@ -385,6 +411,32 @@ it('runs conversation mode off by default, opens the microphone on request and a
  await vi.waitFor(()=>expect(w.window.EchoPrimeWorkspace.send).toHaveBeenCalledWith('hello echo'));
  expect(JSON.stringify(w.debug)).not.toContain('hello echo');
  await button.click();expect(w.speech.conversation.active()).toBe(false);expect(w.media.tracks[0].stop).toHaveBeenCalled();expect(w.orb[w.orb.length-1]).toMatchObject({mode:'idle'});
+});
+it('keeps recording through the backend clip limit and sends the whole long utterance once speech ends',async()=>{
+ const rms={value:0};const {w,bridge}=await voiceWorld({},{rms});
+ await w.attr('data-speech-conversation')!.click();expect(w.speech.conversation.active()).toBe(true);
+ rms.value=0.1;expect([w.speech.conversation.pump(100),w.speech.conversation.pump(100)]).toContain('start');
+ const frames=()=>({inputBuffer:{getChannelData:()=>new Float32Array(4096).fill(0.1)}});
+ for(let i=0;i<30;i++)w.media.processor.onaudioprocess(frames());// 122,880 frames at 16 kHz: past the 7.5 s part limit
+ await vi.waitFor(()=>expect(bridge.api).toHaveBeenCalledWith('/voice/transcribe',expect.anything()));
+ w.media.processor.onaudioprocess(frames());// still captured while the first part is transcribed
+ rms.value=0;w.speech.conversation.pump(800);expect(w.speech.conversation.pump(800)).toBe('end');
+ await vi.waitFor(()=>expect(w.window.EchoPrimeWorkspace.send).toHaveBeenCalledWith('hello echo hello echo'));
+ expect(bridge.api.mock.calls.filter((c:any[])=>c[0]==='/voice/transcribe').length).toBe(2);expect(w.window.EchoPrimeWorkspace.send).toHaveBeenCalledTimes(1);
+ w.dispose();
+});
+it('waits for an in-flight turn before sending queued words and keeps them in order',async()=>{
+ const rms={value:0};const {w,bridge}=await voiceWorld({},{rms});
+ await w.attr('data-speech-conversation')!.click();
+ bridge.state.turn={};// the previous reply is still being saved (echo-reply-saved fires before send() settles)
+ rms.value=0.1;expect([w.speech.conversation.pump(100),w.speech.conversation.pump(100)]).toContain('start');
+ for(let i=0;i<4;i++)w.media.processor.onaudioprocess({inputBuffer:{getChannelData:()=>new Float32Array(4096).fill(0.1)}});
+ rms.value=0;w.speech.conversation.pump(800);expect(w.speech.conversation.pump(800)).toBe('end');
+ await vi.waitFor(()=>expect(w.attr('data-speech-status')!.textContent).toContain('your words are queued'));
+ await new Promise(r=>setTimeout(r,300));expect(w.window.EchoPrimeWorkspace.send).not.toHaveBeenCalled();
+ bridge.state.turn=null;
+ await vi.waitFor(()=>expect(w.window.EchoPrimeWorkspace.send).toHaveBeenCalledWith('hello echo'));expect(w.window.EchoPrimeWorkspace.send).toHaveBeenCalledTimes(1);
+ w.dispose();
 });
 it('lets the user barge in on Echo by speaking during playback in conversation mode',async()=>{
  const rms={value:0};const {w,bridge}=await voiceWorld({},{rms});
@@ -421,9 +473,66 @@ it('workspace.js announces streamed and saved replies, exposes bridge.audio and 
  await window.EchoPrimeWorkspace.newChat();bridge.voiceOptions.spoken=true;
  const outcome=await window.EchoPrimeWorkspace.send('hi');expect(outcome).toMatchObject({handled:true,sent:true,verified:true});
  expect(seen.filter(e=>e.type==='echo-reply-stream').map(e=>e.detail.text)).toEqual(['Hello. ','Saved reply.']);
- const savedEvent=seen.find(e=>e.type==='echo-reply-saved');expect(savedEvent.detail).toEqual({chatId:'c1',message:saved.messages[1]});
+ const savedEvent=seen.find(e=>e.type==='echo-reply-saved');expect(savedEvent.detail).toEqual({chatId:'c1',turn:expect.stringMatching(/^[0-9a-f-]{36}$/),message:saved.messages[1]});
+ expect(seen.filter(e=>e.type==='echo-reply-stream').every(e=>e.detail.turn===savedEvent.detail.turn)).toBe(true);
  expect(request).not.toHaveBeenCalledWith('/voice/start',expect.anything(),expect.anything());
  expect(bridge.voiceOptions.remaining).toBe(0);
+});
+// Real workspace.js + speech.js together (a Transport stand-in replaces the network). These cover the ordering
+// between workspace.js's own listeners and speech.js that a synthetic bridge cannot show.
+function realTransport(){
+ const calls:any[]=[];let owner='owner',seq=0,identityChanged:(s:any)=>void=()=>{};
+ const session=()=>({workspaceConfigured:true,authenticated:true,ownerAccess:true,csrf:'csrf-'+owner,user:{uid:owner,role:'owner',status:'approved'}});
+ const request=vi.fn(async(path:string,body:any)=>{calls.push({path,body,owner});
+  if(path==='/state')return {chats:[],projects:[],library:[],preferences:[],personalities:[],context_length:1000,voice:voiceFixture()};
+  if(path==='/chats')return {id:'c'+(++seq),messages:[]};
+  if(path==='/voice/start')return {audio_url:'/api/voice/audio/x'+body.message_id,session_id:'s-'+body.message_id,chunk_index:0,has_more:false};
+  if(path.startsWith('/chats/'))return {id:path.slice(7),messages:[]};return {};});
+ let instance:any=null;
+ class Transport {session=session();constructor(options:any){identityChanged=options.onIdentityChange;instance=this;}loadSession=async()=>this.session;request=request;audio=async()=>new Blob(['wav']);headers=()=>({});clear(){}auth=vi.fn();text=vi.fn();chat=async(input:any)=>({id:input.chat_id,messages:[]});}
+ return {Transport,calls,request,switchOwner(next:string){owner=next;instance.session=session();identityChanged(instance.session);}};
+}
+it('with the real workspace.js, a hidden tab still offers "Resume Echo" although stopAudio fires first',async()=>{
+ const t=realTransport();const w=await world(['workspace.js','speech.js'],null,{real:t});
+ const ws=w.window.EchoPrimeWorkspace;await ws.newChat();expect(ws.bridge.voiceOptions.spoken).toBe(true);
+ void w.speech.speakMessage(reply(),ws.bridge.state.chat.id);await vi.waitFor(()=>expect(w.spoken().some(a=>!a.paused)).toBe(true));
+ w.document.hidden=true;w.emitDocument('visibilitychange');
+ expect(w.speech.speaking).toBe(false);expect(w.speech.deferred).toBe(true);expect(w.spoken().every(a=>a.paused)).toBe(true);
+ await vi.waitFor(()=>expect(t.calls.some(c=>c.path==='/voice/cancel'&&c.body.session_id==='s-a1')).toBe(true));
+ w.document.hidden=false;w.emitDocument('visibilitychange');expect(w.attr('data-speech-resume')!.hidden).toBe(false);
+ await w.attr('data-speech-resume')!.click();await vi.waitFor(()=>expect(t.calls.filter(c=>c.path==='/voice/start').length).toBe(2));
+ w.dispose();
+});
+it('with the real workspace.js, an identity change stops speech without cancelling the old account\'s session under the new one',async()=>{
+ const t=realTransport();const w=await world(['workspace.js','speech.js'],null,{real:t});
+ const ws=w.window.EchoPrimeWorkspace;await ws.newChat();
+ void w.speech.speakMessage(reply('a2'),ws.bridge.state.chat.id);await vi.waitFor(()=>expect(w.spoken().some(a=>!a.paused)).toBe(true));
+ expect(ws.bridge.state.speech).toEqual({chat_id:'c1',session_id:'s-a2'});
+ t.switchOwner('new-owner');await tick();
+ expect(w.speech.speaking).toBe(false);expect(w.spoken().every(a=>a.paused)).toBe(true);expect(w.speech.turns).toBe(0);
+ expect(t.calls.filter(c=>c.path==='/voice/cancel')).toEqual([]);expect(ws.bridge.voiceOptions.spoken).toBe(true);// the new approved account gets the directive default too
+ w.dispose();
+});
+it('a reply interrupted while streaming never poisons the next turn in the same chat and stays silent itself',async()=>{
+ const {w,bridge}=await voiceWorld({state:{data:{voice:{configured:false}}}});
+ w.attr('data-speech-device')!.checked=true;await w.attr('data-speech-device')!.fire('change');
+ w.emit('echo-reply-stream',{chatId:'c1',turn:'t1',text:'First reply begins with a complete sentence. Tail'});
+ await vi.waitFor(()=>expect(w.synth.speak).toHaveBeenCalledTimes(1));await w.get('#stop-chat').fire('click');
+ w.emit('echo-reply-stream',{chatId:'c1',turn:'t2',text:'A completely new reply in the same chat. '});
+ await vi.waitFor(()=>expect(w.synth.speak).toHaveBeenCalledTimes(2));expect(w.utterances[1].text).toBe('A completely new reply in the same chat.');
+ w.emit('echo-reply-saved',{chatId:'c1',turn:'t1',message:reply('a1')});await tick();expect(w.speech.snapshot().spoken).toContain('a1');
+ w.emit('echo-reply-saved',{chatId:'c1',turn:'t2',message:reply('a2')});await vi.waitFor(()=>expect(w.speech.speaking).toBe(false));
+ expect(w.speech.snapshot().spoken).toEqual(['a1','a2']);expect(bridge.api).not.toHaveBeenCalledWith('/voice/start',expect.anything());
+ // With Echo's voice configured, an interrupted streamed reply is not read aloud afterwards either.
+ const echo=await voiceWorld();echo.w.emit('echo-reply-stream',{chatId:'c1',turn:'t9',text:'Echo begins. '});await echo.w.get('#stop-chat').fire('click');
+ echo.w.emit('echo-reply-saved',{chatId:'c1',turn:'t9',message:reply('a9')});await tick();expect(echo.bridge.api).not.toHaveBeenCalledWith('/voice/start',expect.anything());
+ echo.w.emit('echo-reply-saved',{chatId:'c1',turn:'t10',message:reply('a10')});await vi.waitFor(()=>expect(echo.bridge.api).toHaveBeenCalledWith('/voice/start',expect.objectContaining({message_id:'a10'})));
+ echo.w.dispose();w.dispose();
+});
+it('a cancelled queue settles even while its prefetch is still pending',async()=>{
+ const s=await pure();let release!:(v:any)=>void;const pending=new Promise(r=>{release=r;});
+ const queue=s.createQueue({fetchNext:()=>pending,play:async()=>true});const run=queue.run({hasMore:true});
+ await tick();queue.cancel('test');expect(await Promise.race([run,new Promise(r=>setTimeout(()=>r('hung'),500))])).toBe(false);release(null);
 });
 it('composer Listen and ◉ Voice route through speech.js when it is loaded',async()=>{
  const bridge=fakeBridge();bridge.state.chat.messages=[{id:'a1',role:'assistant',content:'ok'}];
