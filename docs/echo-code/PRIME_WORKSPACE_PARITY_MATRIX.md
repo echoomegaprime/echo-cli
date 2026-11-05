@@ -69,7 +69,7 @@ Update this file as each row lands. Visual comparison (screenshots) is tracked i
 |---|---|---|---|---|
 | Message box | `app.js:121`, 100,000 chars | reduced | `index.html:57`, 12,000 chars | |
 | Attach | `app.js:140-144` chips | **present** | `composer.js` `attachDialog`, `renderChips` | shares `state.attachments` with the Library view |
-| Mic / "◉ Voice" | `voice.js:10-14`, `app.js:124-127` | reduced, **◉ Voice present** | `composer.js` Voice toggle (`bridge.startConversation`, 10-turn cap kept in `workspace.js`); mic button still opens the Voice panel | hidden unless `voice.configured`; hands-free re-listen now also runs while the voice bar is visible (`workspace.js` `scheduleListening`) |
+| Mic / "◉ Voice" | `voice.js:10-14`, `app.js:124-127` | reduced, **◉ Voice present** | `composer.js` Voice toggle → `speech.js` continuous conversation mode when loaded (AnalyserNode VAD, auto-send on end of speech, barge-in aware, no turn cap), else `bridge.startConversation` (ten-turn cap removed 2026-11-04); the mic button is push-to-talk `bridge.dictate` through `speech.js` (opens the Voice panel only without it) | hidden unless `voice.configured`; hands-free re-listen now also runs while the voice bar is visible (`workspace.js` `scheduleListening`) |
 | "◈ Memory · automatic" chip | `app.js:~133` | **present** | `composer.js` `build` | |
 | Send, hint "Enter to send · Shift+Enter for a new line" | `app.js:~136` | **present** (Workspace mode) | `composer.js` sets `.keyboard-hint` | |
 | Context meter `7,657 / 262,144 · 2.9% · estimate` + progress bar | `app.js:81-94`, `model_usage` events | **present** | `composer.js` `contextMeter`, `composer.css` | measured from the last saved `model_usage` event after the final checkpoint (same arithmetic as WS), otherwise an estimate labelled as such. Reads the saved chat readback; live-stream `model_usage` events are still dropped by `workspace-client.js` |
@@ -86,13 +86,29 @@ Update this file as each row lands. Visual comparison (screenshots) is tracked i
 | Persistent bar under composer (only when `voice.configured`) | `voice.js:156-168` | **present** | `voicebar.js` | shown only when the backend reports `configured === true` |
 | Interrupt & speak | `voice.js:163` | **present** | `voicebar.js`, `workspace.js` `bridge.interrupt` | |
 | Stop voice | `voice.js:163` | **present** | `voicebar.js`, `workspace.js` `bridge.stopVoice` | also ends a hands-free conversation and cancels the provider session |
-| Spoken replies | `voice.js:164`, persisted `echo-spoken-replies` | **present** | `voicebar.js` | WS defaults ON and persists; Prime is OFF every session and never touches browser storage (preserve) |
+| Spoken replies | `voice.js:164`, persisted `echo-spoken-replies` | **present** | `voicebar.js` toggle; default and persisted mute in `speech.js` | **Commander directive 2026-11-04 ("ECHO SHOULD TALK REPLIES, USE ALL SPEAKING LOGIC THAT'S KNOWN, CONVO AI STYLE"):** ON by default for signed-in approved accounts, OFF for anonymous visitors; Mute/Unmute persisted in `localStorage` (`echo-prime-speech-v1`, try/catch) from the composer dock and the voice bar. Supersedes the earlier "off every session" preserve note; `voicebar.js` itself still stores nothing |
 | Brief speech | `voice.js:165` | **present** | `voicebar.js` | off each session |
 | Send speech automatically | `voice.js:166` | **present** | `voicebar.js` | off each session |
 | Status line "M Freeman · ElevenLabs · Microphone off" | `voice.js:167-168` | **present** | `voicebar.js` `model` | built from the backend `voice.label` and `voice.provider`, plus Listening / Transcribing / Speaking; never hardcoded |
 | Footer "Personality Forge · …ElevenLabs." | `voice.js:168` | **present** | `voicebar.js` | uses backend `provider_usage` text |
 | Capture limit | 120 s chunked | reduced | 8 s cap (`workspace.js:271,328`) | |
 | Endpoints | `/api/voice/*` | present | `workspace.ts:61,66` | |
+
+### 6a. Spoken replies — ConvAI pipeline (`speech.js`, Commander directive 2026-11-04)
+
+| Feature | WS ref | Prime | PR ref | Notes |
+|---|---|---|---|---|
+| Echo's voice speaks each saved reply | `voice.js` `afterReply` → `/api/voice/start`, one section prepared ahead | **present** | `speech.js` `speakMessage`; `workspace.js` announces `echo-reply-saved` on the stream's `done` event (Echo starts two round trips before the readback finishes) and `echo-voice-stop` from `stopAudio` | ordered playback queue with the next chunk (`/api/voice/next` + governed WAV via `bridge.audio`) prefetched while the current one plays; `request_id` reused on replay so the backend's idempotent start is honoured; duplicate suppression per saved message id; `state.speech` set so the voice bar shows Speaking and Stop voice cancels the same session |
+| Barge-in | `stopSpeech` on dictate | **present** | `speech.js` `stop`: typing in the composer, Send, Stop, the mic button, `echo-voice-stop` | pauses playback, drops the prefetch and cancels the provider session (`/api/voice/cancel {chat_id, session_id}`) |
+| Hidden tab | `visibilitychange` stops | **present** | `speech.js` | stops speaking when the tab is hidden and offers "Resume Echo"; never resumes by itself |
+| Autoplay policy | visible audio element | **present** | `speech.js` `unlock`, "Tap to hear Echo" chip | first gesture resumes the AudioContext and primes a silent blob WAV (CSP `media-src blob:`); a `NotAllowedError` never throws |
+| Voice name chip, Stop, spoken-turn counter | none | extra | `speech.js` dock under the composer | chip reads `voice.label` / `voice.provider` from the backend (no hardcoded name); when `configured !== true` it states the reason and nothing else speaks (no silent fallback) |
+| Device voice | none | extra, explicit | `speech.js` checkbox "Device voice (not Echo's)", persisted | the only path that can speak ECHO Code replies, Swarm results and Steward advice, because the backend synthesises saved Workspace replies only; labelled, never substituted silently |
+| Text normalisation + sentence chunking | `prepareSpeech` server side (420 chars) | **present** (client) | `speech.js` `normalizeForSpeech`, `createChunker`, `detectLanguage` | markdown stripped, URLs read as "link", code blocks as "code block omitted", tables summarised, numbers / dates / times / currency / ordinals expanded, identifiers and paths hidden, language detected for passthrough; speaking sentence 1 while the rest streams applies to the device voice (Echo's own voice starts at `done` until the backend grows a free-text route) |
+| Conversation mode | `toggleConversation` (ScriptProcessor RMS, 120 s) | **present** | `speech.js` `conversation`: AnalyserNode VAD with adaptive noise floor, end of turn after 1.5 s of silence (or the backend's `end_of_turn_ms`), ≤ 7.5 s parts to `/api/voice/transcribe`, auto-send, interrupt Echo by speaking over it | off by default, visible toggle (also the composer's ◉ Voice); needs `voice.configured` for transcription |
+| Speak result / Speak advice | none | extra | `swarm.js` and `steward.js` announce `echo-result-rendered`; `speech.js` adds the speak/stop button | device voice or a plain reason |
+| Orb sync | none | extra | `speech.js` dispatches `echo-orb-state` on `document` ({mode:'speaking', amplitude 0–1, source:'speech'} at ~20 Hz, {mode:'listening'}, {mode:'idle'}) | the `orb.js` listener belongs to the orb slice |
+| Latency instrumentation | none | extra | `console.debug('[echo.speech]', …)` | `first_audio` with `ttfa_ms` and `lang`, queue and chunk counts, duplicate / cancel / failure outcomes; never message text or transcripts |
 
 ## 7. Models, themes, layout, other
 
@@ -119,11 +135,11 @@ Actions: Prime UI calls `personality_select`, `memory_save`, `memory_forget`, `m
 1. ~~Live node bar and FORGE connection state (owner-only fleet).~~ Done 2026-11-04 (`fleet.js`); not yet exercised against a live backend.
 2. First-class views: Projects (per-project chats), Library (search, note, Save file), Plugins & memory, SDK (+invoke), Vault (locate/get/list/put), Code review page.
 3. Chat surface: message actions, code-block Save file, checkpoint banner, Personality select, activity cards, Memory chip, composer Attach chips, context meter with %/bar/measured.
-4. Voice bar with persisted toggles and status line; longer capture.
+4. ~~Voice bar with persisted toggles and status line; longer capture.~~ Spoken replies on by default, persisted mute, ConvAI queue/prefetch, barge-in and conversation mode done 2026-11-04 (`speech.js`); capture is still bounded by the backend's 8 s clip (long utterances are chunked by `speech.js`).
 5. ~~Logs & debugging cards; Journal & ECF receipts button and sync dialog.~~ Done 2026-11-04 (`logs.js`); not yet exercised against a live backend.
 6. Layout system and ESH dock status.
 7. Import source/file, password reset UI, branding strings, allowlist cleanup.
 
 ## Preserve (Prime-intentional)
 
-ESH review-then-run, voice off by default each session, 10-turn voice cap, owner-only gating of fleet/diagnostics/SDK/Vault/ESH, orb, palettes, Steward, Creative Studio.
+ESH review-then-run, ~~voice off by default each session, 10-turn voice cap~~ (superseded 2026-11-04 by the Commander directive "ECHO SHOULD TALK REPLIES, USE ALL SPEAKING LOGIC THAT'S KNOWN, CONVO AI STYLE": spoken replies ON for signed-in approved accounts, OFF for anonymous visitors, persistent mute, no turn cap — `speech.js`), owner-only gating of fleet/diagnostics/SDK/Vault/ESH, orb, palettes, Steward, Creative Studio.

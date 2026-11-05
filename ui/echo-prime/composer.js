@@ -111,7 +111,7 @@
   actions.append(action('Copy',async()=>{if(!navigator.clipboard?.writeText)throw new Error('Clipboard is unavailable in this browser.');await navigator.clipboard.writeText(row.content);notify('Copied.');}));
   if(row.role==='assistant'){
    actions.append(action('Save to library',()=>saveDialog(row.content,'md')));
-   if(row.id&&b.state.data?.voice?.configured===true)actions.append(action('▶ Listen',async now=>{await now.speakReply(row,now.state.chat?.id);}));
+   if(row.id&&b.state.data?.voice?.configured===true)actions.append(action('▶ Listen',async now=>{if(window.EchoPrimeSpeech?.speakMessage){void window.EchoPrimeSpeech.speakMessage(row,now.state.chat?.id,{force:true});return;}await now.speakReply(row,now.state.chat?.id);}));
   }
   article.append(actions);
  }
@@ -157,7 +157,8 @@
   const b=bridge();if(!b||!built)return;
   const data=b.state.data,voice=data?.voice?.configured===true;
   ui.attach.hidden=!data;ui.memory.hidden=!data;ui.voice.hidden=!voice;
-  ui.voice.textContent=b.voiceOptions.conversation?'◉ Voice on':'◉ Voice';ui.voice.setAttribute('aria-pressed',String(!!b.voiceOptions.conversation));
+  const handsFree=window.EchoPrimeSpeech?.conversation?.active?.()===true||b.voiceOptions.conversation===true;
+  ui.voice.textContent=handsFree?'◉ Voice on':'◉ Voice';ui.voice.setAttribute('aria-pressed',String(handsFree));
   renderChips(b);
   const meter=contextMeter({capacity:data?.context_length,contextChars:chatChars(b.state.chat),baseChars:data?.base_context_chars,draft:$('#prompt')?.value||'',events:b.state.chat?.events});
   ui.meterRow.hidden=!meter;
@@ -167,8 +168,9 @@
  function build(b){
   built=true;
   ui.attach=action('＋ Attach',()=>attachDialog(),'quiet-button composer-tool');ui.attach.setAttribute('aria-label','Attach files from your library');
-  ui.voice=action('◉ Voice',async now=>{if(now.voiceOptions.conversation){await now.stopVoice();return;}await now.startConversation();},'quiet-button composer-tool');
-  ui.voice.setAttribute('aria-pressed','false');ui.voice.setAttribute('title','Hands-free voice conversation: explicit opt-in, at most ten captured turns.');
+  // speech.js (when loaded) provides the continuous conversation mode; otherwise the bridge's hands-free loop runs.
+  ui.voice=action('◉ Voice',async now=>{const speech=window.EchoPrimeSpeech;if(speech?.conversation){await speech.conversation.toggle();return;}if(now.voiceOptions.conversation){await now.stopVoice();return;}await now.startConversation();},'quiet-button composer-tool');
+  ui.voice.setAttribute('aria-pressed','false');ui.voice.setAttribute('title','Hands-free voice conversation: explicit opt-in; continues until you stop it.');
   ui.memory=el('span',{class:'memory-chip',title:'Relevant chat history, Crystal, ECF, Arcanum and Knowledge Forge are checked automatically.'},'◈ Memory · automatic');
   $('#composer .composer-bottom .persona')?.after(el('div',{class:'composer-tools'},ui.attach,ui.voice,ui.memory));
   ui.chips=el('div',{class:'attachment-chips',role:'list','aria-label':'Attached files'});ui.chips.hidden=true;$('#prompt')?.before(ui.chips);
@@ -187,7 +189,7 @@
   ui.checkpointBody=el('div',{class:'prose'});ui.checkpoint=el('details',{class:'checkpoint','data-checkpoint':''},el('summary',{},'Checkpoint active · original history preserved'),ui.checkpointBody);ui.checkpoint.hidden=true;
   $('#chat-log')?.before(ui.checkpoint);
   const hint=$('.keyboard-hint');if(hint)hint.textContent='Enter to send · Shift+Enter for a new line';
-  for(const name of ['echo-workspace-context','echo-account-changed'])window.addEventListener(name,sync);
+  for(const name of ['echo-workspace-context','echo-account-changed','echo-speech-changed'])window.addEventListener(name,sync);
   b.onStatus(()=>sync());
   window.addEventListener('echo-account-changed',()=>{for(const made of [ui.saveDialog,ui.attachDialog])if(made?.dialog.open)made.dialog.close();});
   sync();

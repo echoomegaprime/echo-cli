@@ -7,7 +7,7 @@
   const article=document.createElement('article'),label=document.createElement('strong'),content=document.createElement('p');
   article.className='chat-message '+role;label.textContent=role==='user'?'You':'ECHO Code';content.textContent=text;
   article.append(label,content);if(detail){const meta=document.createElement('small');meta.textContent=detail;article.append(meta);}
-  $('#chat-log').append(article);$('#chat-log').hidden=false;$('#welcome').hidden=true;article.scrollIntoView({block:'nearest'});
+  $('#chat-log').append(article);$('#chat-log').hidden=false;$('#welcome').hidden=true;article.scrollIntoView({block:'nearest'});return article;
  }
  async function api(path,body,signal){
   const current=generation;let headers={};if(window.EchoPrimeWorkspace)headers=await window.EchoPrimeWorkspace.ownerHeaders();
@@ -36,9 +36,11 @@
     if(current!==generation)return {cancelled:true};
     sessionId=result.sessionId;
     const evidence=Array.isArray(result.evidence)?result.evidence.map(e=>e.path+' ['+e.sha256+']').join('; '):'';
-    line('assistant',result.answer||'Turn ended without an answer.',
+    const article=line('assistant',result.answer||'Turn ended without an answer.',
      (result.answerVerification==='unverified_model_text'?'Model text; verify claims. ':'Application result. ')+
      'Read-only · '+result.status+' · Session '+sessionId+(evidence?' · Sources: '+evidence:'')+(result.model&&window.EchoPrimeModels?' · '+window.EchoPrimeModels.describe(result.model):''));
+    // Hook for speech.js (additive): the rendered reply, so Echo can speak it and offer a per-reply speak/stop action.
+    try{window.dispatchEvent(Object.assign(new Event('echo-code-reply'),{detail:{text:result.answer||'',article,status:result.status,sessionId}}));}catch{}
     console.debug('[echo.code]',{schema_version:1,event:'coding_turn',outcome:result.status==='completed'?'completed':'returned'});
     return {sent:result.status==='completed',detail:result.status==='completed'?'Answer received.':'Turn '+result.status+'. No automatic retry was made.'};
    }catch(error){
