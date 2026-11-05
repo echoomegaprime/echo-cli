@@ -1,0 +1,52 @@
+/* In-chat browser panel (browser.js). Docks to the right of the conversation on desktop, splits the layout by
+   pushing <main>, collapses to a thin strip, and becomes a full-screen sheet on phones. Theme tokens from styles.css. */
+.browser-open main{margin-right:var(--browser-w,420px);transition:margin-right .18s ease}
+.browser-open.browser-collapsed main{margin-right:44px}
+.browser-panel{position:fixed;top:72px;right:0;bottom:0;width:var(--browser-w,420px);z-index:28;display:flex;flex-direction:column;
+ background:linear-gradient(160deg,#0c1518f7,#081012fa);border-left:1px solid var(--line);box-shadow:-18px 0 50px #0007;overflow:hidden}
+.browser-collapsed .browser-panel{width:44px}
+.browser-collapsed .browser-panel>*:not(.browser-header):not(.browser-resizer){display:none}
+.browser-collapsed .browser-header strong,.browser-collapsed .browser-header small,.browser-collapsed .browser-header .browser-spacer,.browser-collapsed .browser-header .browser-btn[aria-label="Close"]{display:none}
+.browser-resizer{position:absolute;left:0;top:0;bottom:0;width:6px;background:transparent;border:0;cursor:ew-resize;z-index:2}
+.browser-resizer:hover,.browser-resizer:focus-visible{background:#4dffc422}
+.browser-header{display:flex;align-items:center;gap:8px;padding:11px 12px;border-bottom:1px solid var(--line);flex-shrink:0}
+.browser-header strong{font-size:12px;letter-spacing:.04em;color:#c6f6e1}
+.browser-header small{font-size:10px;color:var(--muted)}
+.browser-spacer{flex:1}
+.browser-toolbar{display:flex;align-items:center;gap:6px;padding:9px 10px;border-bottom:1px solid var(--line);flex-shrink:0}
+.browser-btn{min-height:30px;padding:5px 8px;border:1px solid var(--line);border-radius:7px;background:#12211d;color:#bfe7d6;font-size:11px;display:inline-flex;align-items:center;justify-content:center}
+.browser-btn:hover{border-color:#467561;background:#1a322a}
+.browser-addr{flex:1;min-width:0;background:#0d1718;border:1px solid var(--line);border-radius:7px;color:var(--text);font-size:12px;padding:6px 9px;outline:none}
+.browser-addr:focus{border-color:#689e7f}
+.browser-tabs{display:flex;gap:4px;padding:8px 10px;overflow-x:auto;border-bottom:1px solid var(--line);flex-shrink:0}
+.browser-tab{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;font-size:11px;padding:6px 9px;border:1px solid var(--line);border-radius:7px;background:transparent;color:#9fc0b4}
+.browser-tab.active{color:#c6f6e1;background:#1c3b30;border-color:#467561}
+.browser-tab-x{color:#6f8b81;font-size:13px;line-height:1}
+.browser-tab-x:hover{color:#f0b3a8}
+.browser-view{flex:1;overflow:auto;padding:12px;min-height:0}
+.browser-shot{width:100%;height:auto;display:block;border:1px solid var(--line);border-radius:8px;cursor:crosshair}
+.browser-page-title{font-size:13px;color:#dcefe7;margin:0 0 4px}
+.browser-text pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;line-height:1.55;color:#cfe3db;max-height:40vh;overflow:auto;margin:8px 0}
+.browser-nodes{list-style:none;margin:6px 0;padding:0;display:flex;flex-direction:column;gap:4px}
+.browser-node{width:100%;text-align:left;font-size:11px;padding:7px 9px;border:1px solid var(--line);border-radius:6px;background:#10201c;color:#bfe7d6;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.browser-node:hover{border-color:#467561;background:#1a322a}
+.browser-fieldbar{display:flex;flex-wrap:wrap;gap:6px;padding:9px 10px;border-top:1px solid var(--line);flex-shrink:0}
+.browser-field-sel,.browser-field-val{flex:1;min-width:90px;background:#0d1718;border:1px solid var(--line);border-radius:7px;color:var(--text);font-size:12px;padding:6px 8px;outline:none}
+.browser-status{padding:8px 12px;margin:0;color:var(--mint);font-size:11px;min-height:18px;border-top:1px solid var(--line);overflow-wrap:anywhere}
+.browser-off-title{font-size:14px;color:#dcefe7;margin:0 0 8px}
+.browser-meta{color:var(--muted);font-size:11px;line-height:1.6;overflow-wrap:anywhere;margin:6px 0}
+/* Drive batch card (rendered into #chat-log by proposeBatch) */
+.browser-card .browser-batch{margin:8px 0;padding-left:20px;font-size:12px}
+.browser-card .browser-batch li{margin:4px 0;overflow-wrap:anywhere}
+.browser-batch-controls{display:flex;gap:10px;margin:8px 0}
+.browser-batch-result .browser-meta{margin:3px 0}
+.browser-error{color:#f0b3a8;font-size:12px;margin:6px 0}
+@media(max-width:800px){
+ .browser-open main,.browser-open.browser-collapsed main{margin-right:0}
+ .browser-panel{top:0;left:0;width:100%!important;z-index:50}
+ .browser-collapsed .browser-panel{width:100%!important;height:48px;bottom:auto}
+ .browser-resizer{display:none}
+ .browser-panel .browser-btn{min-height:40px}
+ /* The drive-card controls live in #chat-log, not the panel; keep them tappable (the global rule hides .quiet-button on phones). */
+ .browser-batch-controls .quiet-button{display:inline-flex;min-height:40px}
+}
