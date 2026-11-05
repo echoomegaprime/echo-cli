@@ -49,3 +49,13 @@ describe('Echo systems panel verdicts',()=>{
   for(const name of ['FORGE','CONTINUITY','CRYSTAL','ESH','PERSONALITY','NEXUS'])expect(v[name].state,name).toBe('offline');
  });
 });
+
+describe('index.html script wiring',()=>{
+ it('loads every module exactly once (a duplicated tag doubles the fleet bar, the model note and every listener)',()=>{
+  const html=readFileSync(join(__dirname,'..','ui','echo-prime','index.html'),'utf8');
+  const srcs=[...html.matchAll(/<script[^>]*\ssrc="([^"]+)"/g)].map(m=>m[1]);
+  const dups=srcs.filter((s,i)=>srcs.indexOf(s)!==i);
+  expect(dups).toEqual([]);
+  for(const required of ['fleet.js','models.js','workspace.js','chat.js','speech.js','build.js','brain.js','systems.js','nav.js'])expect(srcs,required).toContain(required);
+ });
+});
