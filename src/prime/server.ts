@@ -24,6 +24,7 @@ Object.assign(assets,{'/activity.js':'activity.js','/activity.css':'activity.css
 // The Echo orb mark answers the browser's default /favicon.ico probe as well as the linked /favicon.svg (both the same SVG).
 assets['/favicon.svg']='favicon.svg';assets['/favicon.ico']='favicon.svg';
 const assetTypes:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml'};
+Object.assign(assets,{'/brain.js':'brain.js','/brain.css':'brain.css'});
 async function body(req:IncomingMessage,maxBytes=131072){
  let size=0;const chunks:Buffer[]=[];
  for await(const part of req){size+=part.length;if(size>maxBytes)throw new Error('Request exceeds size limit');chunks.push(part);}
@@ -131,10 +132,13 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
      send(404,{error:'Unknown uploads or artifacts route'});return;
     }
     if(workspace)await workspace.requireOwner(req,abort.signal);
+    // Personality catalog loader bound to this owner request's Workspace cookie; the forge caches it 60 s. Absent without a Workspace (built-in catalog).
+    const personalities=workspace?()=>workspace.personalities(req,abort.signal):undefined;
     if(path==='/api/status'&&req.method==='GET'){send(200,await hub.status());return;}
     if(path==='/api/prime/models'&&req.method==='GET'){send(200,await hub.models());return;}
     // Live tools (owner-only like models): GET the report, POST a per-family or global toggle.
     if(path==='/api/prime/tools'&&req.method==='GET'){send(200,hub.liveTools());return;}
+    if(path==='/api/prime/personality'&&req.method==='GET'){send(200,await hub.personality(personalities));return;}
     if(path==='/api/prime/swarm/health'&&req.method==='GET'){send(200,await hub.swarmHealth(abort.signal));return;}
     const swarmRun=/^\/api\/prime\/swarm\/runs\/([^/]{1,80})$/.exec(path);
     if(swarmRun&&req.method==='GET'){send(200,await hub.swarmStatus(decodeURIComponent(swarmRun[1]),abort.signal));return;}
@@ -176,8 +180,11 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     if(path==='/api/search')send(200,{capabilities:await hub.refresh(String(data.query??''))});
     else if(path==='/api/prepare')send(200,await hub.prepare(data as unknown as PrimeRequest));
     else if(path==='/api/execute')send(200,await hub.execute(String(data.id??''),String(data.digest??'')));
-    else if(path==='/api/chat')send(200,await hub.chat(data,abort.signal));
+    else if(path==='/api/chat')send(200,await hub.chat(data,abort.signal,personalities?{personalities}:{}));
     else if(path==='/api/prime/tools')send(200,hub.liveToolsUpdate(data));
+    else if(path==='/api/chat/verify')send(200,await hub.verify(data,abort.signal));
+    else if(path==='/api/prime/personality')send(200,await hub.personalitySettings(data));
+    else if(path==='/api/prime/personality/select')send(200,await hub.personalitySelect(data,personalities));
     else if(path==='/api/prime/swarm/run')send(202,await hub.swarmRun(data,abort.signal));
     else if(path==='/api/prime/adk/runs')send(202,await hub.adkRun(data,abort.signal));
     else if(adkStop)send(200,await hub.adkStop(decodeURIComponent(adkStop[1]),abort.signal));

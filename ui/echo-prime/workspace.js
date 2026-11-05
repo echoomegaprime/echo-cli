@@ -166,6 +166,8 @@
   if(state.turn)return {handled:true,sent:false,detail:'Wait for this turn or select Stop.'};
   if(!transport.session?.authenticated||transport.session.user?.status!=='approved'){await open('account');return {handled:true,sent:false,detail:'Sign in to your approved private Workspace first.'};}
   if(!state.chat)await newChat();if(!state.chat)return {handled:true,sent:false,detail:'Conversation was not created.'};
+  // Personality Forge (brain.js): the owner's auto-selection picks this chat's profile through the Workspace's own personality_select before the turn. Never blocks the turn.
+  try{await window.EchoPrimeBrain?.beforeWorkspaceTurn?.({text,chatId:state.chat.id,api,messages:state.chat.messages});}catch(error){log('personality',error instanceof Error?error.message.slice(0,120):'skipped');}
   const epoch=state.epoch,chatId=state.chat.id,requestId=crypto.randomUUID(),controller=new AbortController();state.turn=controller;setBusy(true);line('user',text);
   activity?.clear(activityHost());let strip=null;
   const ensureStrip=()=>{if(!strip&&activity)strip=activity.start(activityHost(),{label:'Activity'});return strip;};

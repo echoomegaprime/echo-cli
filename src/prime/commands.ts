@@ -5,6 +5,7 @@ import {homedir} from 'node:os';
 import {join} from 'node:path';
 import {PrimeHub,type Capability,type Json} from './hub.js';
 import {SharedChat} from './chat.js';
+import {PersonalityForge} from './personality.js';
 import {Workspace} from '../code/workspace.js';
 import {SessionStore} from '../code/sessions.js';
 import {ModelRouter,parseModelsConfig} from '../code/model-factory.js';
@@ -52,7 +53,8 @@ export function registerPrimeCommands(code:Command){
    const toolsConfig=parseToolsConfig(config.tools);
    const tools=router&&toolsConfig.enabled?new ToolKit(toolsConfig,{sdk:broker?sdkToolInvoke(broker):undefined,mcp:connectionGateway({esh,sdk})},TOOL_MODULES):undefined;
    let chat:SharedChat|undefined;
-   if(router){const store=new SessionStore(opts.codeStateDir);chat=new SharedChat({workspace:new Workspace(opts.codeWorkspace,[store.directory]),store,models:router,tools});}
+   // Personality Forge settings (off switch, pinned profile) are an owner setting kept beside the code sessions.
+   if(router){const store=new SessionStore(opts.codeStateDir);chat=new SharedChat({workspace:new Workspace(opts.codeWorkspace,[store.directory]),store,models:router,tools,personality:new PersonalityForge({file:join(store.directory,'personality-settings.json')})});}
    const uploads=config.uploads!==undefined?new UploadStore(parseUploadsConfig(config.uploads)):undefined;
    // The reviewed `adk` section (loopback echo-adk-api, default 127.0.0.1:8378) is opt-in like `swarm`: absent = Agents view says it is off.
    const adk=config.adk!==undefined?new AdkClient(parseAdkConfig(config.adk)):undefined,bots=config.bots!==undefined?new BotsClient(parseBotsConfig(config.bots)):undefined;

@@ -2,8 +2,11 @@
  'use strict';
  // Model picker. The server decides what each provider id means; this file only offers the reviewed ids,
  // remembers the choice in this browser, and states plainly which model answered or why one is unavailable.
- const storageKey='echo-prime-model-v1',variantKey='echo-prime-argon-model-v1',ids=['qwen','claude','gpt','grok','argon','swarm'],COOLDOWN_MS=5000;
- const fallbackLabels={qwen:'Qwen (FORGE, 256K)',claude:'Claude (claude CLI)',gpt:'GPT (codex CLI)',grok:'Grok (grok CLI)',argon:'Argon (Gemini 4, agy CLI)',swarm:'Swarm (40-seat brain)'};
+ // 'auto' = "Auto (Echo decides)": offered, and the owner's default, only when the server reports models.auto enabled.
+ const storageKey='echo-prime-model-v1',variantKey='echo-prime-argon-model-v1',ids=['auto','qwen','claude','gpt','grok','argon','swarm'],COOLDOWN_MS=5000;
+ const fallbackLabels={auto:'Auto (Echo decides)',qwen:'Qwen (FORGE, 256K)',claude:'Claude (claude CLI)',gpt:'GPT (codex CLI)',grok:'Grok (grok CLI)',argon:'Argon (Gemini 4, agy CLI)',swarm:'Swarm (40-seat brain)'};
+ const autoEnabled=()=>!!(report&&report.auto&&report.auto.enabled===true);
+ const shortName=label=>String(label||'').replace(/\s*\(.*$/,'').trim()||String(label||'');
  // `gate` is '' when the status route may be read, else 'signin' or 'member': the honest picker state for someone the
  // owner-only route would refuse. `failedAt` starts the cool-down after a failed read.
  let swarmState=null,chosen=null,chosenVariant=null,report=null,failed=false,gate='',generation=0,failedAt=-Infinity;
@@ -23,13 +26,24 @@
  const mount=document.querySelector('.composer-toolbar')||document.querySelector('#composer');
  if(mount)mount.append(wrap);
  function entries(){
-  return ids.map(id=>{
+  return ids.filter(id=>id!=='auto'||autoEnabled()).map(id=>{
+   if(id==='auto')return {id,label:fallbackLabels.auto,available:true,reason:''};
    if(id==='swarm')return {id,label:fallbackLabels.swarm,available:!!swarmState&&swarmState.available===true,reason:swarmState&&typeof swarmState.reason==='string'?swarmState.reason:swarmState?'':'swarm status not loaded'};
    const row=report&&Array.isArray(report.providers)?report.providers.find(p=>p&&p.id===id):null;
    return {id,label:row&&typeof row.label==='string'?row.label:fallbackLabels[id],available:row?row.available!==false:true,reason:row&&typeof row.reason==='string'?row.reason:''};
   });
  }
- function current(){return chosen||(report&&ids.includes(report.default)?report.default:'qwen');}
+ function current(){
+  if(chosen&&(chosen!=='auto'||autoEnabled()))return chosen;
+  if(autoEnabled())return 'auto';
+  return report&&ids.includes(report.default)&&report.default!=='auto'?report.default:'qwen';
+ }
+ function autoNote(){
+  const chains=report&&report.auto&&report.auto.chains&&typeof report.auto.chains==='object'?report.auto.chains:null;
+  const first=task=>chains&&Array.isArray(chains[task])&&chains[task].length?shortName(fallbackLabels[chains[task][0]]||chains[task][0]):'';
+  const route=chains?' Coding → '+first('coding')+', documents/images → '+first('long_context')+', web research → '+first('research')+', everything else → '+first('general')+'.':'';
+  return fallbackLabels.auto+' selected. Echo classifies each message and picks an available provider before the call; the reply says which one answered.'+route+(report&&report.auto&&report.auto.declineTo==='qwen'?' A vendor that declines is re-run on Qwen and labelled.':'')+' An unavailable provider fails the turn.';
+ }
  function argonRow(){return report&&Array.isArray(report.providers)?report.providers.find(p=>p&&p.id==='argon')||null:null;}
  function variants(){
   const row=argonRow();
@@ -57,6 +71,7 @@
   else if(failed)note.textContent='Model status unavailable. Nothing will be sent to a model until the status route answers.';
   else if(!report)note.textContent='Checking models…';
   else if(!report.routing)note.textContent='Model choice is not enabled on this host.';
+  else if(selected==='auto')note.textContent=autoNote();
   else if(row&&!row.available)note.textContent=row.label+' is unavailable: '+(row.reason||'no reason given')+'. No other model will be used.';
   else if(selected==='argon'&&row&&!gemini.length){const why=argonRow()&&typeof argonRow().variantsReason==='string'?argonRow().variantsReason:'no Gemini models were listed';note.textContent=row.label+' selected. '+why+'; the agy default model is used. If it fails, the turn fails; no other model is used.';}
   else if(selected==='swarm')note.textContent=row.label+' selected. Runs can take many minutes and spend the shown budget; the worker has no cancel. If it fails the turn fails; no other model is used.';
@@ -123,12 +138,21 @@
   provider(){return report&&report.routing===true&&!failed?current():undefined;},
   /** The Gemini model id to send with an Argon turn (validated by the server against agy's list), else undefined. */
   model(){return report&&report.routing===true&&!failed?currentVariant():undefined;},
+  /** Per-reply note. Plain: "answered by <model>". Auto: "routed to Claude (coding) · answered by …". Decline re-route: "Claude declined; answered by Qwen (FORGE, 256K) · <model>". */
   describe(model){
    if(!model||typeof model!=='object')return '';
    const name=typeof model.label==='string'?model.label:String(model.id||'model');
-   if(model.answered===false)return 'no model answered ('+name+' returned no answer)';
-   if(typeof model.model==='string'&&model.model)return 'answered by '+model.model;
-   return 'model not reported by '+(model.id==='argon'?'agy':name)+' (requested: '+(typeof model.requested==='string'&&model.requested?model.requested:'CLI default')+')';
+   let body;
+   if(model.answered===false)body='no model answered ('+name+' returned no answer)';
+   else if(model.declinedBy)body='answered by '+name+(typeof model.model==='string'&&model.model?' · '+model.model:'');
+   else if(typeof model.model==='string'&&model.model)body='answered by '+model.model;
+   else body='model not reported by '+(model.id==='argon'?'agy':name)+' (requested: '+(typeof model.requested==='string'&&model.requested?model.requested:'CLI default')+')';
+   if(model.declinedBy)body=shortName(typeof model.declinedLabel==='string'&&model.declinedLabel?model.declinedLabel:fallbackLabels[model.declinedBy]||model.declinedBy)+' declined; '+body;
+   if(model.routed&&typeof model.routed==='object'&&typeof model.routed.task==='string'){
+    const target=model.declinedBy?(typeof model.declinedLabel==='string'&&model.declinedLabel?model.declinedLabel:model.declinedBy):name;
+    body='routed to '+shortName(target)+' ('+model.routed.task.replace(/_/g,' ')+') · '+body;
+   }
+   return body;
   },
  };
 })();

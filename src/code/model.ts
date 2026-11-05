@@ -76,6 +76,24 @@ export class LocalModel implements Model {
       throw new Error('Local model unavailable, timed out, or returned invalid JSON; no provider fallback was used');
     }
   }
+  /** One short classification call (auto model routing): the endpoint must answer with one of `labels`. Anything else throws; callers fall back to their rules. */
+  async classify(text: string, labels: readonly string[], signal?: AbortSignal): Promise<string> {
+    if (!labels.length || labels.some(l => typeof l !== 'string' || !/^[a-z_]{1,40}$/.test(l))) throw new Error('Invalid classification labels');
+    const sample = typeof text === 'string' ? text.slice(0, 4000) : '';
+    const response = await this.request('api/chat', { model: this.model, stream: false, think: false,
+      format: { type: 'object', required: ['label'], properties: { label: { type: 'string', enum: [...labels] } }, additionalProperties: false },
+      options: { temperature: 0, num_predict: 24, num_ctx: Math.min(this.numCtx, 8192) },
+      messages: [
+        { role: 'system', content: `Classify the user's request into exactly one label from: ${labels.join(', ')}. Reply with JSON {"label":"<label>"} and nothing else.` },
+        { role: 'user', content: sample },
+      ],
+    }, signal) as { message?: { content?: string }; done?: boolean };
+    if (!response.done || typeof response.message?.content !== 'string') throw new Error('Local model classification is incomplete');
+    let label: unknown;
+    try { label = (JSON.parse(response.message.content) as { label?: unknown }).label; } catch { throw new Error('Local model classification is not JSON'); }
+    if (typeof label !== 'string' || !labels.includes(label)) throw new Error('Local model classification is not one of the labels');
+    return label;
+  }
   async next(messages: Message[], signal?: AbortSignal): Promise<Action> {
     if (Buffer.byteLength(JSON.stringify(messages)) > 180000) throw new Error('Context limit reached; start a focused session');
     const response = await this.request('api/chat', { model: this.model, stream: false, think: false,

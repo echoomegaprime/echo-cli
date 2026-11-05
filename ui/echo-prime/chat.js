@@ -12,6 +12,7 @@
   article.className='chat-message '+role;label.textContent=role==='user'?'You':'ECHO Code';content.textContent=text;
   article.append(label,content);if(detail){const meta=document.createElement('small');meta.textContent=detail;article.append(meta);}
   $('#chat-log').append(article);$('#chat-log').hidden=false;$('#welcome').hidden=true;article.scrollIntoView({block:'nearest'});
+  return {article,content};
  }
  async function api(path,body,signal){
   const current=generation;let headers={};if(window.EchoPrimeWorkspace)headers=await window.EchoPrimeWorkspace.ownerHeaders();
@@ -45,9 +46,11 @@
     const completed=result.status==='completed';
     // The server guard (agent.ts) always returns a truthful summary when the model emits no final
     // action, so answer is non-empty; this fallback only covers a malformed/absent field.
-    line('assistant',(typeof result.answer==='string'&&result.answer.trim())?result.answer:'The turn produced no final answer; the steps above are saved. Nothing was retried.',
+    const rendered=line('assistant',(typeof result.answer==='string'&&result.answer.trim())?result.answer:'The turn produced no final answer; the steps above are saved. Nothing was retried.',
      (result.answerVerification==='unverified_model_text'?'Model text; verify claims. ':'Application result. ')+
      'Read-only · '+result.status+' · Session '+sessionId+(evidence?' · Sources: '+evidence:'')+(result.model&&window.EchoPrimeModels?' · '+window.EchoPrimeModels.describe(result.model):''));
+    // Brain surface (brain.js): personality tag, unverified-claim markers, Verify action. Optional; a failure never hides the reply.
+    try{window.EchoPrimeBrain?.decorate?.(rendered.article,result,rendered.content);}catch{}
     if(Array.isArray(result.autoagents)&&window.EchoPrimeAutoagents)window.EchoPrimeAutoagents.render(result);// "Echo built an agent and a bot for this" cards (autoagents.js)
     if(result.status==='completed'&&result.answer&&typeof window.EchoPrimeArtifacts?.register==='function'){
      const modelLabel=typeof result.model==='string'?result.model:result.model?.id||result.model?.model||'';
