@@ -187,7 +187,7 @@ export class PrimeHub {
    case 'close':return b.close(data.tab,signal);
    case 'navigate':return b.navigate(data.tab,data.url,signal);
    case 'back':case 'forward':case 'reload':return b.nav(data.tab,verb,signal);
-   case 'scroll':return b.scroll(data.tab,data.dy,signal);
+   case 'scroll':return b.scroll(data.tab,data.step??data.dy,signal);
    case 'click':return b.click(data.tab,{x:data.x,y:data.y,text:data.text},signal);
    case 'type':return b.type(data.tab,data.text,signal);
    case 'fill':return b.fill(data.tab,data.selector,data.value,signal);

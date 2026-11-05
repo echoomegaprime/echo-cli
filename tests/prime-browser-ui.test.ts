@@ -47,7 +47,8 @@ function wsStub(session: Session | null, enabled = true) {
   return ws;
 }
 
-type Opts = { session?: Session | null; enabled?: boolean; status?: unknown; act?: (body: Record<string, unknown>) => unknown };
+type Opts = { session?: Session | null; enabled?: boolean; status?: unknown; tabs?: unknown[]; delays?: { status?: number; snapshot?: number }; act?: (body: Record<string, unknown>) => unknown };
+const wait = (ms?: number) => (ms ? new Promise<void>(r => setTimeout(r, ms)) : Promise.resolve());
 const servers: { timers: Set<ReturnType<typeof setTimeout>> }[] = [];
 afterEach(() => { for (const s of servers) s.timers.forEach(clearTimeout); servers.length = 0; });
 
@@ -61,9 +62,9 @@ function setup(opts: Opts = {}) {
   const fetch = vi.fn(async (url: string, init?: { method?: string; body?: string }) => {
     const method = init?.method ?? 'GET', body = init?.body ? JSON.parse(init.body) : undefined;
     calls.push({ url, method, body });
-    if (url.endsWith('/status')) return { ok: true, json: async () => opts.status ?? { configured: true, available: true, relayUrl: 'http://127.0.0.1:9780' } };
-    if (url.endsWith('/tabs')) return { ok: true, json: async () => ({ tabs: [{ id: 9001, url: 'https://echoomegaprime.com/', title: 'ECHO', active: true }] }) };
-    if (url.includes('/snapshot/')) return { ok: true, json: async () => ({ tab: 9001, url: 'https://echoomegaprime.com/', title: 'ECHO', text: 'hello', nodes: [] }) };
+    if (url.endsWith('/status')) { await wait(opts.delays?.status); return { ok: true, json: async () => opts.status ?? { configured: true, available: true, relayUrl: 'http://127.0.0.1:9780' } }; }
+    if (url.endsWith('/tabs')) return { ok: true, json: async () => ({ tabs: opts.tabs ?? [{ id: 9001, url: 'https://echoomegaprime.com/', title: 'ECHO', active: true }] }) };
+    if (url.includes('/snapshot/')) { await wait(opts.delays?.snapshot); const tab = Number(url.split('/snapshot/')[1].split('?')[0]); return { ok: true, json: async () => ({ tab, url: 'https://echoomegaprime.com/', title: 'ECHO', text: 'hello', nodes: [] }) }; }
     if (url.endsWith('/act')) return { ok: true, json: async () => (opts.act ? opts.act(body) : { id: 9001, url: body?.url }) };
     return { ok: false, status: 404, json: async () => ({ error: 'nope' }) };
   });
@@ -157,9 +158,11 @@ describe('browser.js — "Let Echo drive" approval gate', () => {
   it('Skip runs nothing at all', () => {
     const { mod, fetch } = setup({ session: owner });
     const card = mod.proposeBatch([{ verb: 'open', value: 'https://example.com' }])!;
-    const skip = find(card, n => n.textContent === 'Skip')!;
+    const skip = find(card, n => n.tag === 'button' && allText(n).includes('Skip'))!; // the button itself, not its text node
+    expect(skip).toBeTruthy();
     skip.fire('click');
     expect(fetch).not.toHaveBeenCalled();
+    expect(allText(card)).toMatch(/Skipped\. Nothing was run\./);
   });
 });
 
@@ -178,5 +181,86 @@ describe('browser.js — /browse chat command', () => {
     const result = await (s.window.EchoPrimeChat as { send(t: string): Promise<{ detail: string }> }).send('just a question');
     expect(result).toMatchObject({ detail: 'chat' });
     expect(s.chatSend).toHaveBeenCalledWith('just a question');
+  });
+});
+
+describe('browser.js — fixes from the 2026-11-04 vendor (GPT) review', () => {
+  type S = ReturnType<typeof setup>;
+  const accountChanged = (s: S) => { const call = (s.window.addEventListener as ReturnType<typeof vi.fn>).mock.calls.find(c => c[0] === 'echo-account-changed'); (call![1] as () => void)(); };
+  const scan = (s: S, host: El) => (s.mod as unknown as { scan(r: El): void }).scan(host);
+  const article = (text: string) => { const a = element('article'); a.className = 'chat-message assistant'; a.textContent = text; return a; };
+  const cards = (host: El) => host.children.filter(n => n.classes.has('browser-card'));
+  const tick = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+  it('a batch follows the tab its own open created: later steps target the new id, not the proposal-time tab', async () => {
+    const s = setup({ session: owner, act: body => body.verb === 'open' ? { id: 777, url: body.url } : { ok: true } });
+    s.mod.open(); await tick(5);                                               // active tab is 9001 here
+    const card = s.mod.proposeBatch([{ verb: 'open', value: 'https://example.com' }, { verb: 'click', value: 'Go' }, { verb: 'read', value: '#x' }])!;
+    expect(allText(card)).toContain('https://example.com');                   // the full action is shown before approval
+    find(card, n => n.attrs['data-browser-approve'] === '1')!.fire('click');
+    await tick(20);
+    const acts = s.calls.filter(c => c.url.endsWith('/act')).map(c => c.body!);
+    expect(acts[0]).toMatchObject({ verb: 'open', url: 'https://example.com' });
+    expect(acts[1]).toMatchObject({ verb: 'click', tab: 777, text: 'Go' });
+    expect(acts[2]).toMatchObject({ verb: 'read', tab: 777, selector: '#x' });
+  });
+  it('an account change mid-batch aborts the remaining actions', async () => {
+    let resolveOpen!: (v: unknown) => void;
+    const s = setup({ session: owner, act: body => body.verb === 'open' ? new Promise(r => { resolveOpen = r; }) : { ok: true } });
+    const card = s.mod.proposeBatch([{ verb: 'open', value: 'https://example.com' }, { verb: 'click', value: 'Go' }])!;
+    find(card, n => n.attrs['data-browser-approve'] === '1')!.fire('click');
+    await tick(10);
+    accountChanged(s);                                                          // the owner signs out while `open` is in flight
+    resolveOpen({ id: 777, url: 'https://example.com' });
+    await tick(10);
+    expect(s.calls.filter(c => c.url.endsWith('/act')).map(c => c.body!.verb)).toEqual(['open']);
+    expect(allText(card)).toMatch(/account changed/);
+  });
+  it('a snapshot that arrives after the owner switched tabs is discarded, never rendered', async () => {
+    const s = setup({ session: owner, tabs: [{ id: 1, url: 'https://a.example/', title: 'A', active: true }, { id: 2, url: 'https://b.example/', title: 'B', active: false }], delays: { snapshot: 30 } });
+    s.mod.open(); await tick(10);                                              // the tab-1 snapshot is in flight
+    (s.mod.state as { activeTab: number | null }).activeTab = 2;               // the owner switches to tab 2
+    await tick(45);
+    expect((s.mod.state as { current: unknown }).current).toBeNull();          // the stale tab-1 frame was dropped
+  });
+  it('closing the panel during activation stops it: a late status answer never fetches tabs or starts polling', async () => {
+    const s = setup({ session: owner, delays: { status: 30 } });
+    s.mod.open(); await tick(5);
+    s.mod.close();
+    await tick(60);
+    expect(s.calls.some(c => c.url.endsWith('/tabs'))).toBe(false);
+    expect(s.calls.some(c => c.url.includes('/snapshot/'))).toBe(false);
+  });
+  it('an account change clears every account-derived field: frame, address bar, selector and value inputs', async () => {
+    const s = setup({ session: owner });
+    s.mod.open(); await tick(10);
+    const addr = find(s.body, n => n.className === 'browser-addr')!, sel = find(s.body, n => n.className === 'browser-field-sel')!, val = find(s.body, n => n.className === 'browser-field-val')!;
+    expect(addr.value).toBe('https://echoomegaprime.com/');
+    sel.value = '#card'; val.value = '4111';
+    accountChanged(s);
+    expect(addr.value).toBe(''); expect(sel.value).toBe(''); expect(val.value).toBe('');
+    expect(find(s.body, n => n.className === 'browser-view')!.children).toHaveLength(0);
+  });
+  it('a streaming reply is not marked scanned until its closing fence arrives, then is proposed exactly once', () => {
+    const s = setup({ session: owner }); const host = s.nodes['#chat-log'];
+    const a = article('Plan:\n```browser\nopen https://example.com\n'); host.append(a);
+    scan(s, host);
+    expect(a.dataset.browserScanned).toBeUndefined();
+    expect(cards(host)).toHaveLength(0);
+    a.textContent += 'click Go\n```\nDone.';
+    scan(s, host); scan(s, host);
+    expect(cards(host)).toHaveLength(1);
+  });
+  it('a chat redraw that drops a pending card re-proposes it; a block the owner decided on is never re-proposed', () => {
+    const s = setup({ session: owner }); const host = s.nodes['#chat-log'];
+    const text = 'Try:\n```browser\nopen https://example.com\n```';
+    host.append(article(text)); scan(s, host);
+    expect(cards(host)).toHaveLength(1);
+    host.replaceChildren(article(text)); scan(s, host);                        // workspace renderChat(): the card is gone
+    expect(cards(host)).toHaveLength(1);                                       // pending → shown again
+    find(cards(host)[0], n => n.tag === 'button' && allText(n).includes('Skip'))!.fire('click');
+    host.replaceChildren(article(text)); scan(s, host);
+    expect(cards(host)).toHaveLength(0);                                       // decided → stays decided
+    expect(s.fetch).not.toHaveBeenCalled();
   });
 });

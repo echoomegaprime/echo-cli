@@ -19,7 +19,7 @@ type Handler = (type: string, body: Record<string, unknown>, res: ServerResponse
 async function stopLast() { const s = servers.pop()!; s.closeAllConnections(); await new Promise<void>(r => s.close(() => r())); }
 /** A stand-in for the ShadowGlass relay: records every /rpc, and either runs a custom handler or answers like the
  *  documented routes. Never a real Chrome or extension. `GET /status` reports the extension connected by default. */
-async function fakeRelay(handler?: Handler, opts: { extConnected?: boolean } = {}) {
+async function fakeRelay(handler?: Handler, opts: { extConnected?: boolean; focus?: 'ok' | 'secret' | 'none' } = {}) {
   const seen: Seen[] = [];
   const server = createServer((req: IncomingMessage, res) => {
     const chunks: Buffer[] = [];
@@ -43,7 +43,7 @@ async function fakeRelay(handler?: Handler, opts: { extConnected?: boolean } = {
         case 'tabs_new': return ok({ id: 9001, url: parsed.url });
         case 'tabs_close': return ok({ closed: parsed.id });
         case 'navigate': return ok({ tabId: parsed.tabId, url: parsed.url });
-        case 'cdp_evaluate': return ok(type && String(parsed.expression).startsWith('JSON.stringify') ? '[951,937,2,0,0,1349]' : undefined);
+        case 'cdp_evaluate': { const expr = String(parsed.expression); return ok(expr.startsWith('JSON.stringify') ? '[951,937,2,0,0,1349]' : expr.includes('document.activeElement') ? (opts.focus ?? 'ok') : undefined); }
         case 'cdp_click_at': return ok({ x: parsed.x, y: parsed.y });
         case 'click_text': return ok({ clicked: parsed.text });
         case 'cdp_type': return ok({ typed: true });
@@ -111,16 +111,18 @@ describe('BrowserClient against a fake relay — verb → RPC allowlist', () => 
   it('implements back/forward/reload/scroll via FIXED cdp_evaluate expressions that never contain caller text', async () => {
     const r = await fakeRelay(); const c = clientFor(r.url);
     await c.nav(5, 'back'); await c.nav(5, 'forward'); await c.nav(5, 'reload');
-    await c.scroll(5, 99999999); await c.scroll(5, -300.9);
+    await c.scroll(5, 99999999); await c.scroll(5, -300.9); await c.scroll(5, 'pageup'); await c.scroll(5, 'down');
     const exprs = r.seen.filter(s => s.type === 'cdp_evaluate').map(s => bodyOf(s).expression as string);
-    expect(exprs.slice(0, 3)).toEqual(['history.back()', 'history.forward()', 'location.reload()']);
-    expect(exprs[3]).toBe('window.scrollBy(0,100000)');   // clamped to MAX_SCROLL
-    expect(exprs[4]).toBe('window.scrollBy(0,-300)');      // truncated integer
-    for (const e of exprs) expect(e).toMatch(/^(?:history\.(?:back|forward)\(\)|location\.reload\(\)|window\.scrollBy\(0,-?\d+\))$/);
+    expect(exprs).toEqual(['history.back()', 'history.forward()', 'location.reload()',
+      'window.scrollBy(0,window.innerHeight)',   // a big positive dy selects the pagedown literal
+      'window.scrollBy(0,-600)',                  // a small negative dy selects the up literal
+      'window.scrollBy(0,-window.innerHeight)', 'window.scrollBy(0,600)']);
+    const LITERALS = new Set(['history.back()', 'history.forward()', 'location.reload()', 'window.scrollBy(0,600)', 'window.scrollBy(0,-600)', 'window.scrollBy(0,window.innerHeight)', 'window.scrollBy(0,-window.innerHeight)']);
+    for (const e of exprs) expect(LITERALS.has(e)).toBe(true); // every expression is a server literal: no digits or text from the caller
   });
   it('refuses a scroll that tries to smuggle code through the distance argument', async () => {
     const r = await fakeRelay(); const c = clientFor(r.url);
-    for (const bad of ['1);alert(1)//', NaN, Infinity, '5', {}]) await expect(c.scroll(5, bad as unknown)).rejects.toMatchObject({ status: 400 });
+    for (const bad of ['1);alert(1)//', NaN, Infinity, '5', {}, 0, 'pagedown ', 'DOWN', 'constructor']) await expect(c.scroll(5, bad as unknown)).rejects.toMatchObject({ status: 400 });
     expect(r.seen.filter(s => s.type === 'cdp_evaluate')).toHaveLength(0);
   });
 });
@@ -256,5 +258,39 @@ describe('Prime browser routes', () => {
       expect((await p.post('/api/prime/browser/act', { verb: 'open', url: 'file:///etc/passwd' })).status).toBe(400);
       expect(r.seen.filter(s => s.type === 'tabs_new')).toHaveLength(0);
     } finally { await p.close(); }
+  });
+});
+
+describe('BrowserClient — fixes from the 2026-11-04 vendor (GPT) review', () => {
+  it('caps owner text at 64 KiB of UTF-8 bytes, not UTF-16 units', async () => {
+    const r = await fakeRelay(); const c = clientFor(r.url);
+    await expect(c.type(5, 'é'.repeat(40000))).rejects.toMatchObject({ status: 400, message: /64 KiB/ }); // 40 000 chars = 80 000 bytes
+    expect(r.seen).toHaveLength(0);
+    await c.type(5, 'é'.repeat(30000)); // 60 000 bytes: allowed
+    expect(r.seen.at(-1)!.type).toBe('cdp_type');
+  });
+  it('redacts the navigation URL it returns (a ?password= query never echoes back)', async () => {
+    const r = await fakeRelay(); const c = clientFor(r.url);
+    const out = await c.navigate(5, 'https://h.example/login?password=abc123secret&x=1');
+    expect(out.url).not.toContain('abc123secret'); expect(out.url).toContain('[REDACTED]');
+  });
+  it('redacts before truncating, so a private key that would be cut at the 20000-char boundary is still redacted', () => {
+    const pem = '-----BEGIN PRIVATE KEY-----\n' + 'A'.repeat(25000) + '\n-----END PRIVATE KEY-----';
+    const out = sanitize({ k: 'prefix ' + pem }) as { k: string };
+    expect(out.k).not.toContain('AAAAAAAAAA'); expect(out.k).toContain('[REDACTED PRIVATE KEY]');
+  });
+  it('refuses raw typing when the focused field is credential-bearing or nothing is focused (probe first, never type)', async () => {
+    const secret = await fakeRelay(undefined, { focus: 'secret' });
+    await expect(clientFor(secret.url).type(5, 'hunter2')).rejects.toMatchObject({ status: 400, message: /credential-bearing/ });
+    expect(secret.seen.map(s => s.type)).toEqual(['cdp_evaluate']);
+    expect(secret.seen[0].body).not.toContain('hunter2');                 // the text never left Prime
+    const none = await fakeRelay(undefined, { focus: 'none' });
+    await expect(clientFor(none.url).type(5, 'hi')).rejects.toMatchObject({ status: 400, message: /No editable field/ });
+    expect(none.seen.some(s => s.type === 'cdp_type')).toBe(false);
+  });
+  it('bounds the relay /status body like every other read', async () => {
+    const big = createServer((_req, res) => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ ok: true, ext_connected: true, pad: 'x'.repeat(70000) })); });
+    await new Promise<void>(r => big.listen(0, '127.0.0.1', r)); servers.push(big);
+    await expect(clientFor(`http://127.0.0.1:${(big.address() as AddressInfo).port}`).health()).rejects.toMatchObject({ status: 502, message: /KiB limit/ });
   });
 });

@@ -93,11 +93,11 @@ Add a reviewed `browser` section to the Prime config passed to `code prime --con
 | `close(tab)` | `tabs_close {id}` | |
 | `navigate(tab,url)` | `navigate {tabId,url}` | content-script nav (no debugger infobar); http/https only |
 | `nav(tab,back\|forward\|reload)` | `cdp_evaluate` | **fixed** expressions `history.back()` / `history.forward()` / `location.reload()` — never built from caller input |
-| `scroll(tab,dy)` | `cdp_evaluate` | `window.scrollBy(0,<int>)`; `dy` clamped to ±100000 and `Math.trunc`'d — a Number, so the expression is digits only |
+| `scroll(tab,step)` | `cdp_evaluate` | **enum of four literals**: `up`/`down` → `window.scrollBy(0,∓600)`, `pageup`/`pagedown` → `window.scrollBy(0,∓window.innerHeight)`. A numeric `dy` is accepted only for its sign and size class; the caller contributes no digits or text to what runs |
 | `snapshot(tab,withShot)` | `page_content` (+ `cdp_screenshot` + `cdp_evaluate` metrics when `withShot`) | text + a11y nodes always; screenshot + viewport metrics only on request |
 | `click(tab,{x,y})` | `cdp_click_at {tabId,x,y}` | viewport coords (UI scale-corrects image px → viewport px with the snapshot metrics) |
 | `click(tab,{text})` | `click_text {tabId,text}` | click by accessible name |
-| `type(tab,text)` | `cdp_type {tabId,text}` | raw keystrokes into the focused element |
+| `type(tab,text)` | `cdp_evaluate` (fixed focus probe) then `cdp_type {tabId,text}` | raw keystrokes into the focused element. `cdp_type` has no secret check of its own, so Prime first runs a **fixed** CDP probe that classifies `document.activeElement` (password type, or name/id/autocomplete/aria-label/placeholder matching the extension's secret heuristic) and refuses with 400 on `secret` or when nothing editable is focused — the text never leaves Prime in that case |
 | `fill(tab,selector,value)` | `fill {tabId,selector,text}` | content-script; the extension **refuses secret fields** |
 | `read(tab,selector)` | `read_field {tabId,selector}` | non-secret value only |
 
@@ -152,9 +152,17 @@ posted back as a system card; a failure stops the remaining actions. Supported d
 
 The `/browse <url>` chat command opens the panel and the URL directly (owner action, not an Echo-driven batch).
 
-> Note: the "already run" set is in-memory and empty on page load, so reopening a saved conversation that still
-> contains a ```` ```browser ```` block re-proposes it as a fresh Approve/Skip card. This is harmless (it still
-> requires an explicit Approve and runs nothing on its own) but can surprise.
+Batch semantics (tightened after the 2026-11-04 vendor review): the card shows **every action in full** (what is
+shown is exactly what runs); the batch runs against a **batch-local tab that follows each successful `open`** (so
+`open → click → read` targets the tab that `open` created, not the proposal-time tab); it is **pinned to the account
+epoch** it was approved under (an `echo-account-changed` mid-batch aborts the remaining steps); and it stops on the
+first failure. A streaming reply is left unscanned until its closing fence arrives. Within a session a block the owner
+already approved or skipped is never re-proposed, while a *pending* card that a chat redraw (`renderChat()` →
+`replaceChildren`) removed is re-proposed so the owner can still decide.
+
+> Note: that bookkeeping is in-memory and empty on page load, so reopening a saved conversation that still contains a
+> ```` ```browser ```` block re-proposes it as a fresh Approve/Skip card. Harmless (it still requires an explicit
+> Approve and runs nothing on its own) but can surprise.
 
 ## 7. Security boundary & known exposure
 
@@ -173,13 +181,32 @@ The `/browse <url>` chat command opens the panel and the URL directly (owner act
   `X-SG-Token` on `/rpc`, not just on `/vault`+`/brain`), or switch the transport to a `-R /path.sock`
   streamlocal forward so only the socket-holder can reach it.
 
-## 8. Tests
+## 8. Tests and provenance
 
-- `tests/prime-browser.test.ts` (20) — config, URL-scheme allowlist, verb→RPC mapping, fixed nav/scroll
-  expressions (no caller text), tab-id validation, text/screenshot caps, redaction, error mapping,
-  ext-offline/timeout/abort, off-state, and the owner-only server routes + assets.
-- `tests/prime-browser-ui.test.ts` (10) — fenced-block parsing, admission, no-fetch-while-anonymous, panel
-  open/close + poll pause, the Approve/Skip gate (nothing runs until Approve), and the `/browse` intercept.
+- `tests/prime-browser.test.ts` (25) — config, URL-scheme allowlist, verb→RPC mapping, the fixed nav/scroll
+  literal set (no caller text), tab-id validation, UTF-8-byte text cap, screenshot cap, redaction (incl.
+  redact-before-truncate on a cut PEM, and the returned navigation URL), the focused-field secret probe before
+  `type`, bounded `/status` read, error mapping, ext-offline/timeout/abort, off-state, and the owner-only server
+  routes + assets.
+- `tests/prime-browser-ui.test.ts` (17) — fenced-block parsing, admission, no-fetch-while-anonymous, panel
+  open/close + poll pause, the Approve/Skip gate (nothing runs until Approve; Skip runs nothing), the `/browse`
+  intercept, and the review fixes: batch-local tab following `open`, account-change abort mid-batch, stale-snapshot
+  discard on tab switch, close-during-activation, full field clearing on account change, streaming-fence scan,
+  and redraw re-proposal vs. decided blocks.
+- `tests/prime-browser-ui-extra.test.ts` (7) — collapse/paused, view toggle → `?shot=1`, node button → `click`
+  act, address bar navigate-vs-open, Send to chat, account-change reset, `parseActions` cap/lower-casing.
 
-Verified only against a stand-in relay and a fake DOM. The real extension relay was reached once live to confirm
-`ping`, `tabs_list`, `page_content`, `cdp_evaluate`, and that `cdp_screenshot` times out.
+**Who produced what** (Commander directive 2026-11-04 20:37, via `scripts/dev/wrap.sh`): `browser.ts`,
+`browser.js`, `browser.css`, the hub/server/commands wiring, the first two test files and this document were
+authored by Claude (the directive landed mid-build). `tests/prime-browser-ui-extra.test.ts` was **first-drafted
+by Gemini** (`wrap.sh build gemini`, agy `gemini-4-argon-medium`) and reviewed + independently re-run by Claude.
+A **read-only GPT review** (`wrap.sh draft gpt`, Codex) produced the findings fixed in the second commit (batch
+tab-following, stale frames, streaming fences, redraw re-proposal, owner-proof propagation + `ready` await,
+account-epoch abort, `type` secret probe, redact-before-truncate, UTF-8 byte cap, bounded `/status`, scroll
+literal enum, lifecycle-guarded activation, full reset, viewport-clamped width, mobile collapsed header);
+Claude triaged and implemented every fix and wrote the covering tests. A Grok read-only review was also requested
+(`wrap.sh draft grok`); see the build report for its outcome.
+
+Verified only against a stand-in relay and a fake DOM. The real extension relay was reached live to confirm
+`ping`, `tabs_list`, `page_content`, `cdp_evaluate`, and that `cdp_screenshot` times out on both an inactive and
+the active tab.

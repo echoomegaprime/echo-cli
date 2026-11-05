@@ -44,7 +44,8 @@
 @media(max-width:800px){
  .browser-open main,.browser-open.browser-collapsed main{margin-right:0}
  .browser-panel{top:0;left:0;width:100%!important;z-index:50}
- .browser-collapsed .browser-panel{width:100%!important;height:48px;bottom:auto}
+ .browser-collapsed .browser-panel{width:100%!important;height:auto;bottom:auto} /* auto: a fixed 48px clipped the 40px expand button + header padding */
+ .browser-batch-value{overflow-wrap:anywhere;white-space:pre-wrap}
  .browser-resizer{display:none}
  .browser-panel .browser-btn{min-height:40px}
  /* The drive-card controls live in #chat-log, not the panel; keep them tappable (the global rule hides .quiet-button on phones). */
