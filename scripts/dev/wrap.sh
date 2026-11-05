@@ -19,7 +19,8 @@ case "$PROVIDER" in
   gpt)
     SANDBOX=$([ "$MODE" = build ] && echo workspace-write || echo read-only)
     MODEL="${WRAP_GPT_MODEL:-}"; MARGS=(); [ -n "$MODEL" ] && MARGS=(-m "$MODEL")
-    codex exec -C "$WT" -s "$SANDBOX" --skip-git-repo-check "${MARGS[@]}" "$(cat "$PROMPT")" >> "$OUT" 2>&1; RC=$? ;;
+    # stdin must be closed: codex exec otherwise waits for "additional input from stdin" forever under a non-TTY.
+    codex exec -C "$WT" -s "$SANDBOX" --skip-git-repo-check "${MARGS[@]}" "$(cat "$PROMPT")" < /dev/null >> "$OUT" 2>&1; RC=$? ;;
   grok)
     TOOLS=(); [ "$MODE" = draft ] && TOOLS=(--tools "")
     MODEL="${WRAP_GROK_MODEL:-}"; MARGS=(); [ -n "$MODEL" ] && MARGS=(-m "$MODEL")
