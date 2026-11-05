@@ -345,7 +345,7 @@ describe('collapse, keyboard and aria',()=>{
 describe('shipped markup and delivery',()=>{
  it('index.html keeps every hook nav.js adopts and loads nav.js after the other sidebar modules',()=>{
   const html=readFileSync(new URL('../ui/echo-prime/index.html',import.meta.url),'utf8');
-  for(const hook of ['id="prime-nav"','id="workspace-navigation"','id="open-steward"','id="workspace-open-esh"','id="workspace-account"','id="open-appearance"','id="workspace-open-plugins"','data-view="conversation"','data-view="studio"','data-view="systems"','data-workspace-view="projects"','data-workspace-view="library"','data-workspace-view="operations"','data-workspace-view="voice"','data-workspace-view="account"','class="sidebar-bottom"','id="scrim"'])expect(html).toContain(hook);
+  for(const hook of ['id="prime-nav"','id="workspace-navigation"','id="open-steward"','id="workspace-open-esh"','id="workspace-account"','id="open-appearance"','id="workspace-open-plugins"','data-view="conversation"','data-view="studio"','data-view="systems"','data-prime-view="projects"','data-prime-view="library"','data-prime-view="sdk"','data-workspace-view="voice"','data-workspace-view="account"','class="sidebar-bottom"','id="scrim"'])expect(html).toContain(hook);
   expect(html).toContain('href="nav.css"');expect(html).toContain('<script src="nav.js"></script>');
   expect(html.indexOf('src="logs.js"')).toBeLessThan(html.indexOf('src="nav.js"'));
   expect(html).toContain('id="i-echo-mark"');expect(html).toContain('class="wordmark-text" data-text="ECHO PRIME"');

@@ -19,12 +19,12 @@
  const NAV_GROUPS=[
   {id:'talk',label:'Talk',items:[
    {id:'conversation',label:'Conversation',icon:'i-chat',match:{view:'conversation'}},
-   {id:'projects',label:'Projects',icon:'i-folder',workspace:true,match:{workspaceView:'projects'}},
-   {id:'library',label:'Library',icon:'i-library',workspace:true,match:{workspaceView:'library',label:'Library'}},
+   {id:'projects',label:'Projects',icon:'i-folder',workspace:true,match:{workspaceView:'projects',primeView:'projects'}},
+   {id:'library',label:'Library',icon:'i-library',workspace:true,match:{workspaceView:'library',primeView:'library',label:'Library'}},
   ]},
   {id:'create',label:'Create',items:[
    {id:'studio',label:'Creative studio',icon:'i-spark',match:{view:'studio'}},
-   {id:'code-review',label:'Code review',icon:'i-code',workspace:true,match:{workspaceView:'library',label:'Code review'}},
+   {id:'code-review',label:'Code review',icon:'i-code',workspace:true,match:{workspaceView:'library',primeView:'review',label:'Code review'}},
   ]},
   {id:'agents',label:'Agents',items:[
    {id:'agents',label:'Agents (Echo ADK)',icon:'i-agents',match:{id:['open-agents','agents-open'],view:'agents',label:/^Agents\b/i}},
@@ -41,8 +41,8 @@
    {id:'browser',label:'Browser',icon:'i-globe',match:{id:['open-browser','browser-open'],view:'browser',label:/^Browser\b/i}},
   ]},
   {id:'operate',label:'Operate',items:[
-   {id:'sdk',label:'SDK',icon:'i-sdk',workspace:true,ownerOnly:true,match:{workspaceView:'operations',label:'SDK'}},
-   {id:'vault',label:'Vault',icon:'i-lock',workspace:true,ownerOnly:true,match:{workspaceView:'operations',label:'Vault'}},
+   {id:'sdk',label:'SDK',icon:'i-sdk',workspace:true,ownerOnly:true,match:{workspaceView:'operations',primeView:'sdk',label:'SDK'}},
+   {id:'vault',label:'Vault',icon:'i-lock',workspace:true,ownerOnly:true,match:{workspaceView:'operations',primeView:'vault',label:'Vault'}},
    {id:'logs',label:'Logs & debugging',icon:'i-logs',workspace:true,ownerOnly:true,match:{id:'logs-open',view:'logs'}},
    {id:'journal',label:'Journal & ECF receipts',icon:'i-memory',match:{id:'journal-status'}},
   ]},
@@ -115,6 +115,7 @@
   const m=item.match||{},id=attr(node,'id')||node.id||'',text=labelOf(node);
   const ids=[].concat(m.id||[]);
   if(id&&ids.includes(id))return 4;
+  if(m.primeView&&data(node,'primeView')===m.primeView)return 3;
   if(m.workspaceView&&data(node,'workspaceView')===m.workspaceView){if(m.label===undefined)return 2;return labelMatches(m.label,text)?3:0;}
   if(m.view&&data(node,'view')===m.view)return 3;
   if(m.label!==undefined&&!m.workspaceView&&labelMatches(m.label,text))return 1;

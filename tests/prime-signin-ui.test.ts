@@ -85,7 +85,7 @@ describe('anonymous sign-in card',()=>{
   const brand=descendants(card).find(n=>n.className==='signin-brand')!;expect(brand.children[0].tagName).toBe('SVG');expect(brand.children[0].children[0].attributes.href).toBe('#i-echo-mark');
   expect(descendants(card).find(n=>n.className==='wordmark-text')!.attributes['data-text']).toBe('ECHO PRIME');
   const link=descendants(card).find(n=>n.tagName==='A')!;expect(link.attributes.href).toBe('/privacy.html');expect(text(link)).toBe('Privacy');
-  for(const label of ['Sign in','Create account','Request password recovery'])expect(h.find(label),label).toBeDefined();
+  for(const label of ['Sign in','Create account','Forgot password?'])expect(h.find(label),label).toBeDefined();
   expect(descendants(card).filter(n=>n.attributes.type==='password')).toHaveLength(1);
   expect(h.content.children).toHaveLength(1);// nothing but the card for an anonymous visitor
  });
