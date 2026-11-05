@@ -394,19 +394,27 @@ export function videoInstruction(plan:VideoPlan):{instruction:string;shortened:s
  tail.push(plan.stitch.capability?'Stitch: join the shots in order with '+plan.stitch.capability+'.':'Stitch: no stitch capability is granted. Do not join files and do not claim a joined video.');
  tail.push('QC: check every shot produced output, the duration ('+plan.duration_s+' s total) and the resolution; list anything missing.',
   'Deliver: a final answer listing, in shot order, each shot id with its state (done, still rendering or failed), its job id and output path (or the clip id used as-is), each narration audio reference, and every failed step with its capability and reason.');
+ // `budget` is the per-shot character allowance shared by the prompt and the voice-over (null = no shortening).
+ // A shot with a voice-over gives it at most 40% of the allowance; each field keeps at least 40 characters.
+ const clip=(value:string,max:number)=>value.length>max?value.slice(0,Math.max(40,max))+'…':value;
  const lines=(budget:number|null)=>plan.shots.map(s=>{
-  const prompt=s.prompt.replace(/\s+/g,' '),cut=budget!==null&&prompt.length>budget?prompt.slice(0,Math.max(40,budget))+'…':prompt;
+  const prompt=s.prompt.replace(/\s+/g,' '),voice=(s.voiceover??'').replace(/\s+/g,' ');
+  const voiceBudget=budget===null||!voice?null:Math.max(40,Math.floor(budget*0.4));
+  const promptBudget=budget===null?null:Math.max(40,budget-(voiceBudget===null?0:Math.min(voice.length,voiceBudget)));
+  const cutPrompt=promptBudget===null?prompt:clip(prompt,promptBudget),cutVoice=voiceBudget===null?voice:clip(voice,voiceBudget);
   const how=s.generation.mode==='clip'?'use clip '+s.generation.clip+' as-is (no generation)':(s.generation.capability??'(no capability)')+' ('+s.generation.mode+'; '+paramsFor(s,plan)+')';
-  return s.id+' ('+s.duration_s+' s, '+s.frames+' frames, camera '+s.camera+', motion '+s.motion+'): '+how+'. Inputs: '+(s.inputs.join(', ')||'(none)')+'. Prompt: '+cut+(s.voiceover?' Voice-over: '+s.voiceover.replace(/\s+/g,' '):'');
+  return s.id+' ('+s.duration_s+' s, '+s.frames+' frames, camera '+s.camera+', motion '+s.motion+'): '+how+'. Inputs: '+(s.inputs.join(', ')||'(none)')+'. Prompt: '+cutPrompt+(cutVoice?' Voice-over: '+cutVoice:'');
  });
  const fixed=[...head,'Shots:',...tail].join('\n').length+plan.shots.length+16;
  let shotLines=lines(null),shortened:string[]=[];
  if(fixed+shotLines.join('\n').length>VIDEO_LIMITS.instruction){
   const overhead=lines(0).join('\n').length,room=VIDEO_LIMITS.instruction-fixed-overhead,per=Math.floor(room/Math.max(1,plan.shots.length));
-  shotLines=lines(per);shortened=plan.shots.filter(s=>s.prompt.replace(/\s+/g,' ').length>per).map(s=>s.id);
+  shotLines=lines(per);
+  shortened=plan.shots.filter(s=>s.prompt.replace(/\s+/g,' ').length+(s.voiceover??'').replace(/\s+/g,' ').length>per).map(s=>s.id);
  }
- let instruction=[...head,'Shots:',...shotLines,...tail].join('\n');
- if(instruction.length>VIDEO_LIMITS.instruction)instruction=instruction.slice(0,VIDEO_LIMITS.instruction-10)+'\n[clipped]';
+ const instruction=[...head,'Shots:',...shotLines,...tail].join('\n');
+ // Never clip: a clipped instruction silently drops late shots and the QC/Deliver rules. Refuse instead.
+ if(instruction.length>VIDEO_LIMITS.instruction)fail('This storyboard is too long for one agent instruction ('+instruction.length+' characters, limit '+VIDEO_LIMITS.instruction+') even after shortening every prompt and voice-over. Use fewer shots or shorter voice-overs. Nothing was created.');
  return {instruction,shortened};
 }
 /** The exact Echo ADK definition for a ready plan (no `source`, origin without created_at once on the wire). Refuses a plan that is not ready. */
@@ -414,7 +422,7 @@ export function videoAgentDefinition(plan:VideoPlan):AdkAgentDefinition&{origin:
  if(!plan.catalog.live)fail(plan.catalog.reason??'The live capability catalog is not connected; no capability id can be verified. Nothing was created.',503);
  if(!plan.ready)fail('This storyboard is not ready for an agent: '+plan.missing.join('; ')+'. Nothing was created.');
  const {instruction,shortened}=videoInstruction(plan);
- if(shortened.length)plan.warnings.push('Shortened in the agent instruction (12000-character limit): '+shortened.join(', ')+'. The full prompts stay on this storyboard.');
+ if(shortened.length)plan.warnings.push('Shortened in the agent instruction (12000-character limit; prompts and voice-overs): '+shortened.join(', ')+'. The full prompts stay on this storyboard.');
  return {name:plan.name,role:'producer',skills:[...VIDEO_SKILLS],capabilities:[...plan.capabilities],
   lane:{node:plan.lane.node,model:plan.lane.model,budget:{max_calls:plan.budget.max_calls,max_cost_usd:plan.budget.max_cost_usd,max_wall_s:plan.budget.max_wall_s}},
   max_steps:plan.max_steps,instruction,origin:{by:'echo',prompt_sha256:plan.origin.prompt_sha256,created_at:new Date().toISOString()}};

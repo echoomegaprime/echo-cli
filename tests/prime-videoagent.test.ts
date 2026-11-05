@@ -237,6 +237,18 @@ describe('agent definition and instruction', () => {
     expect(p.warnings.join(' ')).toMatch(/Shortened in the agent instruction/);
     expect(videoInstruction(plan({ brief: 'x', prompts: ['short'] })).shortened).toEqual([]);
   });
+  it('shortens long voice-overs with the prompts and never clips late shots or the QC/Deliver rules', () => {
+    const shots = Array.from({ length: 18 }, () => ({ prompt: 'lighthouse beam '.repeat(60).trim(), duration_s: 5, voiceover: 'narration line '.repeat(53).trim() }));
+    const p = plan({ brief: 'x', shots });
+    const { instruction, shortened } = videoInstruction(p);
+    expect(instruction.length).toBeLessThanOrEqual(12000);
+    expect(instruction).not.toContain('[clipped]');
+    expect(instruction).toMatch(/shot-18 \(5 s/);
+    expect(instruction).toMatch(/QC: check every shot/);
+    expect(instruction).toMatch(/Deliver: a final answer listing/);
+    expect(shortened).toHaveLength(18);
+    expect((instruction.match(/Voice-over: /g) ?? []).length).toBe(18);
+  });
   it('uses the image job id and the freeman voice in the instruction', () => {
     const still: VideoInput = { id: ART_STILL, kind: 'image', source: 'artifact', animatable: true, job_id: 'job-abc' };
     const p = plan({ brief: 'x', inputs: [{ id: ART_STILL }], shots: [{ prompt: 'a', duration_s: 5, voiceover: 'Hello there', inputs: [ART_STILL] }] }, [still]);
