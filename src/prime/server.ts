@@ -8,6 +8,7 @@ import {redact} from '../code/workspace.js';
 import {WorkspaceBridge,WorkspaceHttpError,type WorkspaceConfig} from './workspace.js';
 const assets:Record<string,string>={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/orb.js':'orb.js','/app.js':'app.js','/chat.js':'chat.js','/integrations.js':'integrations.js','/catalog.js':'catalog.js','/steward.js':'steward.js','/workspace-client.js':'workspace-client.js','/workspace.js':'workspace.js','/models.js':'models.js'};
 assets['/swarm.js']='swarm.js';assets['/swarm.css']='swarm.css';
+assets['/bots.js']='bots.js';assets['/bots.css']='bots.css';
 const debug=debuglog('echo-prime-server');
 assets['/privacy']='privacy.html';assets['/privacy.css']='privacy.css';
 Object.assign(assets,{'/fleet.js':'fleet.js','/logs.js':'logs.js','/fleet.css':'fleet.css'});
@@ -41,7 +42,7 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
   const path=new URL(req.url??'/',url).pathname;
   if(path.startsWith('/api/')){
    const started=Date.now(),requestId=randomUUID();
-   const operation=path.startsWith('/api/workspace/')?'workspace':path.startsWith('/api/steward/')?'steward':path.startsWith('/api/prime/swarm/')?'swarm':path==='/api/session'?'session':'owner';
+   const operation=path.startsWith('/api/workspace/')?'workspace':path.startsWith('/api/steward/')?'steward':path.startsWith('/api/prime/swarm/')?'swarm':path.startsWith('/api/prime/bots/')?'bots':path==='/api/session'?'session':'owner';
    const record=(outcome:string)=>debug('%j',{schemaVersion:1,event:'prime_api_request',operation,requestId,status:res.statusCode,outcome,durationMs:Date.now()-started});
    res.once('finish',()=>record('returned'));res.once('close',()=>{if(!res.writableEnded)record('disconnected');});
    const supplied=(req.headers.cookie??'').split(';').map(c=>c.trim()).find(c=>c.startsWith('echo_prime='))?.slice(11)??'';
@@ -64,14 +65,32 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     if(path==='/api/prime/swarm/health'&&req.method==='GET'){send(200,await hub.swarmHealth(abort.signal));return;}
     const swarmRun=/^\/api\/prime\/swarm\/runs\/([^/]{1,80})$/.exec(path);
     if(swarmRun&&req.method==='GET'){send(200,await hub.swarmStatus(decodeURIComponent(swarmRun[1]),abort.signal));return;}
+    // echoBots (owner-only like swarm): fixed routes first, then groups/:id, then :id/messages and :id. Ids are checked by the client before any URL is built.
+    if(path==='/api/prime/bots/health'&&req.method==='GET'){send(200,await hub.botsHealth(abort.signal));return;}
+    if(path==='/api/prime/bots/list'&&req.method==='GET'){send(200,await hub.botsList(abort.signal));return;}
+    const botsGroup=/^\/api\/prime\/bots\/groups\/([^/]{1,80})$/.exec(path);
+    if(botsGroup&&req.method==='GET'){send(200,await hub.botsGroup(decodeURIComponent(botsGroup[1]),abort.signal));return;}
+    const botsMessages=/^\/api\/prime\/bots\/([^/]{1,80})\/messages$/.exec(path);
+    if(botsMessages&&req.method==='GET'){
+     const query=new URL(req.url??'/',url).searchParams;
+     send(200,await hub.botsMessages(decodeURIComponent(botsMessages[1]),{since:query.get('since')??undefined,limit:query.has('limit')?Number(query.get('limit')):undefined},abort.signal));return;
+    }
+    const botsOne=/^\/api\/prime\/bots\/([^/]{1,80})$/.exec(path);
+    if(botsOne&&req.method==='GET'){send(200,await hub.botsGet(decodeURIComponent(botsOne[1]),abort.signal));return;}
     if(path==='/api/steward/status'&&req.method==='GET'){send(200,await hub.stewardStatus());return;}
     if(req.method!=='POST'||!req.headers['content-type']?.startsWith('application/json')){send(405,{error:'JSON POST required'});return;}
     const data=await body(req);
+    // Delete is a JSON POST on purpose: the Origin check above applies to POST only, so a DELETE verb would skip it.
+    const botsAction=/^\/api\/prime\/bots\/([^/]{1,80})\/(pause|resume|delete|message)$/.exec(path);
     if(path==='/api/search')send(200,{capabilities:await hub.refresh(String(data.query??''))});
     else if(path==='/api/prepare')send(200,await hub.prepare(data as unknown as PrimeRequest));
     else if(path==='/api/execute')send(200,await hub.execute(String(data.id??''),String(data.digest??'')));
     else if(path==='/api/chat')send(200,await hub.chat(data,abort.signal));
     else if(path==='/api/prime/swarm/run')send(202,await hub.swarmRun(data,abort.signal));
+    else if(path==='/api/prime/bots/create')send(201,await hub.botsCreate(data,abort.signal));
+    else if(path==='/api/prime/bots/groups/create')send(202,await hub.botsGroupCreate(data,abort.signal));
+    else if(botsAction&&botsAction[2]==='message')send(202,await hub.botsMessage(decodeURIComponent(botsAction[1]),data,abort.signal));
+    else if(botsAction)send(200,await hub.botsAction(decodeURIComponent(botsAction[1]),botsAction[2],abort.signal));
     else if(path==='/api/steward/ask')send(200,await hub.stewardAsk(data));
     else send(404,{error:'Unknown route'});
    }catch(e){if(res.headersSent)res.destroy();else send(e instanceof WorkspaceHttpError?e.status:400,{error:redact(e instanceof Error?e.message:'Request failed').slice(0,600)});}

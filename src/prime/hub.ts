@@ -5,6 +5,7 @@ import type {SharedChat} from './chat.js';
 import {disconnectedSteward,type StewardOwner} from './steward.js';
 import type {ModelRouter} from '../code/model-factory.js';
 import {SwarmError,type SwarmClient} from './swarm.js';
+import {BotsError,type BotsClient} from './bots.js';
 const debugOwnerResponse=debuglog('echo-prime');
 export type Json=Record<string,unknown>;
 export interface Tool {name:string;description?:string;inputSchema:Json}
@@ -17,7 +18,7 @@ export interface SdkBroker {
 }
 export interface PrimeRequest {target:'sdk'|'esh';name:string;arguments:Json}
 export interface PrimeOptions {
- capabilities:Capability[];sdk?:SdkBroker;esh?:McpConnection;chat?:SharedChat;steward?:StewardOwner;models?:ModelRouter;swarm?:SwarmClient;
+ capabilities:Capability[];sdk?:SdkBroker;esh?:McpConnection;chat?:SharedChat;steward?:StewardOwner;models?:ModelRouter;swarm?:SwarmClient;bots?:BotsClient;
  /** Existing host approval, never supplied by model output or the browser. */
  approveEsh?:(request:PrimeRequest,digest:string)=>Promise<boolean>;
 }
@@ -106,6 +107,28 @@ export class PrimeHub {
  private swarmClient(){if(!this.options.swarm)throw new SwarmError(503,'Swarm is not enabled: the reviewed Prime configuration has no swarm section');return this.options.swarm;}
  async swarmRun(input:unknown,signal?:AbortSignal){return this.swarmClient().run(input,signal);}
  async swarmStatus(runId:string,signal?:AbortSignal){return this.swarmClient().status(runId,signal);}
+ /** Opt-in echoBots (loopback echo-adk-api): health never throws for an unconfigured or unreachable service, it says why. Nothing here falls back. */
+ async botsHealth(signal?:AbortSignal){
+  const bots=this.options.bots;
+  if(!bots)return {configured:false,available:false,reason:'echoBots is not enabled: the reviewed Prime configuration has no bots section'};
+  try{return {configured:true,available:true,defaultBudget:bots.config.defaultBudget,service:await bots.health(signal)};}
+  catch(e){return {configured:true,available:false,defaultBudget:bots.config.defaultBudget,reason:e instanceof Error?redact(e.message).slice(0,300):'echoBots service check failed'};}
+ }
+ private botsClient(){if(!this.options.bots)throw new BotsError(503,'echoBots is not enabled: the reviewed Prime configuration has no bots section');return this.options.bots;}
+ async botsList(signal?:AbortSignal){return this.botsClient().list(signal);}
+ async botsGet(botId:string,signal?:AbortSignal){return this.botsClient().get(botId,signal);}
+ async botsCreate(input:unknown,signal?:AbortSignal){return this.botsClient().create(input,signal);}
+ async botsAction(botId:string,action:string,signal?:AbortSignal){
+  const bots=this.botsClient();
+  if(action==='pause')return bots.pause(botId,signal);
+  if(action==='resume')return bots.resume(botId,signal);
+  if(action==='delete')return bots.remove(botId,signal);
+  throw new BotsError(404,'Unknown echoBots action');
+ }
+ async botsMessage(botId:string,input:unknown,signal?:AbortSignal){return this.botsClient().message(botId,input,signal);}
+ async botsMessages(botId:string,options:{since?:unknown;limit?:unknown},signal?:AbortSignal){return this.botsClient().messages(botId,options,signal);}
+ async botsGroupCreate(input:unknown,signal?:AbortSignal){return this.botsClient().createGroup(input,signal);}
+ async botsGroup(groupId:string,signal?:AbortSignal){return this.botsClient().group(groupId,signal);}
  async chat(input:unknown,signal?:AbortSignal){
   if(!this.options.chat)throw new Refused('Shared chat host not connected; owner admission is required');
   return this.options.chat.submit(input,signal);
