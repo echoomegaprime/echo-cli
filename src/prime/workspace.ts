@@ -60,7 +60,9 @@ async function jsonResponse(response:Response,max=65536):Promise<unknown>{
 const reads=new Set(['/api/state','/api/diagnostics','/api/fleet','/api/health','/api/mcp','/api/plugins','/api/catalog','/api/chats','/api/auth/accounts']);
 const writes=new Set(['/api/mcp','/api/chats','/api/chat/update','/api/chat','/api/compact','/api/fork','/api/projects','/api/project/update','/api/library','/api/import','/api/action','/api/sync','/api/review','/api/voice/start','/api/voice/next','/api/voice/cancel','/api/voice/transcribe']);
 const publicReads=new Set(['/api/auth/session','/api/auth/config']);
-const authWrites=new Set(['/api/auth/login','/api/auth/signup','/api/auth/reset','/api/auth/logout','/api/auth/refresh','/api/auth/verify','/api/auth/decide']);
+// Exactly the account routes the Workspace implements (accounts_http.py). `/api/auth/refresh` and
+// `/api/auth/verify` were allowlisted until 2026-11-04 although the Workspace never served them.
+const authWrites=new Set(['/api/auth/login','/api/auth/signup','/api/auth/reset','/api/auth/logout','/api/auth/decide']);
 function route(url:URL,method:string):string {
  const path=url.pathname.replace(/^\/api\/workspace\//,'/api/');
  const allowed=method==='GET'?(reads.has(path)||publicReads.has(path)||/^\/api\/(?:chats|journals|library|mcp\/tools|voice\/audio)\/[A-Za-z0-9_-]{1,120}$/.test(path)):
