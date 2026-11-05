@@ -5,7 +5,7 @@
   <meta name="color-scheme" content="dark">
   <title>ECHO Prime · Your intelligence, connected</title>
   <link rel="stylesheet" href="styles.css">
-  <link rel="stylesheet" href="fleet.css"><link rel="stylesheet" href="composer.css"><link rel="stylesheet" href="swarm.css">
+  <link rel="stylesheet" href="fleet.css"><link rel="stylesheet" href="composer.css"><link rel="stylesheet" href="swarm.css"><link rel="stylesheet" href="agents.css">
   <script defer src="composer.js"></script><script defer src="voicebar.js"></script><script defer src="plugins.js"></script>
 </head>
 <body>
@@ -29,6 +29,7 @@
   <button class="new-chat" id="new-chat"><svg><use href="#i-plus"/></svg>New conversation<kbd>⌘ K</kbd></button>
   <nav aria-label="Workspace"><button class="nav-item active" data-view="conversation"><svg><use href="#i-chat"/></svg>Conversation<span class="active-dot"></span></button><button class="nav-item" data-view="studio"><svg><use href="#i-spark"/></svg>Creative studio</button><button class="nav-item" data-view="systems"><svg><use href="#i-chip"/></svg>Echo systems<span class="nav-count">12</span></button></nav>
   <button class="nav-item" id="open-steward"><svg><use href="#i-shield"/></svg>Node Steward</button>
+  <button class="nav-item" id="open-agents" data-owner-only><svg><use href="#i-code"/></svg>Agents</button>
   <button class="nav-item" id="workspace-open-esh" data-owner-only hidden><svg><use href="#i-code"/></svg>ESH shell</button>
   <div id="workspace-navigation" hidden><button class="nav-item" data-workspace-view="projects">Projects</button><button class="nav-item" data-workspace-view="library">Library</button><button class="nav-item" id="workspace-open-plugins">Plugins &amp; memory</button><button class="nav-item" data-workspace-view="operations" data-owner-only>SDK</button><button class="nav-item" data-workspace-view="operations" data-owner-only>Vault</button><button class="nav-item" data-workspace-view="library">Code review</button><button class="nav-item" data-view="logs" data-owner-only>Logs &amp; debugging</button><button class="nav-item" data-workspace-view="voice">Voice &amp; personality</button></div>
   <button class="nav-item" data-workspace-view="account" id="workspace-account">Account</button>
@@ -77,6 +78,14 @@
 <div class="steward-table-wrap"><table class="steward-table"><caption class="sr-only">Per-node Steward coverage and model readiness</caption><thead><tr><th scope="col">Node</th><th scope="col">OS</th><th scope="col">Identity</th><th scope="col">Runtime</th><th scope="col">Model</th><th scope="col">Evaluation</th><th scope="col">Rollback</th></tr></thead><tbody id="steward-nodes"></tbody></table></div>
 <form id="steward-form" class="steward-form"><label>Node<select id="steward-node" required></select></label><label>Response<select id="steward-mode"><option value="answer">Answer a question</option><option value="explain">Explain an incident</option><option value="proposal">Propose a typed remedy</option></select></label><label id="steward-target-label" hidden>Exact resource in the incident<input id="steward-target" maxlength="240" placeholder="For example, echo-workers.service"></label><label>Question or incident<textarea id="steward-text" rows="4" maxlength="8000" required placeholder="Describe this node’s condition without including credentials…"></textarea></label><button id="steward-submit" class="new-chat" type="submit" disabled>Ask this node’s Steward</button></form>
 <pre id="steward-result" aria-live="polite"></pre><p class="connection-note">Advice and shadow proposals stay separate from repairs. Model promotion requires a passing evaluation, a verified canary and a rollback slot.</p></dialog>
-<script src="catalog.js"></script><script src="orb.js"></script><script src="chat.js"></script><script src="workspace-client.js"></script><script src="workspace.js"></script><script src="app.js"></script><script src="models.js"></script><script src="integrations.js"></script><script src="steward.js"></script><script src="swarm.js"></script>
+<dialog id="agents-dialog" class="panel-dialog agents-dialog" aria-labelledby="agents-title"><div class="dialog-title"><div><span class="eyebrow">ECHO ADK</span><h2 id="agents-title">Agents</h2></div><button id="close-agents" class="icon-button" aria-label="Close Agents"><svg><use href="#i-close"/></svg></button></div>
+<p class="dialog-description">Governed Echo ADK agents on the loopback service. Every step carries its capability, tier, verdict and the model that actually answered; the run ends with a Proof. Nothing falls back to another provider.</p>
+<div class="agents-toolbar"><button id="refresh-agents" class="quiet-button" type="button">Refresh</button><p id="agents-status" role="status" aria-live="polite">Agents have not been checked.</p></div>
+<div id="agents-list" class="agents-list"></div>
+<form id="agents-form" class="agents-form"><label>Agent<select id="agents-agent" required></select></label><label>Prompt<textarea id="agents-prompt" rows="4" maxlength="12000" required placeholder="What should this agent do? Do not include credentials."></textarea></label><div class="agents-budget"><label>Max calls<input id="agents-calls" type="number" min="1" max="120" step="1" inputmode="numeric"></label><label>Max cost (USD)<input id="agents-cost" type="number" min="0" max="5" step="0.01" inputmode="decimal"></label><label>Max wall (s)<input id="agents-wall" type="number" min="30" max="4800" step="1" inputmode="numeric"></label></div><button id="agents-submit" class="new-chat" type="submit" disabled>Run this agent</button></form>
+<section id="agents-run" class="adk-run" aria-live="polite" aria-label="Live agent run" hidden></section>
+<div id="agents-runs" class="agents-runs"></div>
+<p class="connection-note">Budgets are clamped to the agent lane and the service caps (120 calls, $5, 80 min). Stop ends a run after its current step; a provider call already running is not interrupted.</p></dialog>
+<script src="catalog.js"></script><script src="orb.js"></script><script src="chat.js"></script><script src="workspace-client.js"></script><script src="workspace.js"></script><script src="app.js"></script><script src="models.js"></script><script src="integrations.js"></script><script src="steward.js"></script><script src="swarm.js"></script><script src="agents.js"></script>
 <script src="fleet.js"></script><script src="logs.js"></script>
 </body></html>
