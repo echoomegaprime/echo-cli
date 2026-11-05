@@ -56,6 +56,7 @@
  function agentCard(a){
   const lane=obj(a.lane),card=el('article',undefined,'workspace-card-content adk-agent');
   card.append(el('h3',String(a.name)),el('p',typeof a.role==='string'&&a.role?a.role:'role not stated','adk-agent-role'));
+  if(obj(a.origin).by==='echo')card.append(el('span','Echo-made from your prompt','autoagent-badge'));// definitions Prime created from a chat prompt (autoagents.js)
   const rows=el('dl',undefined,'adk-rows');
   const row=(k,v)=>{if(v===undefined||v===null||v==='')return;rows.append(el('dt',k),el('dd',v));};
   row('Skills',strings(a.skills).join(', ')||'none listed');

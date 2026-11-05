@@ -20,6 +20,7 @@ for(const name of ['layout.js','esh-dock.js','chat-actions.js'])assets['/'+name]
 // Sidebar polish (2026-11-04): grouped navigation, wordmark and sign-in card. `/privacy.html` is the link the
 // sign-in card uses; `/privacy` stays for the composer caption.
 Object.assign(assets,{'/nav.js':'nav.js','/nav.css':'nav.css','/privacy.html':'privacy.html'});
+Object.assign(assets,{'/autoagents.js':'autoagents.js','/autoagents.css':'autoagents.css'});
 async function body(req:IncomingMessage){
  let size=0;const chunks:Buffer[]=[];
  for await(const part of req){size+=part.length;if(size>131072)throw new Error('Request exceeds 128 KiB');chunks.push(part);}
@@ -84,6 +85,8 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     const adkRun=/^\/api\/prime\/adk\/runs\/([^/]{1,80})$/.exec(path);
     if(adkRun&&req.method==='GET'){send(200,await hub.adkStatus(decodeURIComponent(adkRun[1]),abort.signal));return;}
     const adkStop=/^\/api\/prime\/adk\/runs\/([^/]{1,80})\/stop$/.exec(path);
+    // Agent definitions Prime creates: POST create / :name/update / :name/delete (JSON POST for all three so the Origin check applies, like bots).
+    const adkAgentAction=/^\/api\/prime\/adk\/agents\/([^/]{1,80})\/(update|delete)$/.exec(path);
     // echoBots (owner-only like swarm): fixed routes first, then groups/:id, then :id/messages and :id. Ids are checked by the client before any URL is built.
     if(path==='/api/prime/bots/health'&&req.method==='GET'){send(200,await hub.botsHealth(abort.signal));return;}
     if(path==='/api/prime/bots/list'&&req.method==='GET'){send(200,await hub.botsList(abort.signal));return;}
@@ -112,6 +115,9 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     else if(path==='/api/prime/swarm/run')send(202,await hub.swarmRun(data,abort.signal));
     else if(path==='/api/prime/adk/runs')send(202,await hub.adkRun(data,abort.signal));
     else if(adkStop)send(200,await hub.adkStop(decodeURIComponent(adkStop[1]),abort.signal));
+    else if(path==='/api/prime/adk/agents')send(201,await hub.adkCreateAgent(data,abort.signal));
+    else if(adkAgentAction&&adkAgentAction[2]==='update')send(200,await hub.adkUpdateAgent(decodeURIComponent(adkAgentAction[1]),data,abort.signal));
+    else if(adkAgentAction)send(200,await hub.adkDeleteAgent(decodeURIComponent(adkAgentAction[1]),abort.signal));
     else if(path==='/api/prime/bots/create')send(201,await hub.botsCreate(data,abort.signal));
     else if(path==='/api/prime/bots/groups/create')send(202,await hub.botsGroupCreate(data,abort.signal));
     else if(botsAction&&botsAction[2]==='message')send(202,await hub.botsMessage(decodeURIComponent(botsAction[1]),data,abort.signal));

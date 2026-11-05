@@ -39,6 +39,7 @@
     line('assistant',result.answer||'Turn ended without an answer.',
      (result.answerVerification==='unverified_model_text'?'Model text; verify claims. ':'Application result. ')+
      'Read-only · '+result.status+' · Session '+sessionId+(evidence?' · Sources: '+evidence:'')+(result.model&&window.EchoPrimeModels?' · '+window.EchoPrimeModels.describe(result.model):''));
+    if(Array.isArray(result.autoagents)&&window.EchoPrimeAutoagents)window.EchoPrimeAutoagents.render(result);// "Echo built an agent and a bot for this" cards (autoagents.js)
     console.debug('[echo.code]',{schema_version:1,event:'coding_turn',outcome:result.status==='completed'?'completed':'returned'});
     return {sent:result.status==='completed',detail:result.status==='completed'?'Answer received.':'Turn '+result.status+'. No automatic retry was made.'};
    }catch(error){

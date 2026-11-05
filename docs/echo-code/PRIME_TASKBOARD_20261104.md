@@ -25,7 +25,7 @@ Live = merged into `agent/prime-workspace-parity-20261104`, gates green, deploye
 - [ ] Media auto-router (best model/tool from a bare prompt) + ✨ Enhance prompt (chat/image/video/music/sfx/voice via Claude/GPT/Gemini/Grok)
 - [ ] Brain: truthfulness layer, auto model routing (coding→Claude, long-context→Gemini, research→Grok, refusal→Qwen labelled), Personality Forge auto-select, bloodline directive block
 - [ ] Live internet + Wolfram + knowledge APIs + skills + MCP plugins for every model turn
-- [ ] Echo autonomously creates ADK agents + echoBots from prompts
+- [x] Echo autonomously creates ADK agents + echoBots from prompts (c73db73; chat-loop wiring lands with the tools/brain slices)
 
 ## Ordered 20:37–20:42, starting now (wrapper-built: GPT/Codex, Grok CLI, Gemini/agy)
 - [ ] Echo Build: real builds (full apps, programs, websites) from a prompt, not pages — repo per build, scaffold, data+auth, deploy, browser QA, hibernate/revive (reference: Grok workspace export)

@@ -8,6 +8,7 @@ import {SwarmError,type SwarmClient} from './swarm.js';
 import {AdkError,type AdkClient} from './agents.js';
 import {BotsError,type BotsClient} from './bots.js';
 import {BrowserError,type BrowserClient} from './browser.js';
+import type {AutoAgents,ChatTool} from '../code/tools/autoagents.js';
 const debugOwnerResponse=debuglog('echo-prime');
 export type Json=Record<string,unknown>;
 export interface Tool {name:string;description?:string;inputSchema:Json}
@@ -25,6 +26,8 @@ export interface PrimeOptions {
  adk?:AdkClient;
  bots?:BotsClient;
  browser?:BrowserClient;
+ /** Autonomous agent/bot creation from chat prompts (needs adk + bots + sdk). Absent = the make_* tools are not offered. */
+ autoagents?:AutoAgents;
  /** Existing host approval, never supplied by model output or the browser. */
  approveEsh?:(request:PrimeRequest,digest:string)=>Promise<boolean>;
 }
@@ -127,6 +130,13 @@ export class PrimeHub {
  async adkStatus(runId:string,signal?:AbortSignal){return this.adkClient().status(runId,signal);}
  async adkStop(runId:string,signal?:AbortSignal){return this.adkClient().stop(runId,signal);}
  async adkRuns(query:unknown,signal?:AbortSignal){return this.adkClient().runs(query,signal);}
+ /** Agent definitions Prime creates, replaces or deletes (contract `POST/PUT/DELETE /agents`). Owner-only routes; the client validates before any request. */
+ async adkCreateAgent(input:unknown,signal?:AbortSignal){return this.adkClient().createAgent(input,signal);}
+ async adkUpdateAgent(name:string,input:unknown,signal?:AbortSignal){return this.adkClient().updateAgent(name,input,signal);}
+ async adkDeleteAgent(name:string,signal?:AbortSignal){return this.adkClient().deleteAgent(name,signal);}
+ /** The autonomous-creation chat tools in registration shape; an empty list when the feature is off. The tool loop spreads this into its tools. */
+ autoagentTools():ChatTool[]{return this.options.autoagents?this.options.autoagents.tools():[];}
+ autoagentsStatus(){return this.options.autoagents?this.options.autoagents.status():{configured:false,reason:'Autonomous agents are off: the Prime config needs adk, bots and sdk configured'};}
  /** Opt-in echoBots (loopback echo-adk-api): health never throws for an unconfigured or unreachable service, it says why. Nothing here falls back. */
  async botsHealth(signal?:AbortSignal){
   const bots=this.options.bots;
