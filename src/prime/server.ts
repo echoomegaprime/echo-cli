@@ -12,6 +12,9 @@ const debug=debuglog('echo-prime-server');
 assets['/privacy']='privacy.html';assets['/privacy.css']='privacy.css';
 Object.assign(assets,{'/fleet.js':'fleet.js','/logs.js':'logs.js','/fleet.css':'fleet.css'});
 for(const name of ['composer.js','voicebar.js','plugins.js','composer.css'])assets['/'+name]=name;
+// The Echo orb mark answers the browser's default /favicon.ico probe as well as the linked /favicon.svg (both the same SVG).
+assets['/favicon.svg']='favicon.svg';assets['/favicon.ico']='favicon.svg';
+const assetTypes:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml'};
 async function body(req:IncomingMessage){
  let size=0;const chunks:Buffer[]=[];
  for await(const part of req){size+=part.length;if(size>131072)throw new Error('Request exceeds 128 KiB');chunks.push(part);}
@@ -33,7 +36,9 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
  const token=randomBytes(32).toString('hex');let url='',active=0;
  const server=createServer(async(req,res)=>{
   res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Cache-Control','no-store');res.setHeader('Referrer-Policy','no-referrer');
-  res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'"+(workspace?' https://accounts.google.com/gsi/client':'')+"; style-src 'self' 'unsafe-inline'"+(workspace?' https://accounts.google.com/gsi/style':'')+"; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'"+(workspace?' https://accounts.google.com':'')+"; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"+(workspace?'; frame-src https://accounts.google.com':''));
+  // Behind the public TLS proxy Cloudflare may inject its Web Analytics beacon (a script from static.cloudflareinsights.com
+  // that posts to cloudflareinsights.com); only a server with a public origin allows those two origins, a loopback host never does.
+  res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'"+(workspace?' https://accounts.google.com/gsi/client':'')+(externalOrigin?' https://static.cloudflareinsights.com':'')+"; style-src 'self' 'unsafe-inline'"+(workspace?' https://accounts.google.com/gsi/style':'')+"; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'"+(workspace?' https://accounts.google.com':'')+(externalOrigin?' https://cloudflareinsights.com':'')+"; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"+(workspace?'; frame-src https://accounts.google.com':''));
   res.setHeader('Permissions-Policy','microphone=(self), camera=()');
   const send=(status:number,value:unknown)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(value));};
   const expectedOrigin=externalOrigin??url;
@@ -78,11 +83,14 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
    finally{res.removeListener('close',disconnected);active--;}
    return;
   }
-  if(req.method!=='GET'||!assets[path]){send(404,{error:'Not found'});return;}
+  // HEAD mirrors GET for a static asset (status, type, length and the session cookie on the page) without a body; the
+  // API above keeps its own method rules. The type follows the served file, so /favicon.ico is the SVG mark.
+  const head=req.method==='HEAD';
+  if((req.method!=='GET'&&!head)||!assets[path]){send(404,{error:'Not found'});return;}
   try{
-   const data=await readFile(join(uiDirectory,assets[path]));
+   const file=assets[path],data=await readFile(join(uiDirectory,file));
    if(path==='/'||path==='/index.html')res.setHeader('Set-Cookie','echo_prime='+token+'; HttpOnly; SameSite=Strict; Path=/'+(externalOrigin?'; Secure':''));
-   res.writeHead(200,{'Content-Type':path.endsWith('.js')?'text/javascript; charset=utf-8':path.endsWith('.css')?'text/css; charset=utf-8':'text/html; charset=utf-8'});res.end(data);
+   res.writeHead(200,{'Content-Type':assetTypes[file.slice(file.lastIndexOf('.'))]??'application/octet-stream','Content-Length':data.length});res.end(head?undefined:data);
   }catch{send(404,{error:'Asset unavailable'});}
  });
  server.requestTimeout=25000;server.headersTimeout=10000;

@@ -9,24 +9,47 @@
   finally{await reader.cancel().catch(()=>{});}
  }
  async function readJson(response){if(!response.headers.get('content-type')?.includes('application/json'))throw new Error('Unexpected Workspace response.');return JSON.parse(await readText(response));}
+ // Every transport on the page (workspace.js and fleet.js each own one) shares one /api/session readback: concurrent
+ // reads join the in-flight request, and a successful readback is reused for SESSION_MEMO_MS. clear() (identity
+ // invalidation, logout, an owner-only 401/403) and a successful login forget it, so a sign-in or a revocation is seen
+ // on the very next read. Before 2026-11-04 an idle owner page read /api/session about nine times a minute.
+ const SESSION_MEMO_MS=10000,memo={at:-Infinity,value:null,inflight:null,generation:0};
+ const forget=()=>{memo.at=-Infinity;memo.value=null;memo.generation++;};
+ const clock=()=>(window.EchoPrimeWorkspaceTransport.now||Date.now)();
+ function readSession(fetchImpl){
+  if(memo.inflight)return memo.inflight;
+  if(memo.value&&clock()-memo.at<SESSION_MEMO_MS)return Promise.resolve(memo.value);
+  const started=memo.generation;
+  // No caller signal reaches the shared request: an aborted joiner must not interrupt the others. The read is small and
+  // bounded by the host's own timeouts. A readback that arrives after forget() is returned but not kept.
+  memo.inflight=(async()=>{
+   const response=await fetchImpl('/api/session',{credentials:'same-origin',cache:'no-store',headers:{'x-prime-request':'1'}});
+   const value=await readJson(response);
+   if(!response.ok||typeof value.workspaceConfigured!=='boolean'||typeof value.authenticated!=='boolean')throw new Error('Account admission unavailable.');
+   if(value.authenticated&&(!value.user||typeof value.user.uid!=='string'||typeof value.csrf!=='string'))throw new Error('Invalid account admission.');
+   return value;
+  })().then(value=>{if(memo.generation===started){memo.value=value;memo.at=clock();}return value;},error=>{forget();throw error;}).finally(()=>{memo.inflight=null;});
+  return memo.inflight;
+ }
  window.EchoPrimeWorkspaceTransport=class {
+  static now=Date.now;// clock seam for the shared session memo (tests move it; the page uses Date.now)
+  static SESSION_MEMO_MS=SESSION_MEMO_MS;
   #logoutProof=null;
   constructor(options={}){this.fetch=options.fetch||window.fetch.bind(window);this.onIdentityChange=options.onIdentityChange||(()=>{});this.session=null;this.generation=0;this.sessionEpoch=0;this.responses=new WeakMap();}
   headers(){return {'x-prime-request':'1',...(this.session?.csrf?{'x-echo-csrf':this.session.csrf}:{})};}
   get canLogout(){return !!(this.session?.csrf||this.#logoutProof);}
-  clear(){this.sessionEpoch++;this.generation++;this.session=null;this.#logoutProof=null;this.onIdentityChange(null);}
+  clear(){forget();this.sessionEpoch++;this.generation++;this.session=null;this.#logoutProof=null;this.onIdentityChange(null);}
   async loadSession(signal){
    const epoch=++this.sessionEpoch;
    try{
-   const response=await this.fetch('/api/session',{credentials:'same-origin',cache:'no-store',headers:{'x-prime-request':'1'},signal});
-   const value=await readJson(response);
-   if(!response.ok||typeof value.workspaceConfigured!=='boolean'||typeof value.authenticated!=='boolean')throw new Error('Account admission unavailable.');
-   if(value.authenticated&&(!value.user||typeof value.user.uid!=='string'||typeof value.csrf!=='string'))throw new Error('Invalid account admission.');
+   const value=await readSession(this.fetch);
    if(epoch!==this.sessionEpoch)return this.session;
+   // An interrupted caller learns nothing about the account, so the identity it already holds stays as it is.
+   if(signal?.aborted)throw new Error('Session read interrupted.');
    const changed=(this.session?.user?.uid??null)!==(value.user?.uid??null)||!!this.session?.authenticated!==!!value.authenticated||this.session?.user?.status!==value.user?.status||!!this.session?.ownerAccess!==!!value.ownerAccess;
    this.session=value;this.#logoutProof=value.authenticated?value.csrf:null;if(changed){this.generation++;this.onIdentityChange(value);}
    return value;
-   }catch(error){if(epoch===this.sessionEpoch){const proof=this.#logoutProof||this.session?.csrf;this.clear();this.#logoutProof=proof;}throw error;}
+   }catch(error){if(epoch===this.sessionEpoch&&!signal?.aborted){const proof=this.#logoutProof||this.session?.csrf;this.clear();this.#logoutProof=proof;}throw error;}
   }
   async _response(path,body,signal,auth=false){
    if(typeof path!=='string'||path.length>1200||!/^\/[a-z0-9_/?=&%.+-]+$/i.test(path)||path.includes('..'))throw new Error('Invalid Workspace route.');
@@ -67,7 +90,8 @@
    if(signal?.aborted||generation!==this.generation)throw new Error('Account session changed; response discarded.');
    // A login receipt permits cleanup only. Private admission still requires
    // the current canonical /api/session readback.
-   if(operation==='login'&&value?.user&&typeof value.user.uid==='string'&&typeof value.csrf==='string'&&/^[A-Za-z0-9_-]{8,256}$/.test(value.csrf))this.#logoutProof=value.csrf;
+   // The next readback must see the new account, never the memoized anonymous one.
+   if(operation==='login'&&value?.user&&typeof value.user.uid==='string'&&typeof value.csrf==='string'&&/^[A-Za-z0-9_-]{8,256}$/.test(value.csrf)){this.#logoutProof=value.csrf;forget();}
    return value;
   }
   async chat(input,onEvent,signal){
