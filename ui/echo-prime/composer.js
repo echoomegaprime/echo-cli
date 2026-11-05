@@ -85,23 +85,48 @@
   const d=ui.saveDialog;d.name.value=fileNameFor(language);d.text.value=content;d.state.textContent='';d.dialog.showModal();
  }
  // ---- attach ------------------------------------------------------------
- function attachDialog(){
-  const b=bridge();if(!b)return;
-  if(!ui.attachDialog)ui.attachDialog=makeDialog('attach','Attach from your library');
-  const {dialog,body}=ui.attachDialog,files=(b.state.data?.library||[]).slice(0,100);
-  body.replaceChildren(el('p',{class:'composer-note'},'Selected file contents are included in your next message.'));
-  if(!files.length)body.append(el('p',{},'Your library is empty. Save a note or code block first.'));
+ function paintAttachChoices(b,body,dialog){
+  const files=(b.state.data?.library||[]).slice(0,100);
+  const uploads=(window.EchoPrimeLibrary?.uploads?.()||[]).slice(0,100);
+  body.replaceChildren(el('p',{class:'composer-note'},'Selected file and upload contents are included in your next message.'));
+  if(typeof window.EchoPrimeLibrary?.open==='function'){
+   body.append(action('Open Library & upload files',()=>{dialog.close();void window.EchoPrimeLibrary.open('library');}));
+  }
+  if(!files.length&&!uploads.length)body.append(el('p',{},'Your library is empty. Save a note, code block or upload a file first.'));
+  for(const up of uploads){
+   const box=el('input',{type:'checkbox','data-file':up.id,'aria-label':'Attach '+(up.name||'upload')});box.checked=b.state.attachments.has(up.id);
+   box.addEventListener('change',()=>{const now=bridge();if(!now)return;if(box.checked)now.state.attachments.add(up.id);else now.state.attachments.delete(up.id);now.updateContext();});
+   const thumb=up.kind==='image'?el('img',{class:'chip-thumb',src:`/api/prime/uploads/${encodeURIComponent(up.id)}/file?thumb=1`,alt:''}):null;
+   body.append(el('label',{class:'file-choice'},box,thumb,el('span',{},String(up.name||'Upload'),el('small',{},`${up.type||'file'} · upload`))));
+  }
   for(const file of files){
    const box=el('input',{type:'checkbox','data-file':file.id,'aria-label':'Attach '+(file.name||'file')});box.checked=b.state.attachments.has(file.id);
    box.addEventListener('change',()=>{const now=bridge();if(!now)return;if(box.checked)now.state.attachments.add(file.id);else now.state.attachments.delete(file.id);now.updateContext();});
    body.append(el('label',{class:'file-choice'},box,el('span',{},String(file.name||'File'),el('small',{},String(file.path||'')))));
   }
-  body.append(action('Done',()=>dialog.close(),'new-chat'));dialog.showModal();
+  body.append(action('Done',()=>dialog.close(),'new-chat'));
+ }
+ function attachDialog(){
+  const b=bridge();if(!b)return;
+  if(!ui.attachDialog)ui.attachDialog=makeDialog('attach','Attach from your library');
+  const {dialog,body}=ui.attachDialog;
+  paintAttachChoices(b,body,dialog);
+  dialog.showModal();
+  if(typeof window.EchoPrimeLibrary?.refresh==='function'){
+   void window.EchoPrimeLibrary.refresh().then(()=>{const now=bridge();if(now&&dialog.open)paintAttachChoices(now,body,dialog);}).catch(()=>{});
+  }
  }
  function renderChips(b){
   const chips=[...(b.state.attachments||[])].map(id=>{
-   const file=(b.state.data?.library||[]).find(item=>item.id===id),chip=action((file?.name||'File')+' ×',now=>{now.state.attachments.delete(id);now.updateContext();},'chip');
-   chip.setAttribute('aria-label','Remove attachment '+(file?.name||'file'));return chip;
+   const file=(b.state.data?.library||[]).find(item=>item.id===id);
+   const upload=!file?window.EchoPrimeLibrary?.uploadById?.(id):null;
+   const labelName=file?.name||upload?.name||'File';
+   const chip=action(labelName+' ×',now=>{now.state.attachments.delete(id);now.updateContext();},'chip');
+   if(upload?.kind==='image'){
+    const img=el('img',{class:'chip-thumb',src:`/api/prime/uploads/${encodeURIComponent(upload.id)}/file?thumb=1`,alt:''});
+    if(typeof chip.prepend==='function')chip.prepend(img);else{img.parent=chip;chip.children.unshift(img);}
+   }
+   chip.setAttribute('aria-label','Remove attachment '+(file?.name||upload?.name||'file'));return chip;
   });
   ui.chips.replaceChildren(...chips);ui.chips.hidden=!chips.length;
  }
@@ -187,7 +212,7 @@
   ui.checkpointBody=el('div',{class:'prose'});ui.checkpoint=el('details',{class:'checkpoint','data-checkpoint':''},el('summary',{},'Checkpoint active · original history preserved'),ui.checkpointBody);ui.checkpoint.hidden=true;
   $('#chat-log')?.before(ui.checkpoint);
   const hint=$('.keyboard-hint');if(hint)hint.textContent='Enter to send · Shift+Enter for a new line';
-  for(const name of ['echo-workspace-context','echo-account-changed'])window.addEventListener(name,sync);
+  for(const name of ['echo-workspace-context','echo-account-changed','echo-uploads-changed'])window.addEventListener(name,sync);
   b.onStatus(()=>sync());
   window.addEventListener('echo-account-changed',()=>{for(const made of [ui.saveDialog,ui.attachDialog])if(made?.dialog.open)made.dialog.close();});
   sync();

@@ -37,7 +37,8 @@
     if(status.chat?.state!=='attached')return {sent:false,detail:status.chat?.detail||'Shared chat host is not connected. The prompt remains in this tab.'};
     if(status.chat.busy)return {sent:false,detail:'The host is finishing another turn. The prompt remains in this tab.'};
     line('user',text);submitted=true;ensureStrip()?.thinking();
-    const result=await api('chat',{requestId:crypto.randomUUID(),prompt:text,...(sessionId?{sessionId}:{}),...(window.EchoPrimeModels?.provider()?{provider:window.EchoPrimeModels.provider()}:{}),...(window.EchoPrimeModels?.model?.()?{model:window.EchoPrimeModels.model()}:{})},controller.signal);
+    const attached=[...(window.EchoPrimeWorkspace?.bridge?.state?.attachments||window.EchoPrimeLibrary?.standaloneAttachments?.()||[])];
+    const result=await api('chat',{requestId:crypto.randomUUID(),prompt:text,...(sessionId?{sessionId}:{}),...(attached.length?{attachments:attached}:{}),...(window.EchoPrimeModels?.provider()?{provider:window.EchoPrimeModels.provider()}:{}),...(window.EchoPrimeModels?.model?.()?{model:window.EchoPrimeModels.model()}:{})},controller.signal);
     if(current!==generation)return {cancelled:true};
     sessionId=result.sessionId;
     const evidence=Array.isArray(result.evidence)?result.evidence.map(e=>e.path+' ['+e.sha256+']').join('; '):'';
@@ -48,6 +49,16 @@
      (result.answerVerification==='unverified_model_text'?'Model text; verify claims. ':'Application result. ')+
      'Read-only · '+result.status+' · Session '+sessionId+(evidence?' · Sources: '+evidence:'')+(result.model&&window.EchoPrimeModels?' · '+window.EchoPrimeModels.describe(result.model):''));
     if(Array.isArray(result.autoagents)&&window.EchoPrimeAutoagents)window.EchoPrimeAutoagents.render(result);// "Echo built an agent and a bot for this" cards (autoagents.js)
+    if(result.status==='completed'&&result.answer&&typeof window.EchoPrimeArtifacts?.register==='function'){
+     const modelLabel=typeof result.model==='string'?result.model:result.model?.id||result.model?.model||'';
+     void window.EchoPrimeArtifacts.register({
+      title:'Echo Build · '+text.trim().slice(0,60),
+      kind:'code',
+      type:'text/markdown',
+      content:String(result.answer),
+      provenance:{source:'build',prompt:text,...(modelLabel?{model:String(modelLabel)}:{}),...(sessionId?{run_id:String(sessionId)}:{})},
+     }).catch(()=>{});
+    }
     strip?.done(completed?'Answer received':'Turn '+result.status);
     console.debug('[echo.code]',{schema_version:1,event:'coding_turn',outcome:completed?'completed':'returned'});
     return {sent:completed,detail:completed?'Answer received.':'Turn '+result.status+'. No automatic retry was made.'};

@@ -6,6 +6,7 @@ import {debuglog} from 'node:util';
 import {PrimeHub,object,type PrimeRequest} from './hub.js';
 import {redact} from '../code/workspace.js';
 import {WorkspaceBridge,WorkspaceHttpError,type WorkspaceConfig} from './workspace.js';
+import {ARTIFACT_ID_RE,UPLOAD_ID_RE,UploadStore,parseUploadsConfig,type UploadsConfig} from './uploads.js';
 const assets:Record<string,string>={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/orb.js':'orb.js','/app.js':'app.js','/chat.js':'chat.js','/integrations.js':'integrations.js','/catalog.js':'catalog.js','/steward.js':'steward.js','/workspace-client.js':'workspace-client.js','/workspace.js':'workspace.js','/models.js':'models.js'};
 assets['/swarm.js']='swarm.js';assets['/swarm.css']='swarm.css';
 assets['/agents.js']='agents.js';assets['/agents.css']='agents.css';
@@ -15,18 +16,18 @@ const debug=debuglog('echo-prime-server');
 assets['/privacy']='privacy.html';assets['/privacy.css']='privacy.css';
 Object.assign(assets,{'/fleet.js':'fleet.js','/logs.js':'logs.js','/fleet.css':'fleet.css'});
 for(const name of ['composer.js','voicebar.js','plugins.js','composer.css'])assets['/'+name]=name;
-Object.assign(assets,{'/views.js':'views.js','/views.css':'views.css'});
+Object.assign(assets,{'/views.js':'views.js','/views.css':'views.css','/library.js':'library.js','/library.css':'library.css'});
 for(const name of ['layout.js','esh-dock.js','chat-actions.js'])assets['/'+name]=name;
-// Sidebar polish (2026-11-04): grouped navigation, wordmark and sign-in card. `/privacy.html` is the link the
-// sign-in card uses; `/privacy` stays for the composer caption.
+Object.assign(assets,{'/views.js':'views.js','/views.css':'views.css'});
 Object.assign(assets,{'/nav.js':'nav.js','/nav.css':'nav.css','/privacy.html':'privacy.html'});
 Object.assign(assets,{'/autoagents.js':'autoagents.js','/autoagents.css':'autoagents.css'});
-async function body(req:IncomingMessage){
+Object.assign(assets,{'/activity.js':'activity.js','/activity.css':'activity.css'});
+async function body(req:IncomingMessage,maxBytes=131072){
  let size=0;const chunks:Buffer[]=[];
- for await(const part of req){size+=part.length;if(size>131072)throw new Error('Request exceeds 128 KiB');chunks.push(part);}
+ for await(const part of req){size+=part.length;if(size>maxBytes)throw new Error('Request exceeds size limit');chunks.push(part);}
  return object(JSON.parse(Buffer.concat(chunks).toString('utf8')));
 }
-export interface PrimeServerOptions {workspace?:WorkspaceConfig;publicOrigin?:string}
+export interface PrimeServerOptions {workspace?:WorkspaceConfig;publicOrigin?:string;uploads?:UploadsConfig|UploadStore|unknown}
 function publicOrigin(value:string|undefined):string|undefined{
  if(value===undefined)return undefined;
  let origin:URL;try{origin=new URL(value);}catch{throw new Error('Invalid public HTTPS origin');}
@@ -37,12 +38,13 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
  if(!Number.isInteger(port)||port<0||port>65535)throw new Error('Invalid port');
  const externalOrigin=publicOrigin(options.publicOrigin);
  if(externalOrigin&&(!options.workspace||!options.workspace.ownerUid))throw new Error('Public origin requires an authenticated Workspace and pinned primary owner');
- const workspace=options.workspace?new WorkspaceBridge(options.workspace,!!externalOrigin):undefined;
+ const uploadStore=options.uploads instanceof UploadStore?options.uploads:options.uploads!==undefined?new UploadStore(parseUploadsConfig(options.uploads)):hub.uploads;
+ const workspace=options.workspace?new WorkspaceBridge(options.workspace,!!externalOrigin,uploadStore):undefined;
  if(workspace)await workspace.validateBackend();
- const token=randomBytes(32).toString('hex');let url='',active=0;
+ const token=randomBytes(32).toString('hex');let url='',active=0,mediaActive=0;
  const server=createServer(async(req,res)=>{
   res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Cache-Control','no-store');res.setHeader('Referrer-Policy','no-referrer');
-  res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'"+(workspace?' https://accounts.google.com/gsi/client':'')+"; style-src 'self' 'unsafe-inline'"+(workspace?' https://accounts.google.com/gsi/style':'')+"; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'"+(workspace?' https://accounts.google.com':'')+"; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"+(workspace?'; frame-src https://accounts.google.com':''));
+  res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'"+(workspace?' https://accounts.google.com/gsi/client':'')+"; style-src 'self' 'unsafe-inline'"+(workspace?' https://accounts.google.com/gsi/style':'')+"; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'"+(workspace?' https://accounts.google.com':'')+"; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"+(workspace?"; frame-src 'self' https://accounts.google.com":''));
   res.setHeader('Permissions-Policy','microphone=(self), camera=()');
   const send=(status:number,value:unknown)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(value));};
   const expectedOrigin=externalOrigin??url;
@@ -50,13 +52,16 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
   const path=new URL(req.url??'/',url).pathname;
   if(path.startsWith('/api/')){
    const started=Date.now(),requestId=randomUUID();
-   const operation=path.startsWith('/api/workspace/')?'workspace':path.startsWith('/api/steward/')?'steward':path.startsWith('/api/prime/swarm/')?'swarm':path.startsWith('/api/prime/adk/')?'adk':path.startsWith('/api/prime/bots/')?'bots':path.startsWith('/api/prime/browser/')?'browser':path==='/api/session'?'session':'owner';
+   const operation=path.startsWith('/api/workspace/')?'workspace':path.startsWith('/api/steward/')?'steward':path.startsWith('/api/prime/swarm/')?'swarm':path.startsWith('/api/prime/adk/')?'adk':path.startsWith('/api/prime/bots/')?'bots':path.startsWith('/api/prime/browser/')?'browser':path==='/api/prime/uploads'||path.startsWith('/api/prime/uploads/')?'uploads':path==='/api/prime/artifacts'||path.startsWith('/api/prime/artifacts/')?'artifacts':path==='/api/session'?'session':'owner';
    const record=(outcome:string)=>debug('%j',{schemaVersion:1,event:'prime_api_request',operation,requestId,status:res.statusCode,outcome,durationMs:Date.now()-started});
    res.once('finish',()=>record('returned'));res.once('close',()=>{if(!res.writableEnded)record('disconnected');});
    const supplied=(req.headers.cookie??'').split(';').map(c=>c.trim()).find(c=>c.startsWith('echo_prime='))?.slice(11)??'';
    const allowed=/^[0-9a-f]{64}$/.test(supplied)&&timingSafeEqual(Buffer.from(supplied),Buffer.from(token));
-   if(!allowed||req.headers['x-prime-request']!=='1'||req.headers['sec-fetch-site']==='cross-site'||(req.headers.origin!==undefined&&req.headers.origin!==expectedOrigin)||(req.method==='POST'&&req.headers.origin!==expectedOrigin)){send(403,{error:'Same-origin Prime session required'});return;}
-   if(active>=8){send(429,{error:'Too many requests'});return;}active++;
+   const mediaFileGet=req.method==='GET'&&(/^\/api\/prime\/uploads\/upl_[0-9a-f]{32}\/file$/.test(path)||/^\/api\/prime\/artifacts\/art_[0-9a-f]{32}\/file$/.test(path));
+   const fetchSite=req.headers['sec-fetch-site'];
+   if(!allowed||(!mediaFileGet&&req.headers['x-prime-request']!=='1')||fetchSite==='cross-site'||(mediaFileGet&&fetchSite==='same-site')||(req.headers.origin!==undefined&&req.headers.origin!==expectedOrigin)||(req.method==='POST'&&req.headers.origin!==expectedOrigin)){send(403,{error:'Same-origin Prime session required'});return;}
+   if(mediaFileGet){if(mediaActive>=24){send(429,{error:'Too many requests'});return;}mediaActive++;}
+   else{if(active>=8){send(429,{error:'Too many requests'});return;}active++;}
    const abort=new AbortController();const disconnected=()=>{if(!res.writableEnded)abort.abort();};res.once('close',disconnected);
    try{
     if(path==='/api/session'&&req.method==='GET'){
@@ -66,6 +71,61 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     if(path.startsWith('/api/workspace/')){
      if(!workspace){send(503,{error:'Authenticated Workspace is not configured'});return;}
      await workspace.handle(req,res,new URL(req.url??'/',url),abort.signal);return;
+    }
+    if(path==='/api/prime/uploads'||path.startsWith('/api/prime/uploads/')||path==='/api/prime/artifacts'||path.startsWith('/api/prime/artifacts/')){
+     const uid=workspace?(await workspace.requireApproved(req,abort.signal,!mediaFileGet)).uid:'local';
+     if(path==='/api/prime/uploads/list'&&req.method==='GET'){
+      if(!uploadStore){send(200,{configured:false,maxBytes:0,types:[],uploads:[],reason:'Uploads are not enabled: add an `uploads` section to the Prime config'});return;}
+      const q=new URL(req.url??'/',url).searchParams;
+      send(200,{configured:true,maxBytes:uploadStore.config.maxBytes,types:uploadStore.config.types,uploads:await uploadStore.list(uid,{kind:q.get('kind')??undefined,q:q.get('q')??undefined})});return;
+     }
+     if(path==='/api/prime/artifacts'&&req.method==='GET'){
+      if(!uploadStore){send(200,{configured:false,artifacts:[],reason:'Artifact Center is not enabled: add an `uploads` section to the Prime config'});return;}
+      const q=new URL(req.url??'/',url).searchParams;
+      send(200,{configured:true,artifacts:await uploadStore.listArtifacts(uid,{kind:q.get('kind')??undefined,source:q.get('source')??undefined,q:q.get('q')??undefined})});return;
+     }
+     if(!uploadStore){send(503,{error:'Uploads are not enabled: add an `uploads` section to the Prime config'});return;}
+     if(path==='/api/prime/uploads'&&req.method==='POST'){send(201,await uploadStore.handleUpload(req,uid));return;}
+     const uploadMeta=/^\/api\/prime\/uploads\/([^/]+)$/.exec(path);
+     if(uploadMeta&&req.method==='GET'&&uploadMeta[1]!=='list'){
+      const id=decodeURIComponent(uploadMeta[1]);if(!UPLOAD_ID_RE.test(id)){send(400,{error:'Invalid upload id'});return;}
+      send(200,await uploadStore.get(uid,id));return;
+     }
+     const uploadFile=/^\/api\/prime\/uploads\/([^/]+)\/file$/.exec(path);
+     if(uploadFile&&req.method==='GET'){
+      const id=decodeURIComponent(uploadFile[1]);if(!UPLOAD_ID_RE.test(id)){send(400,{error:'Invalid upload id'});return;}
+      const q=new URL(req.url??'/',url).searchParams;
+      await uploadStore.serveFile(req,res,uid,id,{thumb:q.get('thumb')==='1',download:q.get('download')==='1'});return;
+     }
+     const uploadAction=/^\/api\/prime\/uploads\/([^/]+)\/(delete|update)$/.exec(path);
+     if(uploadAction){
+      if(req.method!=='POST'||!req.headers['content-type']?.startsWith('application/json')){send(405,{error:'JSON POST required'});return;}
+      const id=decodeURIComponent(uploadAction[1]);if(!UPLOAD_ID_RE.test(id)){send(400,{error:'Invalid upload id'});return;}
+      const patch=await body(req);
+      send(200,uploadAction[2]==='delete'?await uploadStore.remove(uid,id):await uploadStore.update(uid,id,patch));return;
+     }
+     if(path==='/api/prime/artifacts'&&req.method==='POST'){
+      if(!req.headers['content-type']?.startsWith('application/json')){send(405,{error:'JSON POST required'});return;}
+      send(201,await uploadStore.registerArtifact(uid,await body(req,2_200_000)));return;
+     }
+     const artMeta=/^\/api\/prime\/artifacts\/([^/]+)$/.exec(path);
+     if(artMeta&&req.method==='GET'){
+      const id=decodeURIComponent(artMeta[1]);if(!ARTIFACT_ID_RE.test(id)){send(400,{error:'Invalid artifact id'});return;}
+      send(200,await uploadStore.getArtifact(uid,id));return;
+     }
+     const artFile=/^\/api\/prime\/artifacts\/([^/]+)\/file$/.exec(path);
+     if(artFile&&req.method==='GET'){
+      const id=decodeURIComponent(artFile[1]);if(!ARTIFACT_ID_RE.test(id)){send(400,{error:'Invalid artifact id'});return;}
+      const q=new URL(req.url??'/',url).searchParams;
+      await uploadStore.serveArtifactFile(req,res,uid,id,q.get('download')!=='0');return;
+     }
+     const artDelete=/^\/api\/prime\/artifacts\/([^/]+)\/delete$/.exec(path);
+     if(artDelete){
+      if(req.method!=='POST'||!req.headers['content-type']?.startsWith('application/json')){send(405,{error:'JSON POST required'});return;}
+      const id=decodeURIComponent(artDelete[1]);if(!ARTIFACT_ID_RE.test(id)){send(400,{error:'Invalid artifact id'});return;}
+      await body(req);send(200,await uploadStore.removeArtifact(uid,id));return;
+     }
+     send(404,{error:'Unknown uploads or artifacts route'});return;
     }
     if(workspace)await workspace.requireOwner(req,abort.signal);
     if(path==='/api/status'&&req.method==='GET'){send(200,await hub.status());return;}
@@ -126,7 +186,7 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     else if(path==='/api/steward/ask')send(200,await hub.stewardAsk(data));
     else send(404,{error:'Unknown route'});
    }catch(e){if(res.headersSent)res.destroy();else send(e instanceof WorkspaceHttpError?e.status:400,{error:redact(e instanceof Error?e.message:'Request failed').slice(0,600)});}
-   finally{res.removeListener('close',disconnected);active--;}
+   finally{res.removeListener('close',disconnected);if(mediaFileGet)mediaActive--;else active--;}
    return;
   }
   if(req.method!=='GET'||!assets[path]){send(404,{error:'Not found'});return;}

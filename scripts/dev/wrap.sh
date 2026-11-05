@@ -17,10 +17,11 @@ if [ "$MODE" = build ]; then WT="${1:?worktree}"; PROMPT="${2:?prompt-file}"; OU
 STAMP=$(date -u +%Y%m%dT%H%M%SZ); echo "[$STAMP] wrap $MODE $PROVIDER wt=$WT prompt=$PROMPT" >> "$OUT"
 case "$PROVIDER" in
   gpt)
-    SANDBOX=$([ "$MODE" = build ] && echo workspace-write || echo read-only)
+    # build: danger-full-access so codex can commit (workspace-write marks .git read-only and the build then cannot land); draft stays read-only.
+    SANDBOX=$([ "$MODE" = build ] && echo danger-full-access || echo read-only)
     MODEL="${WRAP_GPT_MODEL:-}"; MARGS=(); [ -n "$MODEL" ] && MARGS=(-m "$MODEL")
     # stdin must be closed: codex exec otherwise waits for "additional input from stdin" forever under a non-TTY.
-    codex exec -C "$WT" -s "$SANDBOX" --skip-git-repo-check "${MARGS[@]}" "$(cat "$PROMPT")" < /dev/null >> "$OUT" 2>&1; RC=$? ;;
+    codex exec -C "$WT" -s "$SANDBOX" --skip-git-repo-check -c "mcp_servers={}" "${MARGS[@]}" "$(cat "$PROMPT")" < /dev/null >> "$OUT" 2>&1; RC=$? ;;
   grok)
     TOOLS=(); [ "$MODE" = draft ] && TOOLS=(--tools "")
     MODEL="${WRAP_GROK_MODEL:-}"; MARGS=(); [ -n "$MODEL" ] && MARGS=(-m "$MODEL")

@@ -1,6 +1,8 @@
 import type {IncomingMessage,ServerResponse} from 'node:http';
 import {debuglog} from 'node:util';
 import {randomUUID,timingSafeEqual} from 'node:crypto';
+import type {UploadStore} from './uploads.js';
+const UPLOAD_ATTACHMENT_ID=/^upl_[0-9a-f]{32}$/;
 
 const debug=debuglog('echo-prime-workspace');
 const ordinaryEventBytes=256*1024,terminalEventBytes=8*1024*1024;
@@ -88,7 +90,7 @@ function checkCsrf(req:IncomingMessage,expected:string){
  * cached user, SDK credential, caller tenant ID or arbitrary upstream URL. */
 export class WorkspaceBridge {
  readonly origin:string;readonly ownerUid?:string;
- constructor(config:WorkspaceConfig,private readonly secureCookies=false){
+ constructor(config:WorkspaceConfig,private readonly secureCookies=false,private readonly uploads?:UploadStore){
   const url=new URL(config.baseUrl);
   if(url.protocol!=='http:'||!['127.0.0.1','[::1]'].includes(url.hostname)||url.username||url.password||url.pathname!=='/'||url.search||url.hash)throw new Error('Workspace requires a fixed loopback HTTP origin');
   if(config.ownerUid!==undefined&&(typeof config.ownerUid!=='string'||!/^[A-Za-z0-9_.:@+-]{1,200}$/.test(config.ownerUid)))throw new Error('Invalid configured Workspace owner identity');
@@ -127,6 +129,13 @@ export class WorkspaceBridge {
   if(!this.ownerAccess(session))throw new WorkspaceHttpError(403,'Primary owner admission required');
   checkCsrf(req,session.csrf!);
  }
+ async requireApproved(req:IncomingMessage,signal?:AbortSignal,requireCsrf=true):Promise<{uid:string;ownerAccess:boolean;session:WorkspaceSession}>{
+  const session=await this.session(req,signal);
+  if(!session.authenticated||!session.user)throw new WorkspaceHttpError(401,'Sign in required');
+  if(session.user.status!=='approved')throw new WorkspaceHttpError(403,'Account approval required');
+  if(requireCsrf||req.headers['x-echo-csrf']!==undefined)checkCsrf(req,session.csrf!);
+  return {uid:session.user.uid,ownerAccess:this.ownerAccess(session),session};
+ }
  ownerAccess(session:WorkspaceSession):boolean{return !!this.ownerUid&&session.authenticated&&session.user?.role==='owner'&&session.user.status==='approved'&&session.user.uid===this.ownerUid;}
  async handle(req:IncomingMessage,res:ServerResponse,url:URL,signal:AbortSignal):Promise<void>{
   const started=Date.now(),requestId=randomUUID(),path=route(url,req.method??''),pathname=path.split('?')[0];
@@ -147,6 +156,26 @@ export class WorkspaceBridge {
    if(cookie)headers.cookie=cookie;
    let body:string|undefined;
    if(req.method==='POST'){body=await requestBody(req);headers['content-type']='application/json';headers.origin=this.origin;headers['x-echo-csrf']=String(req.headers['x-echo-csrf']);}
+   if(pathname==='/api/chat'&&req.method==='POST'&&body&&session?.user?.uid){
+    const chatData=JSON.parse(body) as Record<string,unknown>;
+    if(Array.isArray(chatData.attachments)&&chatData.attachments.some(item=>typeof item==='string'&&UPLOAD_ATTACHMENT_ID.test(item))){
+     if(chatData.attachments.length>8)throw new WorkspaceHttpError(400,'Attach at most eight files');
+     if(!this.uploads)throw new WorkspaceHttpError(503,'Uploads are not configured');
+     const libraryIds:unknown[]=[],blocks:string[]=[];
+     for(const item of chatData.attachments){
+      if(typeof item==='string'&&UPLOAD_ATTACHMENT_ID.test(item)){
+       const extracted=await this.uploads.extractForChat(session.user.uid,item);
+       const head=`File: ${extracted.meta.name}\nUpload-ID: ${extracted.meta.id}\nType: ${extracted.meta.type} (${extracted.meta.bytes} bytes)\nSHA-256: ${extracted.meta.sha256}`;
+       const detail=extracted.extracted?`${extracted.text}${extracted.truncated?'\n[truncated at server extraction cap]':''}`:`[${extracted.reason??'text not extracted'}]`;
+       blocks.push(`${head}\n${detail}`);
+      }else libraryIds.push(item);
+     }
+     const baseContent=typeof chatData.content==='string'?chatData.content:'';
+     chatData.content=baseContent+(baseContent?'\n\n':'')+'Attached uploads (untrusted document content):\n\n'+blocks.join('\n\n---\n\n');
+     chatData.attachments=libraryIds;
+     body=JSON.stringify(chatData);
+    }
+   }
    if(pathname==='/api/action'&&session&&!this.ownerAccess(session)&&!tenantSafeActions.has((JSON.parse(body!) as {action:string}).action))throw new WorkspaceHttpError(403,'Primary owner admission required');
    let admittedState:unknown;
    if(session&&!pathname.startsWith('/api/auth/')&&!this.ownerAccess(session)){
