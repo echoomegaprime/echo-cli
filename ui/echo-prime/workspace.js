@@ -6,6 +6,15 @@
  const dialog=$('#workspace-dialog'),content=$('#workspace-panel-content'),notice=$('#workspace-panel-status');
  const esh={generation:0,rows:new Map(),review:null,busy:false,floating:false,rect:{x:280,y:90,width:640,height:430}};
  const transport=new window.EchoPrimeWorkspaceTransport({onIdentityChange:identityChanged});
+ // Compact per-turn activity strip (tool chips + one thinking/answering line) replaces the
+ // full-width Activity bubbles. Optional: absent in unit harnesses that don't load activity.js.
+ const activity=window.EchoPrimeActivity;
+ const activityHost=()=>$('#chat-activity');
+ // Exactly one owner of the retry suffix: strip any trailing copy, then append once, so a
+ // transport message that already ends in it is never doubled (the mobile "No automatic retry
+ // was made. No automatic retry was made." report).
+ const once=message=>{const base=String(message??'').replace(/\s*No automatic retry was made\.\s*$/i,'').trimEnd();return (base||'The conversation did not complete.')+' No automatic retry was made.';};
+ const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
  function element(tag,attributes={},...children){
   const node=document.createElement(tag);
   for(const [key,value] of Object.entries(attributes)){if(key==='class')node.className=value;else if(key==='value')node.value=value;else if(value!==false&&value!==undefined)node.setAttribute(key,String(value));}
@@ -33,6 +42,7 @@
  function stopAudio(){state.voiceEpoch++;releaseAudio();state.speech=null;stopCapture();}
  function clearConversation(){
   state.epoch++;state.turn?.abort();state.turn=null;state.chat=null;state.attachments.clear();endConversation();stopAudio();
+  activity?.clear(activityHost());
   $('#chat-log').replaceChildren();$('#chat-log').hidden=true;$('#welcome').hidden=false;$('#prompt').value='';$('#conversation-title').textContent='New conversation';$('#draft-notice').hidden=true;setBusy(false);updateContext();
   clearESH();
  }
@@ -131,34 +141,67 @@
   if(state.turn)return {handled:true,sent:false,detail:'Wait for this turn or select Stop.'};
   if(!transport.session?.authenticated||transport.session.user?.status!=='approved'){await open('account');return {handled:true,sent:false,detail:'Sign in to your approved private Workspace first.'};}
   if(!state.chat)await newChat();if(!state.chat)return {handled:true,sent:false,detail:'Conversation was not created.'};
-  const epoch=state.epoch,chatId=state.chat.id,controller=new AbortController();state.turn=controller;setBusy(true);line('user',text);
+  const epoch=state.epoch,chatId=state.chat.id,requestId=crypto.randomUUID(),controller=new AbortController();state.turn=controller;setBusy(true);line('user',text);
+  activity?.clear(activityHost());let strip=null;
+  const ensureStrip=()=>{if(!strip&&activity)strip=activity.start(activityHost(),{label:'Activity'});return strip;};
   let answer=null,answerText='',completed=false,verified=false,spoken=false;
   let pendingUi=null;
   try{
-   const result=await transport.chat({chat_id:chatId,content:text,request_id:crypto.randomUUID(),attachments:[...state.attachments]},event=>{
+   const result=await transport.chat({chat_id:chatId,content:text,request_id:requestId,attachments:[...state.attachments]},event=>{
     if(epoch!==state.epoch||controller.signal.aborted)return;
     if(event.type==='tool_started'||event.type==='tool_result')ingestESH(event);
     if(event.type==='tool_result'&&event.result&&typeof event.result==='object'&&event.result.ui_action)pendingUi=event.result.ui_action;
-    if(event.type==='status'){$('#draft-notice').textContent=String(event.text||'Echo is answering…').slice(0,600);$('#draft-notice').hidden=false;}
-    else if(event.type==='token'&&typeof event.text==='string'){if(!answer)answer=line('assistant','');answerText+=event.text;if(answerText.length>2_000_000)throw new Error('Answer exceeds display limit.');answer.textContent=answerText;}
-    else if(event.type==='tool_started')line('activity','Using '+String(event.tool||'a tool').slice(0,100),'Request '+String(event.request_id||'').slice(0,100));
-    else if(event.type==='tool_result')line('activity',String(event.tool||'Tool').slice(0,100)+' returned',String(event.evidence?.status||'Result received; postcondition may require separate verification.').slice(0,300));
+    const s=ensureStrip();
+    if(event.type==='status'){$('#draft-notice').hidden=true;s?.thinking();s?.note(String(event.text||'').slice(0,300));}
+    else if(event.type==='token'&&typeof event.text==='string'){s?.answering();if(!answer)answer=line('assistant','');answerText+=event.text;if(answerText.length>2_000_000)throw new Error('Answer exceeds display limit.');answer.textContent=answerText;}
+    else if(event.type==='tool_started')s?.tool(event.request_id,event.tool);
+    else if(event.type==='tool_result')s?.result(event.request_id,event.tool,event.evidence?.status,event.evidence);
+    else if(event.type==='memory_saved')s?.note('Saved a preference locally');
    },controller.signal);
    if(epoch!==state.epoch)return {handled:true,cancelled:true};completed=true;state.chat=result;renderChat();
    const readback=await api('/chats/'+encodeURIComponent(chatId));if(epoch!==state.epoch)return {handled:true,cancelled:true};
-   state.chat=readback;renderChat();await refresh();verified=true;log('chat','returned_and_read_back');
+   state.chat=readback;renderChat();await refresh();verified=true;strip?.done();log('chat','returned_and_read_back');
    let detail='Reply returned and saved conversation read back.';
    if((voiceOptions.spoken||voiceOptions.conversation)&&!document.hidden){
     const reply=[...(state.chat.messages||[])].reverse().find(message=>message.role==='assistant');
-    try{spoken=await speakReply(reply,chatId);if(!spoken)endConversation();}catch(error){endConversation();if(epoch===state.epoch){status('Speech unavailable. '+(error instanceof Error?error.message:'No audio receipt returned.')+' No automatic retry was made.');detail+=' Speech is unavailable.';}}
+    try{spoken=await speakReply(reply,chatId);if(!spoken)endConversation();}catch(error){endConversation();if(epoch===state.epoch){status(once('Speech unavailable. '+(error instanceof Error?error.message:'No audio receipt returned.')));detail+=' Speech is unavailable.';}}
    }
    if(pendingUi&&epoch===state.epoch)await applyUiAction(pendingUi);
    return {handled:true,sent:true,verified:true,detail};
   }catch(error){
    if(epoch!==state.epoch)return {handled:true,cancelled:true};
-   const detail=completed?'Reply returned; saved readback is unavailable. Reopen the conversation before retrying.':controller.signal.aborted?'Stopped displaying this turn. The upstream model may finish saving it; reopen the conversation before retrying.':(error instanceof Error?error.message:'Conversation failed.')+' No automatic retry was made.';
-   endConversation();if(!completed)line('activity',detail);return {handled:true,sent:completed,verified:false,detail};
+   if(controller.signal.aborted){const detail='Stopped displaying this turn. The upstream model may finish saving it; reopen the conversation before retrying.';endConversation();strip?.fail('Stopped.');return {handled:true,sent:false,verified:false,detail};}
+   // The backend finishes persisting the reply even if the stream drops (its writer swallows a
+   // broken pipe to complete persistence), so an incomplete stream is recoverable: read the saved
+   // conversation back and show the reply that was already written, instead of a dead-end bubble.
+   if(!completed&&chatId){
+    strip?.status('Connection dropped — recovering the saved reply…');
+    const recovered=await recoverReply(chatId,requestId,epoch,controller.signal);
+    if(recovered&&epoch===state.epoch){
+     state.chat=recovered.chat;renderChat();await refresh().catch(()=>{});strip?.done('Recovered after the connection dropped');log('chat','recovered_after_incomplete_stream');
+     return {handled:true,sent:true,verified:true,detail:'Reply recovered from the saved conversation after the connection dropped.'};
+    }
+   }
+   const detail=completed?once('Reply returned; saved readback is unavailable. Reopen the conversation before retrying.'):once(error instanceof Error?error.message:'Conversation failed.');
+   endConversation();strip?.fail(detail);return {handled:true,sent:completed,verified:false,detail};
   }finally{if(state.turn===controller){state.turn=null;setBusy(false);}if(epoch===state.epoch&&verified&&spoken&&voiceOptions.conversation)scheduleListening();}
+ }
+ // Bounded recovery after an incomplete stream: the saved reply carries request_id `<id>:reply`
+ // (app.py message()). Poll the saved conversation a few times (the drop may land before the
+ // final answer is persisted) and return it once the matching assistant reply exists.
+ async function recoverReply(chatId,requestId,epoch,signal){
+  const target=requestId+':reply';
+  for(let attempt=0;attempt<6;attempt++){
+   if(epoch!==state.epoch||signal?.aborted)return null;
+   try{
+    const chat=await api('/chats/'+encodeURIComponent(chatId));
+    if(epoch!==state.epoch)return null;
+    const reply=(chat.messages||[]).find(message=>message&&message.role==='assistant'&&message.request_id===target&&typeof message.content==='string'&&message.content.trim());
+    if(reply)return {chat,reply};
+   }catch{/* transient during recovery; keep polling within the bound */}
+   if(attempt<5)await delay(2500);
+  }
+  return null;
  }
  function section(title,...nodes){content.append(card(title,...nodes));}
  function clearESH(){esh.generation++;esh.rows.clear();esh.review=null;esh.busy=false;$('#workspace-esh-command').value='';$('#workspace-esh-reviewed').textContent='';$('#workspace-esh-output').replaceChildren();$('#workspace-esh-run').disabled=true;$('#workspace-esh').hidden=true;$('#workspace-esh-status').textContent='Open a saved conversation before dispatch. Policy and grants remain with the canonical ESH owner.';}

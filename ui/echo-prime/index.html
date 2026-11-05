@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="fleet.css"><link rel="stylesheet" href="composer.css"><link rel="stylesheet" href="swarm.css"><link rel="stylesheet" href="agents.css">
   <link rel="stylesheet" href="views.css">
+  <link rel="stylesheet" href="activity.css">
   <script defer src="composer.js"></script><script defer src="voicebar.js"></script><script defer src="plugins.js"></script>
 </head>
 <body>
@@ -49,6 +50,7 @@
     </div>
     <div class="welcome" id="welcome"><div class="eyebrow"><span></span>YOUR CONNECTED WORKSPACE</div><h1><span id="welcome-lead">What shall we create</span><br class="mobile-break"> <em id="welcome-audience">together?</em></h1><p>Your intelligence. Your tools. <span>One connected workspace.</span></p><div class="suggestions"><button data-prompt="Help me build something useful."><svg><use href="#i-code"/></svg>Write some code<span>↗</span></button><button data-prompt="Help me work through an idea."><svg><use href="#i-spark"/></svg>Work through an idea<span>↗</span></button><button data-prompt="I have a question for Echo."><svg><use href="#i-chat"/></svg>Ask a question<span>↗</span></button></div></div>
     <section id="chat-log" class="chat-log" role="log" aria-label="Conversation" aria-live="polite" hidden></section>
+    <div id="chat-activity" class="chat-activity" aria-label="Activity for the current turn" hidden></div>
     <div class="draft-notice" id="draft-notice" hidden></div>
     <div class="composer-wrap"><div class="composer-toolbar"><div class="mode-tabs" role="tablist" aria-label="Creation mode"><button class="selected" role="tab" aria-selected="true" data-mode="Chat">Chat</button><button role="tab" aria-selected="false" data-mode="Image">Image</button><button role="tab" aria-selected="false" data-mode="Video">Video</button><button role="tab" aria-selected="false" data-mode="Music">Music</button><button role="tab" aria-selected="false" data-mode="Sound FX">Sound FX</button><button role="tab" aria-selected="false" data-mode="Voice">Voice</button></div><button class="quiet-button" data-open="systems"><span class="status-dot"></span>Connect Echo systems</button></div>
       <form id="composer" class="composer"><label class="sr-only" for="prompt">Message Echo Prime</label><textarea id="prompt" maxlength="12000" rows="2" placeholder="Message Echo Prime…"></textarea><div class="composer-bottom"><span class="persona"><svg><use href="#i-spark"/></svg>Echo Prime persona</span><div class="send-actions"><button type="button" class="quiet-button" id="stop-chat" hidden>Stop</button><button type="button" class="icon-button" id="voice-button" aria-label="Voice connection"><svg><use href="#i-mic"/></svg></button><button type="submit" class="send">Send<svg><use href="#i-arrow"/></svg></button></div></div></form>
@@ -87,7 +89,7 @@
 <section id="agents-run" class="adk-run" aria-live="polite" aria-label="Live agent run" hidden></section>
 <div id="agents-runs" class="agents-runs"></div>
 <p class="connection-note">Budgets are clamped to the agent lane and the service caps (120 calls, $5, 80 min). Stop ends a run after its current step; a provider call already running is not interrupted.</p></dialog>
-<script src="catalog.js"></script><script src="orb.js"></script><script src="chat.js"></script><script src="workspace-client.js"></script><script src="workspace.js"></script><script src="app.js"></script><script src="models.js"></script><script src="integrations.js"></script><script src="steward.js"></script><script src="swarm.js"></script><script src="agents.js"></script>
+<script src="catalog.js"></script><script src="orb.js"></script><script src="activity.js"></script><script src="chat.js"></script><script src="workspace-client.js"></script><script src="workspace.js"></script><script src="app.js"></script><script src="models.js"></script><script src="integrations.js"></script><script src="steward.js"></script><script src="swarm.js"></script><script src="agents.js"></script>
 <script src="fleet.js"></script><script src="logs.js"></script>
 <script src="views.js"></script>
 </body></html>

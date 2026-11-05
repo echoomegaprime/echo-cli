@@ -80,6 +80,17 @@ ${INSTRUCTIONS}`;
   } finally {
     const s = store.get(sessionId); s.status = status; store.save(s); release();
   }
+  // No-final-text guard: the model ended the loop (step budget, empty reply, or interruption)
+  // without a `final` action, so `answer` is empty. Never return a blank answer the browser would
+  // render as "Turn ended without an answer." — summarise, truthfully, what was actually inspected
+  // and that no final answer was composed, so Echo always says something grounded.
+  if (!answer.trim() && status !== 'pending_approval' && status !== 'completed') {
+    const inspected = [...reads.keys()];
+    const seen = inspected.length ? ` I inspected ${inspected.length} file${inspected.length === 1 ? '' : 's'} this turn: ${inspected.slice(0, 20).join(', ')}.` : ' I did not read any files this turn.';
+    answer = redact(status === 'interrupted'
+      ? `The turn was interrupted before I composed a final answer.${inspected.length ? ` I had inspected: ${inspected.slice(0, 20).join(', ')}.` : ''} Nothing was changed and nothing was retried.`
+      : `I reached the step limit before composing a final answer.${seen} The steps are saved; ask a narrower question or raise the step budget to continue. No edit was applied and nothing was retried.`);
+  }
   const pending = store.get(sessionId).proposals.filter(p => p.status === 'pending').length;
   return { mode, sessionId, status, answer, pending, answerVerification: status === 'pending_approval' ? 'application_generated' : 'unverified_model_text', evidence: [...reads.values()] };
 }
