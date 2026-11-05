@@ -101,7 +101,7 @@
     }
     pending+=decoder.decode();if(pending.trim())accept(pending);
     if(signal?.aborted||generation!==this.generation)throw new Error('Account session changed or conversation interrupted.');
-    if(!result)throw new Error('Conversation ended without completion. No automatic retry was made.');
+    if(!result){const incomplete=new Error('The connection closed before Echo confirmed the reply.');incomplete.incomplete=true;throw incomplete;}
     return result;
    }finally{await reader.cancel().catch(()=>{});}
   }

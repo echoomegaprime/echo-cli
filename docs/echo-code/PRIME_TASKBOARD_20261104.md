@@ -20,7 +20,7 @@ Live = merged into `agent/prime-workspace-parity-20261104`, gates green, deploye
 - [ ] Echo talks: spoken replies on by default, ConvAI pipeline (sentence streaming, barge-in, orb sync), freeman voice
 - [ ] In-chat browser via ShadowGlass relay (QUENCH→FORGE reverse tunnel), owner-only, approval when Echo drives
 - [ ] All nodes connected (fleet probes fixed to run from FORGE; truthful reasons; CRUCIBLE dormant)
-- [ ] Compact mobile activity timeline + root cause of "ended without completion" + duplicated sentence
+- [x] Compact mobile activity timeline + root cause of "ended without completion" (server saved the reply; client now reads it back on a dropped stream) + duplicated sentence (a91e791)
 - [ ] Living orb: states, colour swirl on deep thinking, satellites = agents/bots, electrical arcs when busy
 - [ ] Media auto-router (best model/tool from a bare prompt) + ✨ Enhance prompt (chat/image/video/music/sfx/voice via Claude/GPT/Gemini/Grok)
 - [ ] Brain: truthfulness layer, auto model routing (coding→Claude, long-context→Gemini, research→Grok, refusal→Qwen labelled), Personality Forge auto-select, bloodline directive block
