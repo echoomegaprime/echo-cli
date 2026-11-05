@@ -4,8 +4,10 @@ import type {SessionStore} from '../code/sessions.js';
 import {runSharedTurn,type CodingAdmission,type CodingInvoker} from '../code/shared.js';
 import {runTurn,type TurnResult} from '../code/agent.js';
 import {isModelId,VARIANT_ARG,type ModelId,type ModelRouter,type AnswerInfo} from '../code/model-factory.js';
+import {PrimeAutonomyHooks,type BeforeTurn,type AutonomyActivity} from './autonomy-hooks.js';
+import {isPrimeRole,type PrimeRole,type RoleState} from './roles.js';
 /** Either the authenticated host path (invoke + admission) or a reviewed model router (Qwen on loopback, or a vendor CLI). */
-export interface SharedChatOptions {workspace:Workspace;store:SessionStore;invoke?:CodingInvoker;admission?:CodingAdmission;models?:ModelRouter}
+export interface SharedChatOptions {workspace:Workspace;store:SessionStore;invoke?:CodingInvoker;admission?:CodingAdmission;models?:ModelRouter;autonomyHooks?:PrimeAutonomyHooks}
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const debug=debuglog('echo-prime');
 /** Attached by an authenticated embedding host. Browser data cannot select an
@@ -25,14 +27,16 @@ export class SharedChat {
   if(models)return {state:'attached',busy:this.busy,mode:'read-only',routing:true,defaultProvider:models.defaultId,detail:'Model router attached; the selected provider answers and no other provider is used as a fallback'};
   return {state:'attached',busy:this.busy,mode:'read-only',routing:false,detail:'Host attached; pinned owner contract and coding.invoke are checked on every turn'};
  }
- async submit(input:unknown,signal?:AbortSignal):Promise<TurnResult&{requestId:string;model?:AnswerInfo}>{
+ async submit(input:unknown,signal?:AbortSignal):Promise<TurnResult&{requestId:string;model?:AnswerInfo;role?:RoleState;activity?:AutonomyActivity[]}>{
   if(!input||typeof input!=='object'||Array.isArray(input))throw new Error('Invalid chat request');
   const data=input as Record<string,unknown>;
-  if(Object.keys(data).some(k=>!['requestId','prompt','sessionId','provider','model'].includes(k))||
+  if(Object.keys(data).some(k=>!['requestId','prompt','sessionId','provider','model','rolePin'].includes(k))||
    typeof data.requestId!=='string'||!uuid.test(data.requestId)||typeof data.prompt!=='string'||
    !data.prompt.trim()||data.prompt.length>12000||
    (data.sessionId!==undefined&&(typeof data.sessionId!=='string'||!uuid.test(data.sessionId))))throw new Error('Invalid chat request');
   const {requestId,prompt}=data;
+  if(data.rolePin!==undefined&&data.rolePin!==null&&!isPrimeRole(data.rolePin))throw new Error('Invalid role pin');
+  if(data.rolePin!==undefined&&!this.options.autonomyHooks?.roles)throw new Error('Role switching is not configured');
   const router=this.options.models;
   if(data.provider!==undefined){
    if(!isModelId(data.provider))throw new Error('Invalid chat request');
@@ -59,19 +63,27 @@ export class SharedChat {
   const started=performance.now(),controller=new AbortController();
   const abort=()=>controller.abort();signal?.addEventListener('abort',abort,{once:true});
   const timer=setTimeout(abort,120000);
+  const hooks=this.options.autonomyHooks,ctx={owner:true,prompt,sessionId:session.id,signal:controller.signal};
+  const finish=async(result:TurnResult,before?:BeforeTurn)=>{
+   if(!hooks||!before)return result;
+   const activity=[...before.activity,...await hooks.after(ctx,result,store.get(session.id).messages)];
+   return {...result,role:before.role,activity};
+  };
   debug('%j',{event:'prime_chat_started',requestId,sessionId:session.id,mode:'read-only',...(variant?{variant}:{})});
   try{
    if(router&&provider){
+    const before=await hooks?.before(ctx,hooks.roles?router.turn(provider,variant).model:undefined,data.rolePin as PrimeRole|null|undefined);
     const turn=router.turn(provider,variant);
-    const result=await runTurn({workspace,store,model:turn.model,sessionId:session.id,prompt,mode:'read-only',maxSteps:10,signal:controller.signal});
+    const result=await runTurn({workspace,store,model:turn.model,sessionId:session.id,prompt,mode:'read-only',maxSteps:10,signal:controller.signal,...(before?{systemContext:before.context}:{})});
     turn.answered();
     debug('%j',{event:'prime_chat_finished',requestId,sessionId:session.id,provider,status:result.status,durationMs:Math.round(performance.now()-started)});
-    return {...result,requestId,model:turn.info()};
+    return {...await finish(result,before),requestId,model:turn.info()};
    }
+   const before=await hooks?.before(ctx,undefined,data.rolePin as PrimeRole|null|undefined);
    const result=await runSharedTurn({workspace,store,invoke:invoke!,admission:admission!,sessionId:session.id,prompt,
-    mode:'read-only',maxSteps:10,signal:controller.signal});
+    mode:'read-only',maxSteps:10,signal:controller.signal,...(before?{systemContext:before.context}:{})});
    debug('%j',{event:'prime_chat_finished',requestId,sessionId:session.id,status:result.status,durationMs:Math.round(performance.now()-started)});
-   return {...result,requestId};
+   return {...await finish(result,before),requestId};
   }catch(error){debug('%j',{event:'prime_chat_refused',requestId,durationMs:Math.round(performance.now()-started)});throw error;}
   finally{clearTimeout(timer);signal?.removeEventListener('abort',abort);this.busy=false;}
  }

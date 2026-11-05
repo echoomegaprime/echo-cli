@@ -14,6 +14,8 @@ export interface TurnOptions {
   /** Applies only to this turn; prior prompts and sessions never grant proposal permission. */
   mode?: TaskMode;
   maxSteps?: number; signal?: AbortSignal; onEvent?: (event: { kind: string; detail: string }) => void;
+  /** Bounded context assembled by the host, never browser-selected instructions. */
+  systemContext?: string;
 }
 export interface SourceEvidence { path: string; sha256: string; lineCount: number }
 export interface TurnResult { mode: TaskMode; sessionId: string; status: Session['status']; answer: string; pending: number; answerVerification: 'unverified_model_text' | 'application_generated'; evidence: SourceEvidence[] }
@@ -39,6 +41,7 @@ ${INSTRUCTIONS}`;
       if (signal?.aborted) { status = 'interrupted'; break; }
       const history = store.get(sessionId).messages;
       const messages: Message[] = [{ role: 'system', content: instructions }, ...history];
+      if(options.systemContext)messages[0].content+='\n'+options.systemContext.slice(0,28000);
       const action = await model.next(messages, signal);
       if (signal?.aborted) { status = 'interrupted'; break; }
       store.append(sessionId, { role: 'assistant', content: JSON.stringify(action) });

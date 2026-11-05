@@ -149,6 +149,7 @@
   try{
    const result=await transport.chat({chat_id:chatId,content:text,request_id:crypto.randomUUID(),attachments:[...state.attachments]},event=>{
     if(epoch!==state.epoch||controller.signal.aborted)return;
+    window.EchoPrimeAutonomy?.event(event,{sessionId:chatId,pinSupported:false});
     if(event.type==='tool_started'||event.type==='tool_result')ingestESH(event);
     if(event.type==='tool_result'&&event.result&&typeof event.result==='object'&&event.result.ui_action)pendingUi=event.result.ui_action;
     if(event.type==='status'){const notice=String(event.text||'Echo is answering…').slice(0,600);$('#draft-notice').textContent=notice;$('#draft-notice').hidden=false;thinking?.status(notice);thinking?.step(notice);}
@@ -177,6 +178,7 @@
  function clearESH(){esh.generation++;esh.rows.clear();esh.review=null;esh.busy=false;$('#workspace-esh-command').value='';$('#workspace-esh-reviewed').textContent='';renderESH();$('#workspace-esh-run').disabled=true;$('#workspace-esh').hidden=true;$('#workspace-esh-status').textContent='Open a saved conversation before dispatch. Policy and grants remain with the canonical ESH owner.';}
  function ingestESH(event,historical=false){
   let data=event;try{if(typeof event.content==='string')data=JSON.parse(event.content);}catch{return;}
+  if(['esh_run','esh_verb'].includes(data.tool)){const receipt=data.result?.receipt;data={...data,tool:'esh',result:receipt?{...receipt,...(data.result.state==='review_required'?{verdict:'gated'}:{})}:data.result};}
   const kind=event.kind||event.type,manual=['action_receipt','action_failed'].includes(kind)&&(data.action||data.request?.action)==='esh';
   if(!manual&&!(['tool_started','tool_result'].includes(kind)&&data.tool==='esh'))return;
   const id=data.request_id||data.request?.request_id||event.id;if(typeof id!=='string')return;
