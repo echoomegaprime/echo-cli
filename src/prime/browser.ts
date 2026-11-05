@@ -17,7 +17,11 @@ export const BROWSER_TEXT_MAX=65536;          // 64 KiB cap on any owner-supplie
 export const BROWSER_SHOT_MAX=2*1024*1024;     // 2 MiB cap on a screenshot data URL
 const RESPONSE_MAX=1048576;                    // 1 MiB cap on an ordinary relay response
 const SHOT_RESPONSE_MAX=BROWSER_SHOT_MAX+65536;// a little slack so an over-cap shot is read then rejected
-const MAX_SCROLL=100000;
+/** Scroll steps are an enum of four LITERAL expressions — the caller never contributes digits or text to what runs. */
+const SCROLL_EXPR={down:'window.scrollBy(0,600)',up:'window.scrollBy(0,-600)',pagedown:'window.scrollBy(0,window.innerHeight)',pageup:'window.scrollBy(0,-window.innerHeight)'} as const;
+export type ScrollStep=keyof typeof SCROLL_EXPR;
+/** Fixed probe run before raw typing: refuses when the focused element is credential-bearing (mirrors the extension's secret heuristic). */
+const FOCUS_GUARD_EXPR="(()=>{const e=document.activeElement;if(!e||e===document.body)return 'none';const t=String(e.type||'').toLowerCase();const h=[e.name,e.id,e.getAttribute&&e.getAttribute('autocomplete'),e.getAttribute&&e.getAttribute('aria-label'),e.placeholder].map(v=>String(v||'')).join(' ').toLowerCase();return t==='password'||/pass|pwd|secret|otp|cvv|card|ssn|token|security.?code/.test(h)?'secret':'ok';})()";
 const DATA_URL=/^data:image\/(?:png|jpeg);base64,[A-Za-z0-9+/=]+$/;
 const debug=debuglog('echo-prime');
 /** Fixed CDP expressions for verbs the relay has no RPC for. NEVER built from caller input. */
@@ -42,7 +46,7 @@ export function parseBrowserConfig(value:unknown):BrowserConfig{
 }
 /** Recursively redacts every string and bounds depth, breadth and string length before anything reaches the browser. */
 export function sanitize(value:unknown,depth=0):unknown{
- if(typeof value==='string')return redact(value.length>20000?value.slice(0,20000)+'…':value);
+ if(typeof value==='string'){const safe=redact(value);return safe.length>20000?safe.slice(0,20000)+'…':safe;} // redact BEFORE truncating so a cut PEM/token cannot dodge the redactor
  if(value===null||typeof value==='number'||typeof value==='boolean')return value;
  if(depth>=10)return null;
  if(Array.isArray(value))return value.slice(0,300).map(v=>sanitize(v,depth+1));
@@ -62,8 +66,21 @@ export function assertWebUrl(value:unknown):string{
 }
 function boundedText(value:unknown):string{
  if(typeof value!=='string')throw new BrowserError(400,'Text is required');
- if(value.length>BROWSER_TEXT_MAX)throw new BrowserError(400,'Text exceeds the 64 KiB limit');
+ if(Buffer.byteLength(value,'utf8')>BROWSER_TEXT_MAX)throw new BrowserError(400,'Text exceeds the 64 KiB limit'); // bytes, not UTF-16 units
  return value;
+}
+/** Bounded JSON body read shared by /rpc and /status: the relay never gets to stream more than `maxBytes` into memory. */
+async function readJson(response:Response,maxBytes:number):Promise<unknown>{
+ const reader=response.body?.getReader();const chunks:Uint8Array[]=[];let size=0;
+ try{
+  if(reader)for(;;){
+   const {done,value}=await reader.read();if(done)break;size+=value.length;
+   if(size>maxBytes)throw new BrowserError(502,'Relay response exceeds the '+Math.round(maxBytes/1024)+' KiB limit');
+   chunks.push(value);
+  }
+ }catch(error){if(error instanceof BrowserError)throw error;throw new BrowserError(504,'Relay response was interrupted');}
+ finally{await reader?.cancel().catch(()=>undefined);}
+ try{return JSON.parse(Buffer.concat(chunks).toString('utf8'));}catch{return undefined;}
 }
 export interface BrowserTab {id:number;url:string;title:string;active:boolean;windowId?:number;incognito?:boolean}
 export interface BrowserSnapshot {tab:number;url:string;title:string;text:string;nodes:unknown[];screenshot?:string;metrics?:Record<string,number>;screenshotReason?:string}
@@ -87,17 +104,7 @@ export class BrowserClient {
    if(error instanceof Error&&error.name==='TimeoutError')throw new BrowserError(504,'ShadowGlass relay timed out after '+Math.round(ms/1000)+' s; outcome unknown');
    throw new BrowserError(502,'ShadowGlass relay unreachable at '+this.origin.origin+' (is the EchoShadowGlass-Relay-Forge tunnel up and the side panel open?)');
   }
-  const reader=response.body?.getReader();const chunks:Uint8Array[]=[];let size=0;
-  try{
-   if(reader)for(;;){
-    const {done,value}=await reader.read();if(done)break;size+=value.length;
-    if(size>maxBytes)throw new BrowserError(502,'Relay response exceeds the '+Math.round(maxBytes/1024)+' KiB limit');
-    chunks.push(value);
-   }
-  }catch(error){if(error instanceof BrowserError)throw error;throw new BrowserError(504,'Relay response was interrupted');}
-  finally{await reader?.cancel().catch(()=>undefined);}
-  let parsed:unknown;try{parsed=JSON.parse(Buffer.concat(chunks).toString('utf8'));}catch{parsed=undefined;}
-  const data=obj(parsed);
+  const data=obj(await readJson(response,maxBytes));
   if(response.status===503||data.error==='ext_offline')throw new BrowserError(502,'ShadowGlass extension is not connected; open the side panel on the Commander\'s Chrome');
   if(!response.ok)throw new BrowserError(response.status<500?400:502,'Relay answered HTTP '+response.status);
   if(data.ok!==true){
@@ -119,7 +126,7 @@ export class BrowserClient {
    throw new BrowserError(502,'ShadowGlass relay unreachable at '+this.origin.origin);
   }
   if(!response.ok)throw new BrowserError(502,'Relay status HTTP '+response.status);
-  const data=obj(await response.json().catch(()=>undefined));
+  const data=obj(await readJson(response,65536)); // bounded like every other relay read
   return {extConnected:data.ext_connected===true,version:typeof data.version==='string'?redact(data.version).slice(0,40):undefined};
  }
  async tabs(signal?:AbortSignal):Promise<BrowserTab[]>{
@@ -142,7 +149,7 @@ export class BrowserClient {
  async navigate(tab:unknown,url:unknown,signal?:AbortSignal):Promise<{tab:number;url:string}>{
   if(!isTab(tab))throw new BrowserError(400,'Invalid tab id');
   const href=assertWebUrl(url);
-  await this.rpc('navigate',{tabId:tab,url:href},{},signal);this.log('navigate',tab,href);return {tab,url:href};
+  await this.rpc('navigate',{tabId:tab,url:href},{},signal);this.log('navigate',tab,href);return {tab,url:redact(href).slice(0,2048)};
  }
  /** back/forward/reload via fixed CDP expressions (the relay has no RPC for them). */
  async nav(tab:unknown,verb:NavVerb,signal?:AbortSignal):Promise<{tab:number;verb:NavVerb}>{
@@ -151,11 +158,14 @@ export class BrowserClient {
   if(!expression)throw new BrowserError(400,'Unknown navigation verb');
   await this.rpc('cdp_evaluate',{tabId:tab,expression},{},signal);this.log(verb,tab);return {tab,verb};
  }
- async scroll(tab:unknown,dy:unknown,signal?:AbortSignal):Promise<{tab:number;dy:number}>{
+ /** Scroll by an enumerated step (up/down/pageup/pagedown). A numeric dy is accepted only for its sign and size class. */
+ async scroll(tab:unknown,step:unknown,signal?:AbortSignal):Promise<{tab:number;step:ScrollStep}>{
   if(!isTab(tab))throw new BrowserError(400,'Invalid tab id');
-  if(typeof dy!=='number'||!Number.isFinite(dy))throw new BrowserError(400,'Scroll distance must be a number');
-  const n=Math.max(-MAX_SCROLL,Math.min(MAX_SCROLL,Math.trunc(dy)));
-  await this.rpc('cdp_evaluate',{tabId:tab,expression:`window.scrollBy(0,${n})`},{},signal);this.log('scroll',tab);return {tab,dy:n};
+  let dir:ScrollStep|undefined;
+  if(typeof step==='string'&&Object.prototype.hasOwnProperty.call(SCROLL_EXPR,step))dir=step as ScrollStep;
+  else if(typeof step==='number'&&Number.isFinite(step)&&step!==0)dir=Math.abs(step)>=800?(step>0?'pagedown':'pageup'):(step>0?'down':'up');
+  if(!dir)throw new BrowserError(400,'Scroll step must be up, down, pageup or pagedown');
+  await this.rpc('cdp_evaluate',{tabId:tab,expression:SCROLL_EXPR[dir]},{},signal);this.log('scroll',tab);return {tab,step:dir};
  }
  /** Trusted click at viewport coordinates (the UI scale-corrects image px → viewport px with the snapshot metrics). */
  async click(tab:unknown,target:{x?:unknown;y?:unknown;text?:unknown},signal?:AbortSignal):Promise<{tab:number;clicked:string}>{
@@ -168,10 +178,14 @@ export class BrowserClient {
   if(!Number.isFinite(x)||!Number.isFinite(y)||x<0||y<0||x>20000||y>20000)throw new BrowserError(400,'Click coordinates out of range');
   await this.rpc('cdp_click_at',{tabId:tab,x:Math.round(x),y:Math.round(y)},{},signal);this.log('click',tab);return {tab,clicked:'point'};
  }
- /** Raw keystrokes into the focused element (after a click). Never credentials. */
+ /** Raw keystrokes into the focused element (after a click). A fixed CDP probe first confirms the focused field is not
+  *  credential-bearing — `cdp_type` itself has no secret check, so this is what enforces "never types credentials" here. */
  async type(tab:unknown,text:unknown,signal?:AbortSignal):Promise<{tab:number;typed:true}>{
   if(!isTab(tab))throw new BrowserError(400,'Invalid tab id');
   const value=boundedText(text);
+  const focus=await this.rpc('cdp_evaluate',{tabId:tab,expression:FOCUS_GUARD_EXPR},{},signal);
+  if(focus==='secret')throw new BrowserError(400,'Refusing to type into a credential-bearing field; Prime never types secrets');
+  if(focus!=='ok')throw new BrowserError(400,'No editable field is focused; click a field first');
   await this.rpc('cdp_type',{tabId:tab,text:value},{},signal);this.log('type',tab);return {tab,typed:true};
  }
  /** Fill a named field by selector (content script; refuses secret fields). */

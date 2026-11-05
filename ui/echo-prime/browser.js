@@ -11,7 +11,11 @@
  const POLL_MS=1500,STORE='echo-prime-browser-v1',MAX_ACTIONS=20;
  const VERBS=['open','navigate','click','type','read'];
  let panel=null,els={},state={open:false,collapsed:false,view:'text',tabs:[],activeTab:null,current:null,width:420};
- let generation=0,pollTimer=null,inflight=false,lastPoll=0,busy=false,ran=new Set();
+ // generation: poll/snapshot epoch · accountEpoch: bumps on echo-account-changed (aborts an executing batch) ·
+ // lifecycle: bumps on open/close so a late activation step never resumes a closed panel.
+ let generation=0,accountEpoch=0,lifecycle=0,pollTimer=null,inflight=false,lastPoll=0;
+ // decided: block keys the owner already approved/skipped this session · proposed: pending cards by key (re-shown if a redraw drops them)
+ const decided=new Set(),proposed=new Map();
 
  function el(tag,attrs,...kids){
   const n=document.createElement(tag);
@@ -29,14 +33,24 @@
   const session=ws.session;if(!session||session.authenticated!==true)return 'signin';
   return session.ownerAccess===true?'owner':'member';
  }
- async function headers(){try{const ws=workspace();return ws&&ws.ownerHeaders?await ws.ownerHeaders():{};}catch{return {};}}
- /** Owner-only fetch. A signin/member visitor is refused WITHOUT any request (clearing the page for them restarted
-  *  the old 401 loop); only an owner session that 401/403s has anything to invalidate. */
+ const quiet=message=>Object.assign(new Error(message),{quiet:true});
+ const refusal=access=>access==='signin'?quiet('Sign in to use the in-chat browser.'):access==='member'?quiet('The in-chat browser is the primary owner\'s only.'):null;
+ async function settled(){const ws=workspace();if(ws)await Promise.resolve(ws.ready).catch(()=>{});return ws;}
+ /** Owner proof headers. On a Workspace host a rejected ownerHeaders() (demoted/expired owner) PROPAGATES: it must never
+  *  degrade to {} and still fire the request. On an open host there is no Workspace and the Prime cookie alone decides. */
+ async function headers(){
+  const ws=await settled();if(!ws||typeof ws.ownerHeaders!=='function')return {};
+  try{return await ws.ownerHeaders();}catch(error){throw quiet(error&&error.message||'Primary owner admission required.');}
+ }
+ /** Owner-only fetch. A signin/member visitor is refused WITHOUT any request (clearing the page for them restarted the
+  *  old 401 loop); admission is read after the Workspace is `ready` and re-checked after the async owner proof, so a
+  *  session that changed mid-flight never gets a request. Only an owner session that 401/403s has anything to invalidate. */
  async function api(path,body,signal){
-  const access=admission();
-  if(access==='signin')throw Object.assign(new Error('Sign in to use the in-chat browser.'),{quiet:true});
-  if(access==='member')throw Object.assign(new Error('The in-chat browser is the primary owner\'s only.'),{quiet:true});
-  const sent={'x-prime-request':'1',...await headers(),...(body?{'content-type':'application/json'}:{})};
+  await settled();
+  let access=admission(),denied=refusal(access);if(denied)throw denied;
+  const proof=await headers();
+  access=admission();denied=refusal(access);if(denied)throw denied;
+  const sent={'x-prime-request':'1',...proof,...(body?{'content-type':'application/json'}:{})};
   const response=await fetch('/api/prime/browser/'+path,{method:body?'POST':'GET',credentials:'same-origin',headers:sent,...(body?{body:JSON.stringify(body)}:{}),signal});
   let data=null;try{data=await response.json();}catch{}
   if(!response.ok){
@@ -63,14 +77,14 @@
   }
   return out;
  }
- function actionToCall(a){
+ /** The act body for one drive action against `tab` — built at EXECUTION time so later steps follow a tab an earlier `open` created. */
+ function actionCall(a,tab){
   switch(a.verb){
    case 'open':return {verb:'open',url:a.value};
-   case 'navigate':return {verb:'navigate',tab:state.activeTab,url:a.value};
-   case 'click':return {verb:'click',tab:state.activeTab,text:a.value};
-   case 'type':return {verb:'type',tab:state.activeTab,text:a.value};
-   case 'read':return {verb:'read',tab:state.activeTab,selector:a.value};
-   default:return null;
+   case 'navigate':return {verb:'navigate',tab,url:a.value};
+   case 'click':return {verb:'click',tab,text:a.value};
+   case 'type':return {verb:'type',tab,text:a.value};
+   default:return {verb:'read',tab,selector:a.value};
   }
  }
 
@@ -85,53 +99,73 @@
   card.append(el('strong',{text:'In-chat browser'}),el('p',{text:title}));
   return card;
  }
- /** Builds the Approve/Skip card for a drive batch. NOTHING fetches until Approve is clicked. */
- function proposeBatch(actions){
-  const calls=actions.map(actionToCall).filter(Boolean);
-  if(!calls.length)return null;
-  const card=systemCard('Echo proposed '+calls.length+' browser action'+(calls.length===1?'':'s'));
+ /** Builds the Approve/Skip card for a drive batch. NOTHING fetches until Approve is clicked. The card shows every action in
+  *  full (what is shown is exactly what runs). On Approve the batch runs against a batch-local tab that follows each successful
+  *  `open`, is pinned to the account epoch it was approved under (an account change aborts it), and stops on the first failure. */
+ function proposeBatch(actions,key){
+  const items=(Array.isArray(actions)?actions:[]).filter(a=>a&&VERBS.includes(a.verb)&&typeof a.value==='string'&&a.value.trim());
+  if(!items.length)return null;
+  const start=state.activeTab;
+  const card=systemCard('Echo proposed '+items.length+' browser action'+(items.length===1?'':'s')+(start!==null?' · starting on tab '+start:' · no tab is open, so the first action must be open'));
   const list=el('ol',{class:'browser-batch'});
-  for(const c of calls)list.append(el('li',{text:c.verb+' '+clip(c.url||c.text||c.selector||'',200)}));
+  for(const a of items)list.append(el('li',{},el('code',{text:a.verb}),' ',el('span',{class:'browser-batch-value',text:a.value})));
   const result=el('div',{class:'browser-batch-result'});
   const approve=el('button',{type:'button',class:'new-chat','data-browser-approve':'1'},'Approve'),skip=el('button',{type:'button',class:'quiet-button'},'Skip');
   const controls=el('div',{class:'browser-batch-controls'},approve,skip);
   card.append(list,controls,result);
-  skip.addEventListener('click',()=>{controls.hidden=true;result.append(el('p',{class:'browser-meta',text:'Skipped. Nothing was run.'}));});
+  const decide=()=>{if(key)decided.add(key);};
+  skip.addEventListener('click',()=>{decide();controls.hidden=true;result.append(el('p',{class:'browser-meta',text:'Skipped. Nothing was run.'}));});
   approve.addEventListener('click',async()=>{
-   if(approve.disabled)return;approve.disabled=true;skip.disabled=true;controls.hidden=true;
+   if(approve.disabled)return;approve.disabled=true;skip.disabled=true;controls.hidden=true;decide();
+   const epoch=accountEpoch;let tab=start;
    if(!state.open)openPanel();
-   for(let i=0;i<calls.length;i++){
-    const c=calls[i],row=el('p',{class:'browser-meta',text:'['+(i+1)+'/'+calls.length+'] '+c.verb+'…'});result.append(row);
+   for(let i=0;i<items.length;i++){
+    const a=items[i],row=el('p',{class:'browser-meta',text:'['+(i+1)+'/'+items.length+'] '+a.verb+'…'});result.append(row);
+    const c=actionCall(a,tab);
     try{
-     const out=await act(c.verb,c.verb==='open'?{url:c.url}:c);
-     if(c.verb==='open'&&out&&typeof out.id==='number'){state.activeTab=out.id;}
-     row.textContent='['+(i+1)+'/'+calls.length+'] '+c.verb+' ✓ '+clip(out&&out.value!==undefined?('read: '+out.value):(out&&out.url?out.url:'done'),200);
-    }catch(error){row.textContent='['+(i+1)+'/'+calls.length+'] '+c.verb+' failed: '+clip(error&&error.message||'failed',200);result.append(el('p',{class:'browser-error',text:'Stopped: the remaining actions were not run.'}));break;}
+     const out=await act(c.verb,c);
+     if(epoch!==accountEpoch){row.textContent='['+(i+1)+'/'+items.length+'] '+a.verb+' finished after the account changed; stopping.';break;}
+     if(a.verb==='open'&&out&&typeof out.id==='number'){tab=out.id;state.activeTab=out.id;}
+     row.textContent='['+(i+1)+'/'+items.length+'] '+a.verb+' ✓ '+clip(out&&out.value!==undefined?('read: '+out.value):(out&&out.url?out.url:'done'),400);
+    }catch(error){
+     if(epoch!==accountEpoch){row.textContent='['+(i+1)+'/'+items.length+'] '+a.verb+' stopped: the account changed.';break;}
+     row.textContent='['+(i+1)+'/'+items.length+'] '+a.verb+' failed: '+clip(error&&error.message||'failed',300);result.append(el('p',{class:'browser-error',text:'Stopped: the remaining actions were not run.'}));break;
+    }
    }
-   refreshTabs().catch(()=>{});
+   if(epoch===accountEpoch)refreshTabs().catch(()=>{});
   });
   return card;
  }
- // Scan assistant replies for a ```browser block once each (keyed by text within the account epoch).
+ // Scan assistant replies for a COMPLETE ```browser block (a streaming reply stays unmarked until its closing fence arrives).
+ // Keyed by block text within the account epoch: a block the owner already approved/skipped is never re-proposed; a pending
+ // card that a chat redraw (workspace renderChat → replaceChildren) removed IS re-proposed so the owner can still decide.
  function scan(root){
   const host=root||$('#chat-log');if(!host||!host.children)return;
-  for(const node of [...host.children]){
-   const cls=node.className||'';if(!/\bassistant\b/.test(cls)||node.dataset&&node.dataset.browserScanned)continue;
-   const text=node.textContent||'';if(!/```browser/i.test(text))continue;
+  const present=[...host.children];
+  for(const node of present){
+   const cls=node.className||'';if(!/\bassistant\b/.test(cls))continue;
+   const text=node.textContent||'';if(!/```browser[\s\S]*?```/i.test(text))continue;
+   if(node.dataset&&node.dataset.browserScanned)continue;
    if(node.dataset)node.dataset.browserScanned='1';
-   const key='b:'+text.length+':'+clip(text,120);if(ran.has(key))continue;ran.add(key);
-   const actions=parseActions(text);if(actions.length)proposeBatch(actions);
+   const key='b:'+text.length+':'+clip(text,160);
+   if(decided.has(key))continue;
+   const existing=proposed.get(key);if(existing&&present.includes(existing))continue;
+   const actions=parseActions(text);if(!actions.length)continue;
+   const card=proposeBatch(actions,key);if(card)proposed.set(key,card);
   }
  }
 
  // ---- panel ----
  function store(){try{localStorage.setItem(STORE,JSON.stringify({open:state.open,collapsed:state.collapsed,width:state.width}));}catch{}}
- function restore(){try{const s=JSON.parse(localStorage.getItem(STORE)||'{}');if(s&&typeof s==='object'){if(typeof s.width==='number')state.width=Math.max(300,Math.min(900,s.width));state.collapsed=!!s.collapsed;}}catch{}}
+ /** Widest the dock may be: never wider than the viewport minus room for the conversation (a restored 900 px at 801 px must not cover the chat). */
+ function maxWidth(){const vw=Number(window.innerWidth)||1200;return Math.max(300,Math.min(900,vw-320));}
+ const clampWidth=w=>Math.max(300,Math.min(maxWidth(),Math.round(Number(w)||420)));
+ function restore(){try{const s=JSON.parse(localStorage.getItem(STORE)||'{}');if(s&&typeof s==='object'){if(typeof s.width==='number')state.width=clampWidth(s.width);state.collapsed=!!s.collapsed;}}catch{}}
  function applyLayout(){
   if(!panel)return;
   document.body.classList&&document.body.classList.toggle('browser-open',state.open);
   document.body.classList&&document.body.classList.toggle('browser-collapsed',state.open&&state.collapsed);
-  if(document.body.style&&document.body.style.setProperty)document.body.style.setProperty('--browser-w',state.width+'px');
+  if(document.body.style&&document.body.style.setProperty)document.body.style.setProperty('--browser-w',clampWidth(state.width)+'px');
   panel.hidden=!state.open;
   if(els.collapse)els.collapse.textContent=state.collapsed?'▸':'▾';
  }
@@ -176,7 +210,7 @@
   for(const t of state.tabs.slice(0,30)){
    const active=t.id===state.activeTab;
    const tab=el('button',{type:'button',class:'browser-tab'+(active?' active':''),role:'tab','aria-selected':String(active),title:clip(t.url,300)},clip(t.title||t.url||'tab',28));
-   tab.addEventListener('click',()=>{state.activeTab=t.id;renderTabs();pollNow();});
+   tab.addEventListener('click',()=>{if(state.activeTab===t.id)return;state.activeTab=t.id;state.current=null;els.view.replaceChildren(el('p',{class:'browser-meta',text:'Loading…'}));renderTabs();pollNow();});
    const x=el('span',{class:'browser-tab-x','aria-hidden':'true'},'×');
    x.addEventListener('click',async ev=>{if(ev.stopPropagation)ev.stopPropagation();try{await act('close',{tab:t.id});}catch(e){status(e.message);}await refreshTabs();if(state.activeTab===t.id)state.activeTab=state.tabs[0]?state.tabs[0].id:null;pollNow();});
    tab.append(x);els.tabstrip.append(tab);
@@ -209,7 +243,7 @@
      const li=el('li',{});
      const label=clip((node.role||'')+' · '+(node.name||''),80);
      const go=el('button',{type:'button',class:'browser-node','title':clip(node.selector,200)},label);
-     go.addEventListener('click',async()=>{try{await act('click',{tab:state.activeTab,text:String(node.name).slice(0,2000)});status('Clicked: '+label);pollNow();}catch(e){status(e.message);}});
+     go.addEventListener('click',async()=>{try{await act('click',{tab:snap.tab,text:String(node.name).slice(0,2000)});status('Clicked: '+label);pollNow();}catch(e){status(e.message);}}); // the tab this frame came from, never a later active tab
      li.append(go);ul.append(li);
     }
     view.append(el('p',{class:'browser-meta',text:'Interactive elements:'}),ul);
@@ -222,18 +256,21 @@
   const natW=img.naturalWidth||rect.width,natH=img.naturalHeight||rect.height,dpr=snap.metrics.dpr||1;
   const px=(ev.clientX-rect.left)*(natW/(rect.width||1)),py=(ev.clientY-rect.top)*(natH/(rect.height||1));
   const x=Math.round(px/dpr-(snap.metrics.scrollX||0)),y=Math.round(py/dpr-(snap.metrics.scrollY||0));
-  act('click',{tab:state.activeTab,x,y}).then(()=>{status('Clicked at ('+x+', '+y+')');pollNow();}).catch(e=>status(e.message));
+  act('click',{tab:snap.tab,x,y}).then(()=>{status('Clicked at ('+x+', '+y+')');pollNow();}).catch(e=>status(e.message));
  }
 
  // ---- polling ----
  function paused(){return !state.open||state.collapsed||document.hidden;}
  async function pollNow(){
   if(inflight||paused()||state.activeTab===null)return;
-  inflight=true;lastPoll=Date.now();const mine=generation;
+  inflight=true;lastPoll=Date.now();const mine=generation,tab=state.activeTab,view=state.view;
   try{
-   const snap=await api('snapshot/'+encodeURIComponent(state.activeTab)+(state.view==='image'?'?shot=1':''),undefined);
-   if(mine!==generation)return;renderSnapshot(snap);status('');
-  }catch(error){if(mine!==generation)return;if(!error.quiet)status('Live view unavailable: '+clip(error.message,200));}
+   const snap=await api('snapshot/'+encodeURIComponent(tab)+(view==='image'?'?shot=1':''),undefined);
+   // A frame is only rendered for the tab/view it was requested for: switching tabs mid-flight discards it.
+   if(mine!==generation||!state.open||tab!==state.activeTab||view!==state.view)return;
+   if(snap&&typeof snap.tab==='number'&&snap.tab!==tab)return;
+   renderSnapshot(snap);status('');
+  }catch(error){if(mine!==generation||tab!==state.activeTab)return;if(!error.quiet)status('Live view unavailable: '+clip(error.message,200));}
   finally{inflight=false;}
  }
  function loop(){
@@ -243,20 +280,25 @@
  function startLoop(){if(pollTimer)clearTimeout(pollTimer);generation++;loop();}
  function stopLoop(){if(pollTimer)clearTimeout(pollTimer);pollTimer=null;generation++;inflight=false;}
 
+ /** Panel activation. Every await is followed by a lifecycle check so closing the panel mid-activation stops it: a late
+  *  status answer never triggers a tabs fetch or starts the poll loop on a closed panel. */
  async function activate(){
-  if(admission()==='signin'){offState('Sign in to use the in-chat browser.');return;}
-  if(admission()==='member'){offState('The in-chat browser is the primary owner\'s only.');return;}
+  const mine=++lifecycle;
+  await settled();if(mine!==lifecycle||!state.open)return;
+  const denied=refusal(admission());if(denied){offState(denied.message);return;}
   status('Checking the ShadowGlass relay…');
-  let st;try{st=await api('status');}catch(e){offState('Relay status unavailable: '+clip(e.message,200));return;}
+  let st;try{st=await api('status');}catch(e){if(mine!==lifecycle||!state.open)return;offState(e.quiet?e.message:'Relay status unavailable: '+clip(e.message,200));return;}
+  if(mine!==lifecycle||!state.open)return;
   if(!st.configured){offState();return;}
   if(!st.available){offState(st.reason||'ShadowGlass is not connected.');return;}
   status('');
-  try{await refreshTabs();}catch(e){status(e.message);}
+  try{await refreshTabs();}catch(e){if(mine!==lifecycle||!state.open)return;status(e.message);}
+  if(mine!==lifecycle||!state.open)return;
   startLoop();pollNow();
  }
 
  function openPanel(){build();state.open=true;state.collapsed=false;applyLayout();store();activate();}
- function closePanel(){state.open=false;applyLayout();store();stopLoop();}
+ function closePanel(){lifecycle++;state.open=false;applyLayout();store();stopLoop();}
  function toggleCollapse(){state.collapsed=!state.collapsed;applyLayout();store();if(!state.collapsed&&!paused()){startLoop();pollNow();}}
 
  function wire(){
@@ -274,10 +316,10 @@
   if(els.resizer)wireResize();
  }
  function wireResize(){
-  const onMove=e=>{const w=Math.max(300,Math.min(900,window.innerWidth-(e.clientX||0)));state.width=w;applyLayout();};
+  const onMove=e=>{state.width=clampWidth((Number(window.innerWidth)||1200)-(e.clientX||0));applyLayout();};
   const onUp=()=>{store();window.removeEventListener('mousemove',onMove);window.removeEventListener('mouseup',onUp);};
   els.resizer.addEventListener('mousedown',e=>{if(e.preventDefault)e.preventDefault();window.addEventListener('mousemove',onMove);window.addEventListener('mouseup',onUp);});
-  els.resizer.addEventListener('keydown',e=>{if(e.key==='ArrowLeft')state.width=Math.min(900,state.width+20);else if(e.key==='ArrowRight')state.width=Math.max(300,state.width-20);else return;applyLayout();store();});
+  els.resizer.addEventListener('keydown',e=>{if(e.key==='ArrowLeft')state.width=clampWidth(state.width+20);else if(e.key==='ArrowRight')state.width=clampWidth(state.width-20);else return;applyLayout();store();});
  }
  function navigateAddr(forceNew){
   const raw=els.addr.value.trim();if(!raw)return;
@@ -312,7 +354,16 @@
   if(ws&&typeof ws.send==='function'){const original=ws.send.bind(ws);ws.send=text=>isBrowse(text)?handleBrowse(String(text)):original(text);}
  }
 
- function reset(){generation++;stopLoop();ran.clear();state.tabs=[];state.activeTab=null;state.current=null;if(els.tabstrip)els.tabstrip.replaceChildren();if(state.open)closePanel();}
+ /** Account change: abort the executing batch (epoch), stop polling, forget proposals, and clear EVERY account-derived
+  *  DOM field (frame, address, selector/value inputs, status) so nothing of the previous account stays visible. */
+ function reset(){
+  accountEpoch++;generation++;lifecycle++;stopLoop();decided.clear();proposed.clear();
+  state.tabs=[];state.activeTab=null;state.current=null;
+  if(els.tabstrip)els.tabstrip.replaceChildren();if(els.view)els.view.replaceChildren();
+  for(const k of ['addr','fieldSel','fieldVal'])if(els[k])els[k].value='';
+  status('');
+  if(state.open)closePanel();
+ }
 
  restore();
  const openNav=$('#open-browser');if(openNav)openNav.addEventListener('click',()=>state.open?closePanel():openPanel());
@@ -321,5 +372,6 @@
  document.addEventListener('visibilitychange',()=>{if(state.open){if(!paused()){startLoop();pollNow();}}});
  window.addEventListener('echo-account-changed',reset);
  window.addEventListener('pagehide',stopLoop);
+ window.addEventListener('resize',()=>{if(state.open){state.width=clampWidth(state.width);applyLayout();}});
  window.EchoPrimeBrowser={parseActions,admission,proposeBatch,scan,isBrowse,handleBrowse,open:openPanel,close:closePanel,isOpen(){return state.open;},paused,state};
 })();
