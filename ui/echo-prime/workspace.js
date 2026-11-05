@@ -75,8 +75,24 @@
    const name=session?.user?.name||session?.user?.email||'Your account';$('.profile > span:nth-child(2)').textContent=session?.authenticated?name:'Sign in';$('.avatar').textContent=session?.authenticated?name.slice(0,2).toUpperCase():'EP';
    $('.workspace-label').textContent=session?.authenticated?'Private Workspace':'Sign in to Workspace';
    const brand=$('.brand small');if(brand)brand.textContent='YOUR PRIVATE WORKSPACE';
+   accountControls(session,name);
   }
  }
+ // Always-visible account controls (top bar + sidebar bottom). Only shown once a Workspace backend is configured;
+ // anonymous visitors get Sign in / Request access, signed-in accounts get the avatar menu and one-click Sign out.
+ function accountControls(session,name){
+  const signedIn=session?.authenticated===true;
+  for(const id of ['#topbar-signin','#sidebar-signin','#sidebar-signup'])$(id).hidden=signedIn;
+  $('#topbar-account').hidden=!signedIn;$('#topbar-account').open=false;$('#sidebar-signout').hidden=!signedIn;
+  $('#topbar-avatar').textContent=signedIn?initialsOf(session):'EP';$('#topbar-name').textContent=signedIn?name:'Account';$('#topbar-menu-name').textContent=signedIn?name:'Account';
+  const email=session?.user?.email;$('#topbar-menu-email').textContent=signedIn&&email&&email!==name?String(email):'';$('#topbar-role').textContent=signedIn?roleOf(session):'';
+ }
+ let accountIntent=null;// 'signup' opens the account view on the request-access path
+ function openAccount(intent){accountIntent=intent||null;return open('account');}
+ for(const id of ['#topbar-signin','#sidebar-signin'])$(id).addEventListener('click',()=>void openAccount(null));
+ $('#sidebar-signup').addEventListener('click',()=>void openAccount('signup'));
+ for(const id of ['#topbar-signout','#sidebar-signout'])$(id).addEventListener('click',()=>{$('#topbar-account').open=false;void signOut();});
+ $('#topbar-account').addEventListener('click',event=>{const target=event.target,item=typeof target?.closest==='function'?target.closest('[data-workspace-view]'):null;if(item||target?.dataset?.workspaceView==='account')$('#topbar-account').open=false;});
  function setBusy(value){$('#composer .send').disabled=value;$('#stop-chat').hidden=!value;$('#chat-log').setAttribute('aria-busy',String(value));}
  function updateContext(){
   const capacity=Number(state.data?.context_length),messages=state.chat?.messages||[];
@@ -409,26 +425,31 @@
  async function auth(operation,body){if(authBusy)throw new Error('Wait for the current account request.');authBusy=true;const epoch=state.epoch,panel=state.panel;try{const value=await transport.auth(operation,body,state.controller.signal);if(epoch!==state.epoch||panel!==state.panel)throw new Error('Account view changed; response discarded.');return value;}finally{authBusy=false;}}
  let logoutBusy=false;
  async function signOut(){
+  // One click, no confirmation: from the account view or from the top-bar / sidebar Sign out buttons. The identity
+  // change itself (page clear + `echo-account-changed`) is driven by the transport readback, exactly as a sign-in is.
   if(logoutBusy)return;logoutBusy=true;const panel=state.panel,accountEpoch=state.accountEpoch;let revocationReturned=false;
   try{
-   status('Revoking this local session…');
+   notify('Revoking this local session…');
    // Successful revocation intentionally invalidates identity and its UI epoch.
    // Use the transport's revocation-only proof rather than the private api wrapper.
    await transport.request('/auth/logout',{});
    revocationReturned=true;
    const session=await transport.loadSession();
    if(session?.workspaceConfigured!==true||session.authenticated!==false||session.user!==null||session.csrf!==null)throw new Error('Anonymous session readback unavailable.');
-   if(panel!==state.panel)return;clearFields();content.replaceChildren();await account(session);
-   if(panel===state.panel)status('Signed out. Anonymous session readback verified.');log('logout','anonymous_readback_verified');
+   if(panel!==state.panel)return;clearFields();content.replaceChildren();
+   if(dialog.open)await account(session);// the sign-in card replaces the account view; a closed dialog stays closed
+   if(panel===state.panel)notify('Signed out. Anonymous session readback verified.');log('logout','anonymous_readback_verified');
   }catch{
    // A separately admitted newer identity owns its own view; never overwrite it
    // with a late result from an older account's sign-out attempt.
    if(!revocationReturned&&transport.session?.authenticated&&accountEpoch!==state.accountEpoch)return;
    transport.clear();
-   if(panel===state.panel){clearFields();content.replaceChildren();status('Sign-out could not be confirmed. This page has been cleared. No automatic retry or account readmission was attempted. Reload to check the current session before signing in again.');}
+   if(panel===state.panel){clearFields();content.replaceChildren();notify('Sign-out could not be confirmed. This page has been cleared. No automatic retry or account readmission was attempted. Reload to check the current session before signing in again.');}
    log('logout','unconfirmed');
   }finally{logoutBusy=false;}
  }
+ // Panel status when the Workspace dialog is open; the page-level notice otherwise (top-bar / sidebar sign-out).
+ function notify(text){status(text);if(!dialog.open){$('#draft-notice').textContent=text;$('#draft-notice').hidden=false;}}
  async function account(verifiedSession){
   const panel=state.panel;let session;
   try{session=verifiedSession===undefined?await transport.loadSession():verifiedSession;}
@@ -439,20 +460,59 @@
   }
   if(panel!==state.panel)return;
   if(session?.authenticated){
-   section(session.user.name||session.user.email||'Your account',element('p',{},session.user.status==='approved'?'Your private Workspace is available.':'Account status: '+session.user.status),button('Sign out',signOut));
-   if(session.ownerAccess){const value=await api('/auth/accounts');for(const user of (value.accounts||[]).slice(0,200)){if(user.role==='owner')continue;section(user.email||'Member account',element('p',{},'Status: '+user.status),button('Approve account',()=>decision(user,'approve')),button('Deny account',()=>decision(user,'deny')));}}
+   const user=session.user||{},name=user.name||user.email||'Your account';
+   const identity=element('div',{class:'signin-identity'},element('span',{class:'signin-avatar','aria-hidden':'true'},initialsOf(session)),element('div',{},element('h3',{},name,element('span',{class:'signin-role-badge'},roleOf(session))),user.email&&user.email!==name?element('p',{class:'signin-email'},String(user.email)):null));
+   const card=element('article',{class:'signin-card signed-in'},signinBrand(),identity,element('p',{class:'signin-lead'},user.status==='approved'?'Your private Workspace is available.':'Account status: '+user.status),user.status==='pending'?element('p',{class:'signin-fine'},'The primary owner approves new accounts. Your private Workspace opens once approved.'):null,button('Sign out',signOut));
+   content.append(card);
+   if(session.ownerAccess){const value=await api('/auth/accounts');for(const member of (value.accounts||[]).slice(0,200)){if(member.role==='owner')continue;section(member.email||'Member account',element('p',{},'Status: '+member.status),button('Approve account',()=>decision(member,'approve')),button('Deny account',()=>decision(member,'deny')));}}
    return;
   }
-  const email=input('Email or existing supported user ID'),password=input('Password','','password'),name=input('Display name'),googleButton=element('div',{});
-  section('Sign in to your private Workspace',field('Email / user ID',email),field('Password',password),button('Sign in',async()=>{const body={email:email.value.trim(),password:password.value};password.value='';try{await auth('login',body);await accountRefresh();}finally{body.password='';password.value='';}}),field('Display name · new accounts',name),button('Create account',async()=>{const body={email:email.value.trim(),password:password.value,display_name:name.value};password.value='';try{const result=await auth('signup',body);status(result.message||'Signup returned. Verify your email and wait for owner approval.');}finally{body.password='';password.value='';}}),button('Forgot password?',async()=>{const address=email.value.trim();if(!address.includes('@'))throw new Error('Enter your email address first.');status((await auth('reset',{email:address})).message||'Recovery request returned.');}),googleButton);
-  try{
-   const config=await auth('config');
-   if(config.google_login_enabled&&typeof config.google_client_id==='string'){
-    const render=()=>{if(panel!==state.panel||!dialog.open||!googleButton.isConnected)return;window.google.accounts.id.initialize({client_id:config.google_client_id,auto_select:false,callback:async result=>{if(panel!==state.panel||!dialog.open||!googleButton.isConnected){result.credential='';return;}try{await auth('login',{provider:'google',id_token:result.credential});await accountRefresh();}catch(error){if(panel===state.panel)status(error.message);}finally{result.credential='';}}});window.google.accounts.id.renderButton(googleButton,{theme:'filled_black',size:'large',width:280});};
-    if(window.google?.accounts?.id)render();else{let script=document.querySelector('script[data-prime-google]');if(!script){script=document.createElement('script');script.src='https://accounts.google.com/gsi/client';script.async=true;script.dataset.primeGoogle='1';script.addEventListener('error',()=>status('Google sign-in script is unavailable. Use an existing supported account route.'));document.head.append(script);}script.addEventListener('load',render,{once:true});}
-   }
-  }catch{if(panel===state.panel)status('Google configuration is unavailable. No alternate identity provider was selected.');}
+  // Anonymous: one centred card. Google Identity Services renders its own button (an iframe) into `slot`; Prime only
+  // owns the container, theme and width. Every state is explicit: loading, ready, unavailable, blocked, error.
+  const email=input('Email or existing supported user ID'),password=input('Password','','password'),name=input('Display name');
+  const slot=element('div',{class:'signin-google-slot'}),googleStatus=element('p',{class:'signin-google-status',role:'status'}),googleWrap=element('div',{class:'signin-google','data-state':'loading'},slot,googleStatus);
+  const retry=button('Retry Google sign-in',()=>google());retry.hidden=true;googleWrap.append(retry);
+  const alt=element('details',{class:'signin-alt'},element('summary',{},'Use email or an existing account instead'),field('Email / user ID',email),field('Password',password),button('Sign in',async()=>{const body={email:email.value.trim(),password:password.value};password.value='';try{await auth('login',body);await accountRefresh();}finally{body.password='';password.value='';}}),field('Display name · new accounts',name),button('Create account',async()=>{const body={email:email.value.trim(),password:password.value,display_name:name.value};password.value='';try{const result=await auth('signup',body);status(result.message||'Signup returned. Verify your email and wait for owner approval.');}finally{body.password='';password.value='';}}),button('Request password recovery',async()=>{status((await auth('reset',{email:email.value.trim()})).message||'Recovery request returned.');}));
+  const intent=accountIntent;accountIntent=null;const signup=intent==='signup';
+  const card=element('article',{class:'signin-card','data-intent':signup?'signup':false},signinBrand(),element('h3',{},signup?'Request access to Echo Prime':'Sign in to Echo Prime'),element('p',{class:'signin-lead'},signup?'Continue with Google or create an account below. The primary owner approves each new member before the private Workspace opens.':'One sign-in opens your private Workspace: saved conversations, projects, files and memories, on every device.'),googleWrap,
+   element('div',{class:'signin-roles'},element('div',{class:'signin-role'},element('strong',{},'Members'),'A private Workspace of your own. Nothing is shared with other accounts.'),element('div',{class:'signin-role'},element('strong',{},'Primary owner'),'Also operates the fleet: SDK, Vault, ESH shell, logs and node Stewards.')),
+   alt,element('p',{class:'signin-fine'},'New accounts wait for owner approval. ',element('a',{href:'/privacy.html'},'Privacy'),' · No password or token is kept in this browser.'));
+  if(signup){alt.open=true;}
+  content.append(card);
+  if(signup)email.focus();
+  let timer=null;
+  const setState=(value,text)=>{if(panel!==state.panel||!card.isConnected)return;googleWrap.setAttribute('data-state',value);googleStatus.textContent=text||'';retry.hidden=!(value==='blocked'||value==='error');if(value==='unavailable'||value==='blocked'||value==='error')alt.open=true;};
+  async function google(){
+   clearTimeout(timer);setState('loading','Preparing Google sign-in…');
+   let config;
+   try{config=await auth('config');}
+   catch{if(panel===state.panel)status('Google configuration is unavailable. No alternate identity provider was selected.');setState('error','Google sign-in configuration is unavailable. Use email or an existing account below.');return;}
+   if(panel!==state.panel||!card.isConnected)return;
+   if(!config.google_login_enabled||typeof config.google_client_id!=='string'){setState('unavailable','Google sign-in is not enabled on this Workspace. Use email or an existing account below.');return;}
+   const render=()=>{
+    clearTimeout(timer);if(panel!==state.panel||!dialog.open||!slot.isConnected)return;
+    if(!window.google?.accounts?.id){setState('blocked','Google’s identity library did not load. A content blocker or tracking protection may be blocking accounts.google.com; allow it, then retry.');return;}
+    try{
+     window.google.accounts.id.initialize({client_id:config.google_client_id,auto_select:false,callback:async result=>{if(panel!==state.panel||!dialog.open||!slot.isConnected){result.credential='';return;}setState('loading','Signing you in…');try{await auth('login',{provider:'google',id_token:result.credential});await accountRefresh();}catch(error){if(panel===state.panel){status(error.message);setState('error',error.message);}}finally{result.credential='';}}});
+     slot.replaceChildren();window.google.accounts.id.renderButton(slot,googleButtonOptions(slot));
+     setState('ready','If no Google window opens, allow pop-ups for this site and select the button again.');
+    }catch(error){setState('blocked','Google sign-in could not render ('+(error instanceof Error?error.message:'unknown error')+'). Allow accounts.google.com and pop-ups, then retry.');}
+   };
+   if(window.google?.accounts?.id){render();return;}
+   let script=document.querySelector('script[data-prime-google]');
+   if(script&&script.dataset.primeGoogleState==='failed'){if(typeof script.remove==='function')script.remove();script=null;}
+   if(!script){script=document.createElement('script');script.src='https://accounts.google.com/gsi/client';script.async=true;script.dataset.primeGoogle='1';document.head.append(script);}
+   script.addEventListener('load',render,{once:true});
+   script.addEventListener('error',()=>{script.dataset.primeGoogleState='failed';clearTimeout(timer);if(panel!==state.panel)return;status('Google sign-in script is unavailable. Use an existing supported account route.');setState('blocked','The browser blocked Google’s sign-in script (tracking protection, a content blocker or no network). Allow accounts.google.com, then retry. Email sign-in still works.');},{once:true});
+   timer=setTimeout(()=>{if(panel!==state.panel||googleWrap.getAttribute('data-state')!=='loading')return;setState('blocked','Google’s sign-in script has not loaded after 8 seconds. It may be blocked; allow accounts.google.com and retry, or use email below.');},8000);
+  }
+  void google();
  }
+ // Sign-in card helpers. The GIS button is sized to its container (GIS accepts 200–400 px) and themed for the page.
+ function googleButtonOptions(slot){const measured=Number(slot?.clientWidth)||0;return {type:'standard',theme:document.documentElement?.dataset?.theme==='light'?'outline':'filled_black',size:'large',shape:'pill',text:'continue_with',logo_alignment:'left',width:Math.max(200,Math.min(400,measured||320))};}
+ function signinBrand(){const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('class','echo-mark');svg.setAttribute('aria-hidden','true');const use=document.createElementNS('http://www.w3.org/2000/svg','use');use.setAttribute('href','#i-echo-mark');svg.append(use);return element('div',{class:'signin-brand'},svg,element('span',{class:'wordmark-text','data-text':'ECHO PRIME'},'ECHO PRIME'));}
+ function initialsOf(session){const base=String(session?.user?.name||session?.user?.email||'').trim();const parts=base.split(/[\s@._-]+/).filter(Boolean);const text=((parts[0]?.[0]||'')+(parts[1]?.[0]||parts[0]?.[1]||'')).toUpperCase();return text||'EP';}
+ function roleOf(session){if(session?.ownerAccess===true)return 'Owner';if(session?.user?.status==='pending')return 'Pending';return 'Member';}
  function decision(user,choice){clearFields();content.replaceChildren(card('Review account decision',element('p',{},`${choice==='approve'?'Approve':'Deny'} ${user.email||user.uid}?`),element('p',{},'Exact account: '+user.uid),button('Confirm this account decision',async()=>{const receipt=await api('/auth/decide',{uid:user.uid,decision:choice});await open('account');status('Account decision returned: '+(receipt.user?.status||'read the current account status above')+'.');}),button('Cancel',()=>open('account'))));}
  async function accountRefresh(){
   const session=await transport.loadSession();if(session?.authenticated&&session.user.status==='approved')await refresh();await open('account');
