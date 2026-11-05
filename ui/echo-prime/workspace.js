@@ -106,6 +106,18 @@
   window.EchoPrimeChat.reset();clearConversation();const epoch=state.epoch,chat=await api('/chats/'+encodeURIComponent(id));if(epoch!==state.epoch)return;
   state.chat=chat;$('#workspace-chat-kind').value='workspace';renderChat();renderProjects();if(dialog.open)dialog.close();
  }
+ // A tool result may carry `ui_action` (Workspace app.js:176,192; agent_tools.py `workspace` tool): once the reply is
+ // saved and read back, open the named chat or move to the named view. Ids and views are validated here; the view
+ // module (views.js) applies its own admission gate, so a member never lands on an owner-only page.
+ const uiViews=new Set(['chats','projects','library','plugins','sdk','vault','review','media','diagnostics']);
+ async function applyUiAction(action){
+  if(!action||typeof action!=='object'||Array.isArray(action))return;
+  try{
+   if(action.action==='open_chat'&&typeof action.id==='string'&&/^[A-Za-z0-9_-]{1,120}$/.test(action.id)){await openChat(action.id);log('ui_action','open_chat');}
+   else if(action.action==='navigate'&&typeof action.view==='string'&&uiViews.has(action.view)){const moved=await window.EchoPrimeViews?.navigate(action.view);log('ui_action',moved?'navigated':'ignored');}
+   else log('ui_action','ignored');
+  }catch(error){status(typeof error?.message==='string'?error.message:'Navigation after the reply failed.');log('ui_action','failed');}
+ }
  async function newChat(){
   await ready;if(!state.enabled)return false;
   if(!transport.session?.authenticated||transport.session.user?.status!=='approved'){await open('account');return true;}
@@ -121,10 +133,12 @@
   if(!state.chat)await newChat();if(!state.chat)return {handled:true,sent:false,detail:'Conversation was not created.'};
   const epoch=state.epoch,chatId=state.chat.id,controller=new AbortController();state.turn=controller;setBusy(true);line('user',text);
   let answer=null,answerText='',completed=false,verified=false,spoken=false;
+  let pendingUi=null;
   try{
    const result=await transport.chat({chat_id:chatId,content:text,request_id:crypto.randomUUID(),attachments:[...state.attachments]},event=>{
     if(epoch!==state.epoch||controller.signal.aborted)return;
     if(event.type==='tool_started'||event.type==='tool_result')ingestESH(event);
+    if(event.type==='tool_result'&&event.result&&typeof event.result==='object'&&event.result.ui_action)pendingUi=event.result.ui_action;
     if(event.type==='status'){$('#draft-notice').textContent=String(event.text||'Echo is answering…').slice(0,600);$('#draft-notice').hidden=false;}
     else if(event.type==='token'&&typeof event.text==='string'){if(!answer)answer=line('assistant','');answerText+=event.text;if(answerText.length>2_000_000)throw new Error('Answer exceeds display limit.');answer.textContent=answerText;}
     else if(event.type==='tool_started')line('activity','Using '+String(event.tool||'a tool').slice(0,100),'Request '+String(event.request_id||'').slice(0,100));
@@ -138,6 +152,7 @@
     const reply=[...(state.chat.messages||[])].reverse().find(message=>message.role==='assistant');
     try{spoken=await speakReply(reply,chatId);if(!spoken)endConversation();}catch(error){endConversation();if(epoch===state.epoch){status('Speech unavailable. '+(error instanceof Error?error.message:'No audio receipt returned.')+' No automatic retry was made.');detail+=' Speech is unavailable.';}}
    }
+   if(pendingUi&&epoch===state.epoch)await applyUiAction(pendingUi);
    return {handled:true,sent:true,verified:true,detail};
   }catch(error){
    if(epoch!==state.epoch)return {handled:true,cancelled:true};
@@ -455,7 +470,7 @@
  // Narrow facade for the composer, voice bar and plugins view. It deliberately
  // omits the CSRF proof, transport and request headers.
  async function haltSpeech(){const speech=state.speech;stopAudio();if(speech?.session_id)await api('/voice/cancel',speech);}
- const bridge=Object.freeze({state,voiceOptions,get session(){return transport.session;},api,refresh,openChat,updateContext,dictate,speakReply,stopAudio,endConversation,
+ const bridge=Object.freeze({state,voiceOptions,get session(){return transport.session;},api,refresh,openChat,updateContext,dictate,speakReply,stopAudio,endConversation,normalizeImport,
   onStatus(hook){if(typeof hook==='function')statusHooks.push(hook);},
   setChat(chat){if(chat&&chat.id&&chat.id===state.chat?.id){state.chat=chat;renderChat();}},
   async startConversation(){if(voiceOptions.conversation||state.capture||state.micPending)throw new Error('Stop the active microphone or voice conversation first.');voiceOptions.conversation=true;voiceOptions.remaining=10;voiceOptions.limitReached=false;try{await dictate();}catch(error){endConversation();stopAudio();throw error;}},

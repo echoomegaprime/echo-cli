@@ -12,6 +12,7 @@ const debug=debuglog('echo-prime-server');
 assets['/privacy']='privacy.html';assets['/privacy.css']='privacy.css';
 Object.assign(assets,{'/fleet.js':'fleet.js','/logs.js':'logs.js','/fleet.css':'fleet.css'});
 for(const name of ['composer.js','voicebar.js','plugins.js','composer.css'])assets['/'+name]=name;
+Object.assign(assets,{'/views.js':'views.js','/views.css':'views.css'});
 async function body(req:IncomingMessage){
  let size=0;const chunks:Buffer[]=[];
  for await(const part of req){size+=part.length;if(size>131072)throw new Error('Request exceeds 128 KiB');chunks.push(part);}
