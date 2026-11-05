@@ -51,6 +51,8 @@
      'Read-only · '+result.status+' · Session '+sessionId+(evidence?' · Sources: '+evidence:'')+(result.model&&window.EchoPrimeModels?' · '+window.EchoPrimeModels.describe(result.model):''));
     // Brain surface (brain.js): personality tag, unverified-claim markers, Verify action. Optional; a failure never hides the reply.
     try{window.EchoPrimeBrain?.decorate?.(rendered.article,result,rendered.content);}catch{}
+    // Hook for speech.js (additive): the rendered reply, so Echo can speak it and offer a per-reply speak/stop action.
+    try{window.dispatchEvent(Object.assign(new Event('echo-code-reply'),{detail:{text:result.answer||'',article:rendered.article,status:result.status,sessionId}}));}catch{}
     if(Array.isArray(result.autoagents)&&window.EchoPrimeAutoagents)window.EchoPrimeAutoagents.render(result);// "Echo built an agent and a bot for this" cards (autoagents.js)
     if(result.status==='completed'&&result.answer&&typeof window.EchoPrimeArtifacts?.register==='function'){
      const modelLabel=typeof result.model==='string'?result.model:result.model?.id||result.model?.model||'';

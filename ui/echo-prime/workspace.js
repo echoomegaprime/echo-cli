@@ -32,6 +32,8 @@
  function log(operation,outcome){console.debug('[echo.workspace]',{schema_version:1,event:'workspace_operation',operation,outcome});}
  // layout.js persists ESH geometry (never command text) when it hears this event.
  function layoutChanged(reason){log('esh_layout',reason);window.dispatchEvent(new Event('echo-esh-layout'));}
+ // Hooks for speech.js (additive): plain Events carrying a `detail`, never text in logs.
+ function announce(name,detail){try{window.dispatchEvent(Object.assign(new Event(name),{detail}));}catch{}}
  function button(label,action,className='quiet-button',panelScoped=true){
   const node=element('button',{type:'button',class:className},label),epoch=state.epoch,accountEpoch=state.accountEpoch,panel=state.panel;
   const current=()=>accountEpoch===state.accountEpoch&&(!panelScoped||epoch===state.epoch&&panel===state.panel);
@@ -44,7 +46,7 @@
  function releaseAudio(){state.audioDone?.(false);state.audioDone=null;state.audio?.pause();state.audio=null;if(state.audioUrl)URL.revokeObjectURL(state.audioUrl);state.audioUrl=null;}
  function endConversation(){voiceOptions.conversation=false;voiceOptions.remaining=0;voiceOptions.limitReached=false;clearTimeout(listenTimer);}
  function stopCapture(){state.micEpoch++;state.micController?.abort();state.micController=null;state.micPending=false;void state.capture?.finish(true);state.capture=null;}
- function stopAudio(){state.voiceEpoch++;releaseAudio();state.speech=null;stopCapture();}
+ function stopAudio(){state.voiceEpoch++;releaseAudio();state.speech=null;stopCapture();announce('echo-voice-stop',{});}
  function clearConversation(){
   state.epoch++;state.turn?.abort();state.turn=null;state.chat=null;state.attachments.clear();endConversation();stopAudio();
   activity?.clear(activityHost());
@@ -172,7 +174,7 @@
   activity?.clear(activityHost());let strip=null;
   const ensureStrip=()=>{if(!strip&&activity)strip=activity.start(activityHost(),{label:'Activity'});return strip;};
   let answer=null,answerText='',completed=false,verified=false,spoken=false;
-  let pendingUi=null;
+  let pendingUi=null;const turn=requestId;// speech.js keys the streamed reply by the chat request id
   try{
    const result=await transport.chat({chat_id:chatId,content:text,request_id:requestId,attachments:[...state.attachments]},event=>{
     if(epoch!==state.epoch||controller.signal.aborted)return;
@@ -180,16 +182,19 @@
     if(event.type==='tool_result'&&event.result&&typeof event.result==='object'&&event.result.ui_action)pendingUi=event.result.ui_action;
     const s=ensureStrip();
     if(event.type==='status'){$('#draft-notice').hidden=true;s?.thinking();s?.note(String(event.text||'').slice(0,300));}
-    else if(event.type==='token'&&typeof event.text==='string'){s?.answering();if(!answer)answer=line('assistant','');answerText+=event.text;if(answerText.length>2_000_000)throw new Error('Answer exceeds display limit.');answer.textContent=answerText;}
+    else if(event.type==='token'&&typeof event.text==='string'){s?.answering();if(!answer)answer=line('assistant','');answerText+=event.text;if(answerText.length>2_000_000)throw new Error('Answer exceeds display limit.');answer.textContent=answerText;announce('echo-reply-stream',{chatId,turn,text:event.text});}
     else if(event.type==='tool_started')s?.tool(event.request_id,event.tool);
     else if(event.type==='tool_result')s?.result(event.request_id,event.tool,event.evidence?.status,event.evidence);
     else if(event.type==='memory_saved')s?.note('Saved a preference locally');
    },controller.signal);
    if(epoch!==state.epoch)return {handled:true,cancelled:true};completed=true;state.chat=result;renderChat();
+   // The saved reply is known here; speech.js starts Echo's voice now, two round trips before the readback finishes.
+   announce('echo-reply-saved',{chatId,turn,message:[...(result.messages||[])].reverse().find(message=>message?.role==='assistant')||null});
    const readback=await api('/chats/'+encodeURIComponent(chatId));if(epoch!==state.epoch)return {handled:true,cancelled:true};
    state.chat=readback;renderChat();await refresh();verified=true;strip?.done();log('chat','returned_and_read_back');
    let detail='Reply returned and saved conversation read back.';
-   if((voiceOptions.spoken||voiceOptions.conversation)&&!document.hidden){
+   // speech.js owns spoken replies when loaded (ConvAI queue + prefetch); the legacy hands-free loop keeps its own path.
+   if((voiceOptions.spoken||voiceOptions.conversation)&&!document.hidden&&(voiceOptions.conversation||window.EchoPrimeSpeech?.handlesReplies!==true)){
     const reply=[...(state.chat.messages||[])].reverse().find(message=>message.role==='assistant');
     try{spoken=await speakReply(reply,chatId);if(!spoken)endConversation();}catch(error){endConversation();if(epoch===state.epoch){status(once('Speech unavailable. '+(error instanceof Error?error.message:'No audio receipt returned.')));detail+=' Speech is unavailable.';}}
    }
@@ -451,7 +456,7 @@
   section('Voice preferences · off at session startup',option('workspace-voice-spoken','Speak replies automatically · uses the configured provider quota','spoken'),option('workspace-voice-brief','Brief extractive speech · canonical summary mode','brief'),option('workspace-voice-auto-send','Send dictated speech automatically · skips manual transcript review','autoSend'),element('p',{},'Spoken replies start off in every session. Brief speech and automatic sends are remembered for this account in this browser only. Microphone access still requires an explicit Dictate or Start voice conversation action.'));
   section('Listen to a saved reply',field('Assistant reply',replies),element('p',{},'Uses the configured Personality Forge provider and its quota.'),button('Listen',async()=>{if(!state.chat||!replies.value)throw new Error('Open a saved assistant reply first.');await speakReply((state.chat.messages||[]).find(message=>message.id===replies.value&&message.role==='assistant'),state.chat.id);}),button('Stop speech',async()=>{const speech=state.speech;endConversation();stopAudio();if(speech?.session_id)await api('/voice/cancel',speech);status('Playback stopped. In-flight provider work may finish; no request will be replayed.');}));
   section('Dictate into the composer',element('p',{},'Microphone off until you select Dictate and grant browser permission. Sends up to two minutes of mono PCM audio, in eight-second parts, to the configured ElevenLabs Scribe provider. The transcript stays in your composer for review unless you explicitly enable automatic sends.'),button('Dictate a message',dictate),button('Finish and transcribe',async()=>{if(state.capture)await state.capture.finish(false);else throw new Error('There is no active microphone capture.');}),button('Stop microphone',()=>{endConversation();stopCapture();status('Microphone off. Pending transcription may finish; its result will be discarded.');}));
-  section('Hands-free voice conversation',element('p',{},'Explicit opt-in starts the microphone, automatically sends each transcription and speaks the saved reply. Stops after at most ten captured turns, on any uncertainty, or when this panel, account, tab visibility or page changes. Select Start again to resume.'),button('Start voice conversation · up to ten turns',async()=>{if(voiceOptions.conversation||state.capture||state.micPending)throw new Error('Stop the active microphone or voice conversation first.');voiceOptions.conversation=true;voiceOptions.remaining=10;voiceOptions.limitReached=false;try{await dictate();}catch(error){endConversation();stopAudio();throw error;}}),button('Stop voice conversation',()=>{endConversation();stopAudio();status('Voice conversation stopped. Microphone off. No pending response will restart it.');}));
+  section('Hands-free voice conversation',element('p',{},'Explicit opt-in starts the microphone, automatically sends each transcription and speaks the saved reply. Continues until you stop it (Commander directive 2026-11-04 removed the ten-turn cap); stops on any uncertainty, or when this panel, account, tab visibility or page changes. Select Start again to resume.'),button('Start voice conversation',async()=>{if(voiceOptions.conversation||state.capture||state.micPending)throw new Error('Stop the active microphone or voice conversation first.');voiceOptions.conversation=true;voiceOptions.remaining=Infinity;voiceOptions.limitReached=false;try{await dictate();}catch(error){endConversation();stopAudio();throw error;}}),button('Stop voice conversation',()=>{endConversation();stopAudio();status('Voice conversation stopped. Microphone off. No pending response will restart it.');}));
  }
  async function operations(){
   if(!transport.session?.ownerAccess)throw new Error('Primary owner admission required.');
@@ -582,7 +587,8 @@
  let searchTimer,searchRevision=0;
  $('#workspace-chat-search').addEventListener('input',()=>{clearTimeout(searchTimer);const epoch=state.epoch,revision=++searchRevision;searchTimer=setTimeout(()=>{if(epoch!==state.epoch||revision!==searchRevision)return;void api('/chats?q='+encodeURIComponent($('#workspace-chat-search').value)).then(rows=>{if(epoch===state.epoch&&revision===searchRevision)renderHistory(rows);}).catch(error=>{if(epoch===state.epoch&&revision===searchRevision){$('#draft-notice').textContent=error.message;$('#draft-notice').hidden=false;}});},200);});
  $('#stop-chat').addEventListener('click',()=>{state.turn?.abort();endConversation();stopAudio();});
- $('#voice-button').addEventListener('click',()=>{if(state.enabled)void open('voice');});
+ // With speech.js loaded the microphone button is push-to-talk (speech.js binds it); without it the Voice panel opens.
+ $('#voice-button').addEventListener('click',()=>{if(state.enabled&&!window.EchoPrimeSpeech)void open('voice');});
  window.addEventListener('pagehide',()=>{transport.clear();if(dialog.open)dialog.close();});
  window.addEventListener('pageshow',event=>{if(event.persisted&&state.enabled)void transport.loadSession().then(session=>{if(session?.authenticated&&session.user.status==='approved')return refresh();}).catch(()=>{});});
  document.addEventListener('visibilitychange',()=>{if(document.hidden){endConversation();stopAudio();}else if(state.enabled)void transport.loadSession().catch(()=>{});});
@@ -597,11 +603,12 @@
  // omits the CSRF proof, transport and request headers.
  async function haltSpeech(){const speech=state.speech;stopAudio();if(speech?.session_id)await api('/voice/cancel',speech);}
  const bridge=Object.freeze({state,voiceOptions,get session(){return transport.session;},api,refresh,openChat,updateContext,dictate,speakReply,stopAudio,endConversation,normalizeImport,
+  audio(path){return transport.audio(path,state.controller.signal);},
   onStatus(hook){if(typeof hook==='function')statusHooks.push(hook);},
   // ESH geometry for layout.js (which persists it): reads a copy, writes finite values only, never command text.
   eshLayout:{get(){return {rect:{...esh.rect},floating:esh.floating};},set(next){if(next?.rect&&typeof next.rect==='object')for(const key of ['x','y','width','height'])if(Number.isFinite(next.rect[key]))esh.rect[key]=next.rect[key];if(typeof next?.floating==='boolean')esh.floating=next.floating;applyESH();}},
   setChat(chat){if(chat&&chat.id&&chat.id===state.chat?.id){state.chat=chat;renderChat();}},
-  async startConversation(){if(voiceOptions.conversation||state.capture||state.micPending)throw new Error('Stop the active microphone or voice conversation first.');voiceOptions.conversation=true;voiceOptions.remaining=10;voiceOptions.limitReached=false;try{await dictate();}catch(error){endConversation();stopAudio();throw error;}},
+  async startConversation(){if(voiceOptions.conversation||state.capture||state.micPending)throw new Error('Stop the active microphone or voice conversation first.');voiceOptions.conversation=true;voiceOptions.remaining=Infinity;voiceOptions.limitReached=false;try{await dictate();}catch(error){endConversation();stopAudio();throw error;}},
   async stopVoice(){endConversation();try{await haltSpeech();}finally{status('Voice stopped. Microphone off. No pending response will restart it.');}},
   async interrupt(){try{await haltSpeech();}catch{}await dictate();}});
  // `session` is the cached /api/session readback (null once cleared). Modules gate owner-only requests on it without

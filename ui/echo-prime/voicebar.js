@@ -31,7 +31,8 @@
   const line=[label?label.trim():'Configured voice',provider,speaking?'Speaking':'',mic].filter(Boolean).join(' · ');
   const usage=typeof voice.provider_usage==='string'&&voice.provider_usage.trim()?voice.provider_usage.trim():provider?`Spoken text and your selected audio use ${provider}.`:'Spoken text and your selected audio use the configured provider.';
   const flag=key=>options?.[key]===true;
-  return {visible:true,line,footer:'Personality Forge · '+usage,toggles:{spoken:flag('spoken'),brief:flag('brief'),autoSend:flag('autoSend')},conversation:flag('conversation'),limitReached:flag('limitReached')};
+  const remaining=Number(options?.remaining);
+  return {visible:true,line,footer:'Personality Forge · '+usage,toggles:{spoken:flag('spoken'),brief:flag('brief'),autoSend:flag('autoSend')},conversation:flag('conversation'),limitReached:flag('limitReached'),capped:Number.isFinite(remaining)&&remaining>0};
  }
  window.EchoPrimeVoiceBar={model,providerName,storageKey,persisted,savedFor,remember};
 
@@ -52,7 +53,7 @@
   if(!view.visible)return;
   ui.line.textContent=view.line;ui.footer.textContent=view.footer;
   for(const [key,box] of Object.entries(ui.boxes))box.checked=view.toggles[key];
-  ui.note.textContent=view.limitReached?'Voice conversation paused after ten turns. Use ◉ Voice to resume explicitly.':view.conversation?'Hands-free voice is on: at most ten captured turns.':'';
+  ui.note.textContent=view.limitReached?'Voice conversation paused. Use ◉ Voice to resume explicitly.':view.conversation?(view.capped?'Hands-free voice is on: a limited number of captured turns remain.':'Hands-free voice is on.'):'';
  }
  function control(label,run){
   const b=bridge(),epoch=b?.state.accountEpoch,node=el('button',{type:'button',class:'quiet-button'},label);

@@ -304,7 +304,7 @@ it('adds first-class navigation entries and workspace labels without touching of
 });
 
 // ---------- workspace.js facade ----------
-it('exposes a narrow bridge, caps hands-free voice at ten turns and publishes context updates',async()=>{
+it('exposes a narrow bridge, runs hands-free voice uncapped (Commander directive 2026-11-04) and publishes context updates',async()=>{
  const nodes=new Map<string,Node>(),events:Record<string,((e:any)=>unknown)[]>={};
  const get=(s:string)=>{if(!nodes.has(s))nodes.set(s,new Node());return nodes.get(s)!;};
  const session={workspaceConfigured:true,authenticated:true,ownerAccess:true,csrf:'owner',user:{uid:'owner',role:'owner',status:'approved'}};
@@ -316,13 +316,13 @@ it('exposes a narrow bridge, caps hands-free voice at ten turns and publishes co
  get('#workspace-chat-kind').value='workspace';
  runInNewContext(source('workspace.js'),{window,document,navigator:{mediaDevices:{getUserMedia:()=>gum}},crypto:{randomUUID},setTimeout,clearTimeout,AbortController,AbortSignal,TextEncoder,TextDecoder,URL,Blob,Audio:vi.fn(),Event,Error,console:{debug:vi.fn()}});
  await window.EchoPrimeWorkspace.ready;const bridge=window.EchoPrimeWorkspace.bridge;
- expect(Object.keys(bridge).sort()).toEqual(expect.arrayContaining(['api','dictate','endConversation','interrupt','onStatus','refresh','session','setChat','speakReply','startConversation','state','stopAudio','stopVoice','updateContext','voiceOptions']));
+ expect(Object.keys(bridge).sort()).toEqual(expect.arrayContaining(['api','audio','dictate','endConversation','interrupt','onStatus','refresh','session','setChat','speakReply','startConversation','state','stopAudio','stopVoice','updateContext','voiceOptions']));
  expect(JSON.stringify(Object.keys(bridge))).not.toMatch(/csrf|token|headers/i);
  expect(bridge.voiceOptions).toMatchObject({spoken:false,brief:false,autoSend:false,conversation:false,remaining:0});
  let updates=0;window.addEventListener('echo-workspace-context',()=>{updates++;});bridge.updateContext();expect(updates).toBe(1);
  const seen:string[]=[];bridge.onStatus((t:string)=>seen.push(t));
  await window.EchoPrimeWorkspace.newChat();void bridge.startConversation().catch(()=>{});await tick();
- expect(bridge.voiceOptions.conversation).toBe(true);expect(bridge.voiceOptions.remaining).toBe(10);expect(bridge.state.micPending).toBe(true);
+ expect(bridge.voiceOptions.conversation).toBe(true);expect(bridge.voiceOptions.remaining).toBe(Infinity);expect(bridge.state.micPending).toBe(true);
  await bridge.stopVoice();expect(bridge.voiceOptions.conversation).toBe(false);expect(bridge.voiceOptions.remaining).toBe(0);expect(seen.length).toBeGreaterThan(0);
 });
 
