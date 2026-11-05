@@ -338,6 +338,15 @@ describe('Vault',()=>{
   await reveal.click();expect(dialog.textContent).not.toContain('SHOULD-BE-MASKED');
   expect(w.logs.join('\n')).not.toContain('SHOULD-BE-MASKED');
  });
+ it('masks secret-looking keys nested inside object values as well',async()=>{
+  const bridge=fakeBridge();bridge.api=vi.fn(async()=>({operation:'get',service:'github',credentials:{password:'NESTED-UNDER-SECRET-KEY',hint:'h'},meta:{token:'NESTED-UNDER-PLAIN-KEY',region:'us'}}));
+  const {w,dialog}=await vaultWorld(bridge);
+  w.field('vault-service')!.value='github';await w.button('Retrieve through Vault')!.click();
+  const text=dialog.textContent;
+  expect(text).not.toContain('NESTED-UNDER-SECRET-KEY');expect(text).not.toContain('NESTED-UNDER-PLAIN-KEY');
+  expect(text).toContain('••••••••');expect(text).toContain('"hint": "h"');expect(text).toContain('"region": "us"');
+  expect(w.logs.join('\n')).not.toMatch(/NESTED-UNDER/);
+ });
  it('renders list metadata as a table of entries',async()=>{
   const bridge=fakeBridge();bridge.api=vi.fn(async()=>({entries:[{service:'github',username:'echo',version:2,updated_at:'2026-11-04T00:00:00Z',status:'active'},{service:'stripe',username:'ops'}],count:2}));
   const {w,dialog}=await vaultWorld(bridge);await w.button('List metadata')!.click();

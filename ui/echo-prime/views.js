@@ -302,7 +302,7 @@
    const text=el('strong',{class:'vault-masked','data-masked':'true'},MASK),toggle=el('button',{type:'button',class:'quiet-button vault-reveal','aria-pressed':'false'},'Reveal');
    toggle.addEventListener('click',()=>{const hidden=text.getAttribute('data-masked')==='true';text.textContent=hidden?value:MASK;text.setAttribute('data-masked',String(!hidden));toggle.textContent=hidden?'Hide':'Reveal';toggle.setAttribute('aria-pressed',String(hidden));});
    row.append(el('span',{class:'vault-value'},text,toggle));
-  }else row.append(el('strong',{},typeof value==='string'?value:pretty(value)));
+  }else row.append(el('strong',{},typeof value==='string'?value:pretty(maskSecrets(value))));// nested shapes keep their secret-looking keys masked too
   return row;
  }
  function vaultResult(value){
