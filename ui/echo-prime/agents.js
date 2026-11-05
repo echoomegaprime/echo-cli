@@ -48,7 +48,9 @@
   if(!data||typeof data!=='object')throw new Error('Echo ADK returned an unrecognized response');
   return data;
  }
- function lock(value){busy=value;submit.disabled=value||!agents.length;for(const node of [select,prompt,calls,cost,wall,$('#refresh-agents')])if(node)node.disabled=value;}
+ // Refresh is never locked: every early return in load() (off, unavailable, sign-in, cool-down, failure) must leave a way back in.
+ // Re-entry is already guarded by `generation`.
+ function lock(value){busy=value;submit.disabled=value||!agents.length;for(const node of [select,prompt,calls,cost,wall])if(node)node.disabled=value;}
  function remember(){try{localStorage.setItem(STORAGE_KEY,JSON.stringify({agent:select.value,prompt:prompt.value.slice(0,MAX_CHARS)}));}catch{}}
  // ---- agent definitions ------------------------------------------------------
  function agentCard(a){

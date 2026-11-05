@@ -17,7 +17,8 @@ function element(tag = 'div'): El {
     append(...n) { this.children.push(...n); }, replaceChildren(...n) { this.children = n; },
     setAttribute: vi.fn(), showModal() { this.open = true; }, close() { this.open = false; this.fire('close'); },
     addEventListener(name, fn) { (handlers[name] ??= []).push(fn); },
-    fire(name, event) { return (handlers[name] ?? []).map(fn => fn(event ?? { target: el, preventDefault() { /* noop */ } })); },
+    // A real browser never dispatches a click on a disabled control; the fake must not either, or a dead button passes.
+    fire(name, event) { if (name === 'click' && el.disabled) return []; return (handlers[name] ?? []).map(fn => fn(event ?? { target: el, preventDefault() { /* noop */ } })); },
   };
   return el;
 }
@@ -141,12 +142,23 @@ describe('Agents view: off, admission and the agent list', () => {
     await s.open();
     expect(s.count('/api/prime/adk/health')).toBe(1); expect(s.n['agents-submit'].disabled).toBe(false);
   });
-  it('shows a failed status check as unavailable and cools down for 5 s before asking again', async () => {
+  it('shows a failed status check as unavailable, keeps Refresh usable, and cools down for 5 s before asking again', async () => {
     const s = await setup({ healthStatus: 500, health: { error: 'boom' } });
     await s.open();
     expect(s.n['agents-status'].textContent).toBe('Echo ADK status unavailable (boom). Nothing was started.');
-    await s.n['refresh-agents'].fire('click')[0]; expect(s.count('/api/prime/adk/health')).toBe(1); expect(s.n['agents-status'].textContent).toContain('try Refresh in a few seconds');
+    expect(s.n['refresh-agents'].disabled).toBe(false);
+    const clicked = s.n['refresh-agents'].fire('click'); expect(clicked).toHaveLength(1); await clicked[0];
+    expect(s.count('/api/prime/adk/health')).toBe(1); expect(s.n['agents-status'].textContent).toContain('try Refresh in a few seconds');
     await vi.advanceTimersByTimeAsync(5100); await s.n['refresh-agents'].fire('click')[0]; expect(s.count('/api/prime/adk/health')).toBe(2);
+  });
+  it('Refresh stays usable on every early return: off, unavailable and sign-in', async () => {
+    const off = await setup({ health: { configured: false, available: false, reason: 'Echo ADK is off: add an `adk` section to the Prime config' } });
+    await off.open(); expect(off.n['refresh-agents'].disabled).toBe(false);
+    expect(off.n['refresh-agents'].fire('click')).toHaveLength(1); await settle(); expect(off.count('/api/prime/adk/health')).toBe(2);
+    const down = await setup({ health: { configured: true, available: false, defaultBudget: HEALTH.defaultBudget, reason: 'Echo ADK unreachable at http://127.0.0.1:8378' } });
+    await down.open(); expect(down.n['refresh-agents'].disabled).toBe(false); expect(down.n['agents-submit'].disabled).toBe(true);
+    const signin = await setup({ workspace: workspaceStub(anonymous()) });
+    await signin.open(); expect(signin.n['refresh-agents'].disabled).toBe(false); expect(signin.calls).toHaveLength(0);
   });
   it('says the service is unavailable, and starts nothing, when health says so', async () => {
     const s = await setup({ health: { configured: true, available: false, defaultBudget: HEALTH.defaultBudget, reason: 'Echo ADK unreachable at http://127.0.0.1:8378' } });
