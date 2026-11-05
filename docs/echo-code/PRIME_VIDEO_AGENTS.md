@@ -52,7 +52,9 @@ Capability ids are chosen from the live catalog through the SDK broker, never fr
   service's id grammar (`^echo\.[a-z0-9_]+(\.[a-z0-9_]+)*$`) are kept, so `echo.llm.together.Wan-AI-…` style ids are never chosen.
   The verified set is cached for 60 s.
 - Routing picks the best id per role: video generation, job polling (when the generator is an `echo.media.*` job), narration (only
-  when a shot has a voice-over line; `echo.voice.speak` is preferred because it resolves the `freeman` persona voice) and stitching.
+  when a shot has a voice-over line; `echo.voice.speak` is preferred because its `persona` parameter resolves the Personality Forge
+  voice, so the agent is told to pass `persona "freeman"`, not a provider voice id, and to report the `provider` that answered: a
+  `chatterbox` answer is the gateway's fallback voice and is named as such) and stitching.
 - A role the catalog cannot fill is listed in `plan.missing` and the plan is `ready:false`; Create is refused with that list.
 - Without an SDK broker (`sdk` section absent) the storyboard still plans, `catalog.live` is false, no capability is chosen and Create
   answers 503 with the reason.
@@ -118,4 +120,10 @@ named in the UI when it applies; nothing is silently substituted.
    setting outside Prime.
 
 This build ran on ANVIL because FORGE was unreachable (Tailscale `forge-2` offline, no LAN answer) for the whole session, so none of the
-three remedies could be applied or checked live.
+three remedies could be applied or checked live. What was checked on ANVIL loopback: the built Prime serves the page, `videoagent.js`
+and `videoagent.css`, refuses the video routes without the owner session (403), plans a `ready:false` storyboard without a catalog and
+refuses Create with 503; and the built hub, driven against a throwaway `echo-adk-api` 0.1.0 (the deployed source) whose registry was
+extended with a `{"caps":[…]}` file of the gate's own `echo.caps.detail` records, created `video-*` producer agents at 12 and 60 steps
+(201, an 11,243-character instruction for 18 long prompts), returned `existing:true` for the same storyboard, refused a different
+storyboard under a taken name with 409, and started a run (202) that ended `unavailable` with the model endpoint closed and no
+fallback.

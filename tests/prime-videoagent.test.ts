@@ -242,7 +242,8 @@ describe('agent definition and instruction', () => {
     const p = plan({ brief: 'x', inputs: [{ id: ART_STILL }], shots: [{ prompt: 'a', duration_s: 5, voiceover: 'Hello there', inputs: [ART_STILL] }] }, [still]);
     const { instruction } = videoInstruction(p);
     expect(instruction).toMatch(/image_job_id job-abc/);
-    expect(instruction).toMatch(/echo\.voice\.speak with the line as text, voice "freeman"/);
+    expect(instruction).toContain('echo.voice.speak with the line as text, persona "freeman" (the Personality Forge voice) and format mp3; report the audio reference and the provider that answered (an answer from chatterbox is a fallback voice, not freeman: say so).');
+    expect(instruction).not.toMatch(/voice "freeman"/);
     expect(videoRunPrompt('video-x')).toMatch(/^Produce the video for video-x now\./);
   });
   it('validates the run request: video-* names only, agent and budget only', () => {
