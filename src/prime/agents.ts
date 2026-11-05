@@ -30,6 +30,10 @@ const ADK_SKILL=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
 const ADK_LANE_WORD=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/;
 const SHA256=/^[0-9a-f]{64}$/;
 export const ADK_DEFINITION_LIMITS={capabilities:64,skills:32,instruction:12000,maxSteps:24} as const;
+/** Highest `max_steps` any Prime-created definition may carry (the service's own cap is 64). Callers opt in per call, e.g. video agents at shots×3+6. */
+export const ADK_MAX_STEPS_CEILING=60;
+/** Per-call limits for parseAgentDefinition / createAgent / updateAgent. `maxSteps` defaults to ADK_DEFINITION_LIMITS.maxSteps and never exceeds ADK_MAX_STEPS_CEILING. */
+export interface AdkDefinitionOptions {maxSteps?:number}
 const RUN_STATUSES=new Set(['queued','running','gated','done','failed']);
 const ERROR_CODES=new Set(['not_found','invalid','gated','budget_exceeded','unavailable']);
 const debug=debuglog('echo-prime');
@@ -87,8 +91,9 @@ function stringList(value:unknown,what:string,max:number,pattern:RegExp):string[
 }
 /** Validates a definition Prime is about to create or replace. Unknown keys, bad names, non-`echo.` capability ids and bad origins are refused;
  *  the lane budget is clamped to the service caps and `max_steps` to 1..24. Nothing is guessed on the owner's behalf except the lane defaults. */
-export function parseAgentDefinition(input:unknown,defaults:AdkBudget=DEFAULT_ADK.defaultBudget):AdkAgentDefinition{
+export function parseAgentDefinition(input:unknown,defaults:AdkBudget=DEFAULT_ADK.defaultBudget,options:AdkDefinitionOptions={}):AdkAgentDefinition{
  const data=obj(input);
+ const stepCeiling=Math.min(ADK_MAX_STEPS_CEILING,Math.max(1,Math.floor(typeof options.maxSteps==='number'&&Number.isFinite(options.maxSteps)?options.maxSteps:ADK_DEFINITION_LIMITS.maxSteps)));
  if(!input||typeof input!=='object'||Array.isArray(input))throw new AdkError(400,'Invalid agent definition');
  for(const key of Object.keys(data))if(!['name','role','skills','capabilities','lane','max_steps','instruction','origin'].includes(key))throw new AdkError(400,'Invalid agent definition: unknown field '+redact(key).slice(0,40));
  if(typeof data.name!=='string'||!ADK_CREATE_NAME.test(data.name))throw new AdkError(400,'Invalid agent name: use 2 to 63 lowercase letters, digits or hyphens');
@@ -106,7 +111,7 @@ export function parseAgentDefinition(input:unknown,defaults:AdkBudget=DEFAULT_AD
  let maxSteps=ADK_DEFINITION_LIMITS.maxSteps/2;
  if(data.max_steps!==undefined){
   if(typeof data.max_steps!=='number'||!Number.isFinite(data.max_steps))throw new AdkError(400,'Invalid agent definition: max_steps must be a number');
-  maxSteps=Math.min(ADK_DEFINITION_LIMITS.maxSteps,Math.max(1,Math.floor(data.max_steps)));
+  maxSteps=Math.min(stepCeiling,Math.max(1,Math.floor(data.max_steps)));
  }
  const out:AdkAgentDefinition={name:data.name,role:data.role.trim(),skills,capabilities,lane:{node,model,budget},max_steps:maxSteps,origin:{by:'owner',created_at:new Date().toISOString()}};
  if(data.instruction!==undefined){
@@ -124,6 +129,12 @@ export function parseAgentDefinition(input:unknown,defaults:AdkBudget=DEFAULT_AD
   if(origin.created_at!==undefined){if(typeof origin.created_at!=='string'||Number.isNaN(Date.parse(origin.created_at)))throw new AdkError(400,'Invalid agent definition: origin.created_at');out.origin.created_at=origin.created_at;}
  }
  return out;
+}
+/** The body actually sent to `POST /agents` / `PUT /agents/{name}`: the service stamps `created_at` itself and refuses an origin carrying
+ *  anything but `by` and `prompt_sha256` (verified against echo-adk 0.1.0 on 2026-11-05: `400 origin accepts by and prompt_sha256 only`). */
+export function agentWireBody(definition:AdkAgentDefinition){
+ const {created_at:_stamped,...origin}=definition.origin;void _stamped;
+ return {...definition,origin};
 }
 export interface AdkRunSummary {runId:string;agent:string;status:string;startedAt?:string}
 export interface AdkRunStatus {
@@ -198,20 +209,21 @@ export class AdkClient {
   if(reply.name!==agent)throw new AdkError(502,'Echo ADK answered for a different agent');
   return sanitize(reply) as Record<string,unknown>;
  }
- /** `POST /agents` (contract 2026-11-04 20:12): the validated definition only; the service assigns `source`. A 409 means the name exists (`detail.http`). */
- async createAgent(input:unknown,signal?:AbortSignal){
-  const definition=parseAgentDefinition(input,this.config.defaultBudget);
-  debug('%j',{event:'prime_adk_agent_creating',name:definition.name,role:definition.role,capabilities:definition.capabilities.length,by:definition.origin.by});
-  const reply=await this.request('POST','/agents',this.timeouts.mutate,definition,signal);
+ /** `POST /agents` (contract 2026-11-04 20:12): the validated definition only; the service assigns `source` and stamps `origin.created_at`.
+  *  A 409 means the name exists (`detail.http`). `options.maxSteps` raises the step ceiling for this call only (never above ADK_MAX_STEPS_CEILING). */
+ async createAgent(input:unknown,signal?:AbortSignal,options:AdkDefinitionOptions={}){
+  const definition=parseAgentDefinition(input,this.config.defaultBudget,options);
+  debug('%j',{event:'prime_adk_agent_creating',name:definition.name,role:definition.role,capabilities:definition.capabilities.length,by:definition.origin.by,maxSteps:definition.max_steps});
+  const reply=await this.request('POST','/agents',this.timeouts.mutate,agentWireBody(definition),signal);
   if(reply.name!==definition.name)throw new AdkError(502,'Echo ADK answered for a different agent');
   debug('%j',{event:'prime_adk_agent_created',name:definition.name});
   return sanitize(reply) as Record<string,unknown>;
  }
  /** `PUT /agents/{name}`: replaces the definition. The body name must be the path name; the service answers the full definition. */
- async updateAgent(name:unknown,input:unknown,signal?:AbortSignal){
-  const agent=requireAgentName(name),definition=parseAgentDefinition(input,this.config.defaultBudget);
+ async updateAgent(name:unknown,input:unknown,signal?:AbortSignal,options:AdkDefinitionOptions={}){
+  const agent=requireAgentName(name),definition=parseAgentDefinition(input,this.config.defaultBudget,options);
   if(definition.name!==agent)throw new AdkError(400,'Invalid agent definition: the name must match the agent being replaced');
-  const reply=await this.request('PUT','/agents/'+encodeURIComponent(agent),this.timeouts.mutate,definition,signal);
+  const reply=await this.request('PUT','/agents/'+encodeURIComponent(agent),this.timeouts.mutate,agentWireBody(definition),signal);
   if(reply.name!==agent)throw new AdkError(502,'Echo ADK answered for a different agent');
   debug('%j',{event:'prime_adk_agent_updated',name:agent});
   return sanitize(reply) as Record<string,unknown>;
