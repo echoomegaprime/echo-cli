@@ -120,3 +120,11 @@ body.panel-dragging{user-select:none;cursor:grabbing}body.panel-dragging .worksp
 
 /* Branding: conversation subtitle (Echo Prime · 256K context · Automatic memory). */
 .conversation-subtitle{font-size:10px;color:#7e9a8f;white-space:nowrap;letter-spacing:.1px}@media(max-width:800px){.conversation-subtitle{display:none!important}}
+
+/* Live Echo systems panel (systems.js): state colours and the per-row reason line. */
+.system-row[data-state="connected"] .system-state{color:#5be3a8}
+.system-row[data-state="degraded"] .system-state{color:#f0c060}
+.system-row[data-state="offline"] .system-state{color:#ff7a7a}
+.system-row[data-state="off"] .system-state,.system-row[data-state="locked"] .system-state{color:var(--muted,#8aa39a)}
+.system-row[data-state="connected"] svg{filter:drop-shadow(0 0 6px rgba(91,227,168,.55))}
+.system-row .system-reason{display:block;margin-top:2px;font-size:.78em;opacity:.75;overflow-wrap:anywhere}

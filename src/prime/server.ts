@@ -21,6 +21,7 @@ for(const name of ['layout.js','esh-dock.js','chat-actions.js'])assets['/'+name]
 Object.assign(assets,{'/nav.js':'nav.js','/nav.css':'nav.css','/privacy.html':'privacy.html'});
 Object.assign(assets,{'/autoagents.js':'autoagents.js','/autoagents.css':'autoagents.css'});
 Object.assign(assets,{'/activity.js':'activity.js','/activity.css':'activity.css'});
+assets['/systems.js']='systems.js';
 // The Echo orb mark answers the browser's default /favicon.ico probe as well as the linked /favicon.svg (both the same SVG).
 assets['/favicon.svg']='favicon.svg';assets['/favicon.ico']='favicon.svg';
 const assetTypes:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml'};

@@ -100,7 +100,7 @@
   const current=generation;
   $('#connection-result').textContent='Checking owner connections…';
   try{const s=await api('status');if(current!==generation)return;host=s.sdk.state==='attached';
-   const row=document.querySelector('[data-system="ESH"].system-row .system-state');if(row)row.textContent=s.esh.state+(s.esh.ledgerVerified?' · ledger verified':'');
+   const row=document.querySelector('[data-system="ESH"].system-row:not([data-live]) .system-state');if(row)row.textContent=s.esh.state+(s.esh.ledgerVerified?' · ledger verified':'');
    $('#connection-result').textContent='ESH: '+s.esh.state+'. '+s.esh.detail+'. SDK: '+s.sdk.state+'.';
    if(Array.isArray(s.capabilities))catalog=s.capabilities;
   }catch(e){if(current!==generation)return;host=false;$('#connection-result').textContent=e.message;}
