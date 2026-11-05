@@ -125,6 +125,10 @@
   const chat=await api('/chats',{project_id:project||null});if(epoch!==state.epoch)return true;
   state.chat=chat;$('#workspace-chat-kind').value='workspace';await refresh();renderChat();$('#prompt').focus();return true;
  }
+ // Living orb (additive, optional): a Workspace turn drives the orb through document events; silent where none can be dispatched.
+ let orbDeepTimer;
+ function orbEvent(name,detail){try{if(typeof document.dispatchEvent==='function'&&typeof CustomEvent==='function')document.dispatchEvent(new CustomEvent(name,{detail}));}catch{}}
+ function orb(mode){orbEvent('echo-orb-state',{mode,source:'chat'});}
  async function send(text){
   await ready;
   if(!state.enabled||$('#workspace-chat-kind').value!=='workspace')return {handled:false};
@@ -132,6 +136,7 @@
   if(!transport.session?.authenticated||transport.session.user?.status!=='approved'){await open('account');return {handled:true,sent:false,detail:'Sign in to your approved private Workspace first.'};}
   if(!state.chat)await newChat();if(!state.chat)return {handled:true,sent:false,detail:'Conversation was not created.'};
   const epoch=state.epoch,chatId=state.chat.id,controller=new AbortController();state.turn=controller;setBusy(true);line('user',text);
+  orb('thinking');clearTimeout(orbDeepTimer);orbDeepTimer=setTimeout(()=>orb('deep'),8000);
   let answer=null,answerText='',completed=false,verified=false,spoken=false;
   let pendingUi=null;
   try{
@@ -140,13 +145,13 @@
     if(event.type==='tool_started'||event.type==='tool_result')ingestESH(event);
     if(event.type==='tool_result'&&event.result&&typeof event.result==='object'&&event.result.ui_action)pendingUi=event.result.ui_action;
     if(event.type==='status'){$('#draft-notice').textContent=String(event.text||'Echo is answering…').slice(0,600);$('#draft-notice').hidden=false;}
-    else if(event.type==='token'&&typeof event.text==='string'){if(!answer)answer=line('assistant','');answerText+=event.text;if(answerText.length>2_000_000)throw new Error('Answer exceeds display limit.');answer.textContent=answerText;}
+    else if(event.type==='token'&&typeof event.text==='string'){if(!answer){answer=line('assistant','');orb('replying');}orbEvent('echo-orb-pulse',{strength:.6});answerText+=event.text;if(answerText.length>2_000_000)throw new Error('Answer exceeds display limit.');answer.textContent=answerText;}
     else if(event.type==='tool_started')line('activity','Using '+String(event.tool||'a tool').slice(0,100),'Request '+String(event.request_id||'').slice(0,100));
     else if(event.type==='tool_result')line('activity',String(event.tool||'Tool').slice(0,100)+' returned',String(event.evidence?.status||'Result received; postcondition may require separate verification.').slice(0,300));
    },controller.signal);
    if(epoch!==state.epoch)return {handled:true,cancelled:true};completed=true;state.chat=result;renderChat();
    const readback=await api('/chats/'+encodeURIComponent(chatId));if(epoch!==state.epoch)return {handled:true,cancelled:true};
-   state.chat=readback;renderChat();await refresh();verified=true;log('chat','returned_and_read_back');
+   state.chat=readback;renderChat();await refresh();verified=true;log('chat','returned_and_read_back');orb('success');
    let detail='Reply returned and saved conversation read back.';
    if((voiceOptions.spoken||voiceOptions.conversation)&&!document.hidden){
     const reply=[...(state.chat.messages||[])].reverse().find(message=>message.role==='assistant');
@@ -156,9 +161,10 @@
    return {handled:true,sent:true,verified:true,detail};
   }catch(error){
    if(epoch!==state.epoch)return {handled:true,cancelled:true};
+   if(!completed&&!controller.signal.aborted)orb('error');
    const detail=completed?'Reply returned; saved readback is unavailable. Reopen the conversation before retrying.':controller.signal.aborted?'Stopped displaying this turn. The upstream model may finish saving it; reopen the conversation before retrying.':(error instanceof Error?error.message:'Conversation failed.')+' No automatic retry was made.';
    endConversation();if(!completed)line('activity',detail);return {handled:true,sent:completed,verified:false,detail};
-  }finally{if(state.turn===controller){state.turn=null;setBusy(false);}if(epoch===state.epoch&&verified&&spoken&&voiceOptions.conversation)scheduleListening();}
+  }finally{clearTimeout(orbDeepTimer);orb('idle');if(state.turn===controller){state.turn=null;setBusy(false);}if(epoch===state.epoch&&verified&&spoken&&voiceOptions.conversation)scheduleListening();}
  }
  function section(title,...nodes){content.append(card(title,...nodes));}
  function clearESH(){esh.generation++;esh.rows.clear();esh.review=null;esh.busy=false;$('#workspace-esh-command').value='';$('#workspace-esh-reviewed').textContent='';$('#workspace-esh-output').replaceChildren();$('#workspace-esh-run').disabled=true;$('#workspace-esh').hidden=true;$('#workspace-esh-status').textContent='Open a saved conversation before dispatch. Policy and grants remain with the canonical ESH owner.';}

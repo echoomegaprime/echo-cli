@@ -268,6 +268,8 @@ describe('reduced motion, hidden tab and teardown', () => {
     s.dispatch('echo-orb-state', { mode: 'deep', source: 'agents' });
     expect(s.orb.frames).toBeGreaterThan(before); expect(s.api()!.getState().mode).toBe('deep'); expect(s.rafs.size).toBe(0);
     vi.advanceTimersByTime(3000); expect(s.api()!.arcs()).toEqual([]); expect(s.api()!.links()).toEqual([{ to: 'b', steady: true }]);
+    for (let i = 0; i < 5; i++) s.api()!.pulse(); // static redraws never animate, so token pulses must not pile up
+    expect(s.api()!.getState().pulse).toBe(0);
   });
   it('pauses the loop when the tab is hidden and resumes on visibility', () => {
     const s = setup(); expect(s.rafs.size).toBe(1);

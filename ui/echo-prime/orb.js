@@ -248,7 +248,7 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
         clock+=dt;fclock+=dt*look.flow;
         const t=now(),ease=Math.min(1,dt*4.5);
         for(const key in goal){look[key]+=(goal[key]-look[key])*(key==='ampl'?Math.min(1,dt*14):key==='ripple'?Math.min(1,dt*6):ease);}
-        look.pulse*=Math.exp(-dt*6);
+        look.pulse=motion?look.pulse*Math.exp(-dt*6):0; // static redraws never animate, so a pulse must not accumulate there
         const et=(t-errorAt)/ERROR_MS;look.red=et<1?Math.max(0,1-et*et)*(transient&&transient.mode==='error'?1:.4):0;
         const ft=(t-flashAt)/SUCCESS_MS;look.flash=ft<1?1-ft:0;look.flashR=ft<1?ft:0;
         look.scale=1+.016*Math.sin(clock*1.4)*(.3+look.energy)+look.pulse*.05+look.ampl*.08+look.flash*.02;
