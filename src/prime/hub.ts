@@ -13,6 +13,10 @@ import type {AutoAgents,ChatTool} from '../code/tools/autoagents.js';
 import {UPLOAD_ID_RE,UploadError,validateStudioInputs,type UploadStore} from './uploads.js';
 import type {ToolKit} from '../code/tools/index.js';
 import {BuildError,type BuildRunner} from './build.js';
+import {EshAutonomy,type AutonomyConfig} from '../code/tools/esh.js';
+import {EcfTools} from '../code/tools/ecf.js';
+import {ContinuityClient} from '../code/continuity.js';
+import {type AutonomyEvents,envelope} from '../code/tools/autonomy.js';
 const debugOwnerResponse=debuglog('echo-prime');
 export type Json=Record<string,unknown>;
 export interface Tool {name:string;description?:string;inputSchema:Json}
@@ -37,6 +41,7 @@ export interface PrimeOptions {
  /** Always-on live tools for model turns (web, Wolfram, Echo knowledge/memory, skills, MCP); owner toggles per family. */
  tools?:ToolKit;
  build?:BuildRunner;
+ autonomy?:AutonomyConfig;ecf?:EcfTools;autonomyEvents?:AutonomyEvents;
  /** Existing host approval, never supplied by model output or the browser. */
  approveEsh?:(request:PrimeRequest,digest:string)=>Promise<boolean>;
 }
@@ -102,7 +107,13 @@ type Ticket={id:string;digest:string;request:PrimeRequest;requestId:string;expir
 const digest=(request:PrimeRequest)=>createHash('sha256').update(JSON.stringify(request)).digest('hex');
 export class PrimeHub {
  private catalog:Map<string,Capability>;private tickets=new Map<string,Ticket>();private tools:Tool[]=[];
- constructor(private options:PrimeOptions){this.catalog=new Map(options.capabilities.map(c=>[c.id,{...c}]));}
+ private eshAutonomy:EshAutonomy;private ecf:EcfTools;
+ constructor(private options:PrimeOptions){this.catalog=new Map(options.capabilities.map(c=>[c.id,{...c}]));
+  this.eshAutonomy=new EshAutonomy({connection:options.esh,config:options.autonomy,events:options.autonomyEvents,prepare:r=>this.prepareTicket(r,true),execute:(id,hash)=>this.execute(id,hash)});
+  this.ecf=options.ecf??new EcfTools(new ContinuityClient(),options.autonomyEvents);
+ }
+ /** One additive registry spread for the lead's owner tool loop. Never browser-supplied tools. */
+ autonomyTools(){return [...this.eshAutonomy.tools(),...this.ecf.tools()];}
  capabilities(){return [...this.catalog.values()];}
  get uploads(){return this.options.uploads;}
  /** Additive server-side hook for producing modules to register outputs in the Artifact Center. */
@@ -302,7 +313,8 @@ export class PrimeHub {
   }catch(e){this.tools=[];esh.state=e instanceof Refused?'blocked':'unavailable';esh.detail=e instanceof Refused?e.message:'ESH read failed; availability unknown';}}
   return {observedAt:new Date().toISOString(),esh,chat:this.options.chat?.status()??{state:'disconnected',detail:'Shared chat host not connected; owner admission is required'},sdk:{state:this.options.sdk?'attached':'disconnected',detail:this.options.sdk?'Authenticated host attached; owner authorization still applies':'Authenticated SDK host not connected'},capabilities:this.capabilities()};
  }
- async prepare(input:PrimeRequest){
+ async prepare(input:PrimeRequest){return this.prepareTicket(input,false);}
+ private async prepareTicket(input:PrimeRequest,autonomyReview:boolean){
   limited(input);const request=JSON.parse(JSON.stringify(input)) as PrimeRequest;
   if(!['sdk','esh'].includes(request.target)||typeof request.name!=='string'||!request.arguments||Array.isArray(request.arguments)||typeof request.arguments!=='object')throw new Refused('Invalid integration request');
   if(/"(?:force_video|grant|api_key|access_token|authorization|confirm|bypass_reason)"\s*:/i.test(JSON.stringify(request.arguments)))throw new Refused('Owner controls and credentials cannot be overridden by this client');
@@ -334,8 +346,10 @@ export class PrimeHub {
    if(!this.tools.some(t=>t.name===request.name))throw new Refused('ESH tool not advertised');
    if(request.name==='esh_ledger')request.arguments.limit=Math.min(30,Math.max(1,Number(request.arguments.limit)||5));
    if(!eshReads.has(request.name)){
-    request.arguments.session='echo-prime';
-    if(!this.options.approveEsh||!await this.options.approveEsh(request,digest(request)))throw new Refused('ESH action requires the existing host approval boundary');
+    if(!autonomyReview)request.arguments.session='echo-prime';
+    // Autonomy's tier policy already ran; any returned ticket still requires the
+    // existing same-origin owner execute route. Browser requests cannot set this flag.
+    if(this.options.approveEsh?!await this.options.approveEsh(request,digest(request)):!autonomyReview)throw new Refused('ESH action requires the existing host approval boundary');
    }
   }
   for(const [id,t] of this.tickets)if(t.expiresAt<Date.now())this.tickets.delete(id);
@@ -351,7 +365,8 @@ export class PrimeHub {
   try{
    const r=ticket.request;
    const raw=await bounded(()=>r.target==='sdk'?this.options.sdk!.invoke({capability:r.name,params:r.arguments,reason:'Explicitly reviewed ECHO Prime request',idempotency_key:ticket.requestId}):this.options.esh!.call(r.name,{...r.arguments,...(!eshReads.has(r.name)?{idempotency_key:ticket.requestId}:{})}));
-   const result=unwrap(raw);limited(result,1048576);const body=object(result);
+   const result=r.target==='esh'?envelope(raw):unwrap(raw);limited(result,1048576);const body=object(result);
+   if(r.target==='esh'&&(body.ok===false||body.isError===true||['denied','gated','blocked'].includes(String(body.verdict))))return {state:'blocked',requestId:ticket.requestId,result,untrusted:true,detail:String(body.reason??'ESH owner refused the request')};
    return {state:body.job_id&&!['completed','succeeded','done'].includes(String(body.status))?'submitted':'returned',requestId:ticket.requestId,result:JSON.parse(redact(JSON.stringify(result))),untrusted:true};
   }catch(e){return {state:e instanceof Refused?'blocked':'uncertain',requestId:ticket.requestId,detail:e instanceof Refused?e.message:'Connection interrupted or timed out; outcome unknown. Inspect the owner using this request ID before retrying.'};}
  }

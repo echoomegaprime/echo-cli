@@ -11,12 +11,14 @@ import {checkClaims,extractClaims,type Claim} from '../code/claims.js';
 import type {Model} from '../code/model.js';
 import type {PersonalityForge,CatalogLoader,Selection} from './personality.js';
 import type {ToolKit} from '../code/tools/index.js';
+import {PrimeAutonomyHooks,type BeforeTurn,type AutonomyActivity} from './autonomy-hooks.js';
+import {isPrimeRole,type PrimeRole,type RoleState} from './roles.js';
 /** Either the authenticated host path (invoke + admission) or a reviewed model router (Qwen on loopback, or a vendor CLI). `tools` = the always-on live tools (web, Wolfram, knowledge, skills, MCP) for router turns. */
-export interface SharedChatOptions {workspace:Workspace;store:SessionStore;invoke?:CodingInvoker;admission?:CodingAdmission;models?:ModelRouter;personality?:PersonalityForge;tools?:ToolKit}
+export interface SharedChatOptions {workspace:Workspace;store:SessionStore;invoke?:CodingInvoker;admission?:CodingAdmission;models?:ModelRouter;personality?:PersonalityForge;tools?:ToolKit;autonomyHooks?:PrimeAutonomyHooks}
 /** Per-request context the server binds: the Workspace personality catalog loader (owner cookie), never browser data. */
 export interface SubmitContext {personalities?:CatalogLoader}
 export interface PersonalityTag {id:string;name:string;reason:string;pinned:boolean}
-export interface ChatReply extends TurnResult {requestId:string;model?:AnswerInfo;personality?:PersonalityTag}
+export interface ChatReply extends TurnResult {requestId:string;model?:AnswerInfo;personality?:PersonalityTag;role?:RoleState;activity?:AutonomyActivity[]}
 export interface VerifiedClaim extends Claim {verified:boolean;source:string|null}
 export interface VerifyReply {requestId:string;sessionId:string;answer:string;claims:VerifiedClaim[];summary:{total:number;verified:number;unverified:number};account:{text:string;model:AnswerInfo}|null;answerVerification:'unverified_model_text'}
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -65,11 +67,11 @@ export class SharedChat {
  }
  private static tag(selection:Selection|null):PersonalityTag|undefined{return selection?{id:selection.id,name:selection.name,reason:selection.reason,pinned:selection.pinned}:undefined;}
  /** One run on exactly one provider. A ProviderDeclinedError thrown by the CLI parser is remembered so the caller can tell a decline from a failure. */
- private async run(id:ModelId,variant:string|undefined,sessionId:string,prompt:string,persona:Persona|undefined,signal:AbortSignal){
+ private async run(id:ModelId,variant:string|undefined,sessionId:string,prompt:string,persona:Persona|undefined,signal:AbortSignal,systemContext?:string){
   const router=this.options.models!,turn=router.turn(id,variant);
   let declined:ProviderDeclinedError|undefined;
   const model:Model={next:async(messages,s)=>{try{return await turn.model.next(messages,s);}catch(error){if(error instanceof ProviderDeclinedError)declined=error;throw error;}}};
-  const result=await runTurn({workspace:this.options.workspace,store:this.options.store,model,sessionId,prompt,mode:'read-only',maxSteps:10,signal,...(persona?{persona}:{}),
+  const result=await runTurn({workspace:this.options.workspace,store:this.options.store,model,sessionId,prompt,mode:'read-only',maxSteps:10,signal,...(persona?{persona}:{}),...(systemContext?{systemContext}:{}),
    tools:this.options.tools?.forTurn({audience:'owner'})}); // live tools registry pass-through (src/code/tools); /api/chat is owner-only today
   turn.answered();
   return {turn,result,declined};
@@ -81,11 +83,13 @@ export class SharedChat {
  async submit(input:unknown,signal?:AbortSignal,context:SubmitContext={}):Promise<ChatReply>{
   if(!input||typeof input!=='object'||Array.isArray(input))throw new Error('Invalid chat request');
   const data=input as Record<string,unknown>;
-  if(Object.keys(data).some(k=>!['requestId','prompt','sessionId','provider','model'].includes(k))||
+  if(Object.keys(data).some(k=>!['requestId','prompt','sessionId','provider','model','rolePin'].includes(k))||
    typeof data.requestId!=='string'||!uuid.test(data.requestId)||typeof data.prompt!=='string'||
    !data.prompt.trim()||data.prompt.length>12000||
    (data.sessionId!==undefined&&(typeof data.sessionId!=='string'||!uuid.test(data.sessionId))))throw new Error('Invalid chat request');
   const {requestId,prompt}=data;
+  if(data.rolePin!==undefined&&data.rolePin!==null&&!isPrimeRole(data.rolePin))throw new Error('Invalid role pin');
+  if(data.rolePin!==undefined&&!this.options.autonomyHooks?.roles)throw new Error('Role switching is not configured');
   const router=this.options.models;
   if(data.provider!==undefined){
    if(!isChatProvider(data.provider))throw new Error('Invalid chat request');
@@ -110,26 +114,34 @@ export class SharedChat {
    if(session.workspace!==workspace.root)throw new Error('Chat session workspace/model mismatch');
    if(session.model!==sessionModel)throw new Error(router?'This conversation was started with a different model; start a new conversation to switch models':'Chat session workspace/model mismatch');
    if(session.proposals.some(p=>p.status==='pending'||p.status==='applying'||p.status==='reverting'))throw new Error('Review existing session proposals before browser chat');
+   const hooks=this.options.autonomyHooks,ctx={owner:true,prompt,sessionId:session.id,signal:controller.signal};
+   const finish=async(result:TurnResult,before?:BeforeTurn)=>{
+    if(!hooks||!before)return result;
+    const activity=[...before.activity,...await hooks.after(ctx,result,store.get(session.id).messages)];
+    return {...result,role:before.role,activity};
+   };
    debug('%j',{event:'prime_chat_started',requestId,sessionId:session.id,mode:'read-only',...(variant?{variant}:{}),...(provider?{provider}:{})});
    const selection=await this.persona(prompt,session.messages,context.personalities);
    const persona:Persona|undefined=selection?{id:selection.id,name:selection.name,fragment:selection.fragment}:undefined;
    if(router&&provider){
+    // Autonomy hooks (ECF prepare, role switch) run once before routing; their bounded context rides into every run, including a re-route.
+    const before=await hooks?.before(ctx,hooks.roles?router.turn('qwen',undefined).model:undefined,data.rolePin as PrimeRole|null|undefined);
     let id:ModelId,routed:RouteInfo|undefined;
     if(provider===AUTO_ID){
      const route=await router.route(prompt,{signal:controller.signal,historyChars:session.messages.reduce((n,m)=>n+m.content.length,0)});
      id=route.id;routed=route.info;
     }else id=provider;
-    const before=session.messages.length;
-    let outcome=await this.run(id,variant,session.id,prompt,persona,controller.signal);
+    const historyLength=session.messages.length;
+    let outcome=await this.run(id,variant,session.id,prompt,persona,controller.signal,before?.context);
     let info:AnswerInfo=outcome.turn.info();
     // Decline detection on both paths: prose instead of an action (ProviderDeclinedError) or a well-formed final that is a refusal.
     const detection:RefusalDetection|undefined=outcome.declined?.detection??(id!=='qwen'&&outcome.result.status==='completed'?(d=>d.refused?d:undefined)(detectRefusal(outcome.result.answer)):undefined);
     if(detection&&id!=='qwen'){
      const from=id,label=info.label;
-     this.rollback(session.id,before);
+     this.rollback(session.id,historyLength);
      if(router.auto.declineTo==='qwen'){
       debug('%j',{event:'prime_model_rerouted',requestId,sessionId:session.id,from,to:'qwen',confidence:detection.confidence,patterns:detection.matched,path:outcome.declined?'invalid_action':'final',personality:persona?.id??null});
-      outcome=await this.run('qwen',undefined,session.id,prompt,persona,controller.signal);
+      outcome=await this.run('qwen',undefined,session.id,prompt,persona,controller.signal,before?.context);
       info={...outcome.turn.info(),declinedBy:from,declinedLabel:label};
      }else{
       debug('%j',{event:'prime_model_declined',requestId,sessionId:session.id,provider:from,confidence:detection.confidence,patterns:detection.matched});
@@ -138,16 +150,17 @@ export class SharedChat {
      }
     }
     if(routed)info={...info,routed};
-    const result=outcome.result;
+    const result=await finish(outcome.result,before);
     if(result.claims)debug('%j',{event:'prime_unverified_claims',requestId,sessionId:session.id,total:result.claims.total,unverified:result.claims.unverified.length,byKind:result.claims.byKind});
     debug('%j',{event:'prime_chat_finished',requestId,sessionId:session.id,provider:info.id,...(info.declinedBy?{declinedBy:info.declinedBy}:{}),...(routed?{task:routed.task}:{}),status:result.status,durationMs:Math.round(performance.now()-started)});
     return {...result,requestId,model:info,...(selection?{personality:SharedChat.tag(selection)}:{})};
    }
+   const before=await hooks?.before(ctx,undefined,data.rolePin as PrimeRole|null|undefined);
    const result=await runSharedTurn({workspace,store,invoke:invoke!,admission:admission!,sessionId:session.id,prompt,
-    mode:'read-only',maxSteps:10,signal:controller.signal,...(persona?{persona}:{})});
+    mode:'read-only',maxSteps:10,signal:controller.signal,...(persona?{persona}:{}),...(before?{systemContext:before.context}:{})});
    if(result.claims)debug('%j',{event:'prime_unverified_claims',requestId,sessionId:session.id,total:result.claims.total,unverified:result.claims.unverified.length,byKind:result.claims.byKind});
    debug('%j',{event:'prime_chat_finished',requestId,sessionId:session.id,status:result.status,durationMs:Math.round(performance.now()-started)});
-   return {...result,requestId,...(selection?{personality:SharedChat.tag(selection)}:{})};
+   return {...await finish(result,before),requestId,...(selection?{personality:SharedChat.tag(selection)}:{})};
   }catch(error){debug('%j',{event:'prime_chat_refused',requestId,durationMs:Math.round(performance.now()-started)});throw error;}
   finally{clearTimeout(timer);signal?.removeEventListener('abort',abort);this.busy=false;}
  }

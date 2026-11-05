@@ -27,6 +27,7 @@ assets['/systems.js']='systems.js';
 assets['/favicon.svg']='favicon.svg';assets['/favicon.ico']='favicon.svg';
 const assetTypes:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml'};
 Object.assign(assets,{'/brain.js':'brain.js','/brain.css':'brain.css'});
+assets['/autonomy.js']='autonomy.js';
 async function body(req:IncomingMessage,maxBytes=131072){
  let size=0;const chunks:Buffer[]=[];
  for await(const part of req){size+=part.length;if(size>maxBytes)throw new Error('Request exceeds size limit');chunks.push(part);}

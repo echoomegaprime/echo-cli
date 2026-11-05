@@ -51,6 +51,8 @@ export interface TurnOptions {
   persona?: Persona;
   /** Extra evidence the caller supplied this turn (memory recalls, provided documents); counts as context for the claim check. */
   context?: string[];
+  /** Bounded context assembled by the host, never browser-selected instructions. */
+  systemContext?: string;
 }
 export interface SourceEvidence { path: string; sha256: string; lineCount: number }
 export interface ToolsSummary { calls: number; exhausted: boolean; events: ToolEvent[]; sources: string[] }
@@ -84,6 +86,7 @@ export async function runTurn(options: TurnOptions): Promise<TurnResult> {
       if (signal?.aborted) { status = 'interrupted'; break; }
       const history = store.get(sessionId).messages;
       const messages: Message[] = [{ role: 'system', content: instructions }, ...history];
+      if(options.systemContext)messages[0].content+='\n'+options.systemContext.slice(0,28000);
       const action = await model.next(messages, signal);
       if (signal?.aborted) { status = 'interrupted'; break; }
       store.append(sessionId, { role: 'assistant', content: JSON.stringify(action) });

@@ -51,3 +51,12 @@
  .model-picker,.personality-control{flex:1 1 100%;min-width:0;max-width:100%}
  .model-picker .connection-note,.personality-control .connection-note{display:block;font-size:11px;line-height:1.35}
 }
+/* Phone composer (Commander report 2026-11-05: Video/Music/... tabs covered by the model note). The mode tabs always
+   own the first full row (scrollable, never overlapped); every other toolbar child starts on its own row below. */
+@media(max-width:640px){
+ .composer-wrap .composer-toolbar{flex-wrap:wrap;align-items:stretch;row-gap:6px}
+ .composer-wrap .composer-toolbar>.mode-tabs{flex:1 1 100%;max-width:100%;min-width:0;overflow-x:auto;scrollbar-width:none;position:relative;z-index:1}
+ .composer-wrap .composer-toolbar>.mode-tabs::-webkit-scrollbar{display:none}
+ .composer-wrap .composer-toolbar>.mode-tabs button{flex:none}
+ .composer-wrap .composer-toolbar>*:not(.mode-tabs){flex:1 1 100%;max-width:100%;min-width:0}
+}
