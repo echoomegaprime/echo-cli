@@ -15,12 +15,14 @@ type BrowserClient={
  request:(path:string,body?:unknown,signal?:AbortSignal)=>Promise<unknown>;
  chat:(input:{chat_id:string},event:(value:{type:string;text?:string})=>void,signal?:AbortSignal)=>Promise<unknown>;
 };
+type TransportClass=(new(options:{fetch:typeof fetch;onIdentityChange?:(session:unknown)=>void})=>BrowserClient)&{now:()=>number;SESSION_MEMO_MS:number};
 async function transportFixture(stream:()=>Response,session=()=>Response.json({
  workspaceConfigured:true,authenticated:true,user:{uid:'owner',role:'owner',status:'approved'},csrf:'csrf-owner',ownerAccess:true
-})){
+}),now?:()=>number){
  const window:Record<string,unknown>={};
  runInNewContext(await readFile(new URL('../ui/echo-prime/workspace-client.js',import.meta.url),'utf8'),{window,TextDecoder,TextEncoder,Uint8Array,Blob});
- const Transport=window.EchoPrimeWorkspaceTransport as new(options:{fetch:typeof fetch})=>BrowserClient;
+ const Transport=window.EchoPrimeWorkspaceTransport as TransportClass;
+ if(now)Transport.now=now;
  return new Transport({fetch:async path=>path==='/api/session'?session():stream()});
 }
 const doneEvent=JSON.stringify({type:'done',chat:{id:'chat-owner',messages:[]}});
@@ -39,25 +41,26 @@ describe('browser transport adversarial streams and admission',()=>{
   await expect(client.loadSession()).rejects.toThrow();await expect(client.request('/auth/logout',{})).resolves.toMatchObject({ok:true});
  });
  it('retains cleanup-only proof after issuer outage, never admits private requests with it, and erases it after local revocation',async()=>{
-  let unavailable=false,logoutCalls=0;
+  let unavailable=false,logoutCalls=0,clock=1_000_000;
   const window:Record<string,unknown>={};
   runInNewContext(await readFile(new URL('../ui/echo-prime/workspace-client.js',import.meta.url),'utf8'),{window,TextDecoder,TextEncoder,Uint8Array});
-  const Transport=window.EchoPrimeWorkspaceTransport as new(options:{fetch:typeof fetch})=>BrowserClient;
+  const Transport=window.EchoPrimeWorkspaceTransport as TransportClass;Transport.now=()=>clock;
   const client=new Transport({fetch:async(path,init)=>{
    if(path==='/api/session'){if(unavailable)throw new Error('issuer offline');return Response.json({workspaceConfigured:true,authenticated:true,user:{uid:'member',status:'approved'},csrf:'csrf-member'});}
    expect(path).toBe('/api/workspace/auth/logout');expect(new Headers(init?.headers).get('x-echo-csrf')).toBe('csrf-member');logoutCalls++;return Response.json({ok:true});
   }});
-  await client.loadSession();unavailable=true;await expect(client.loadSession()).rejects.toThrow();
+  await client.loadSession();unavailable=true;clock+=11000;// past the 10 s session memo: the outage is observed on the next read
+  await expect(client.loadSession()).rejects.toThrow();
   expect(client.canLogout).toBe(true);expect(client.headers()['x-echo-csrf']).toBeUndefined();
   await expect(client.request('/state')).rejects.toThrow();expect(logoutCalls).toBe(0);
   await expect(client.request('/auth/logout',{})).resolves.toMatchObject({ok:true});expect(client.canLogout).toBe(false);
   await expect(client.request('/auth/logout',{})).rejects.toThrow();expect(logoutCalls).toBe(1);
  });
  it.each(['anonymous','clear','rejected'])('erases revocation-only proof on %s without reusing it',async(kind)=>{
-  let anonymous=false;
-  const client=await transportFixture(()=>new Response(JSON.stringify({error:'Denied'}),{status:403,headers:{'content-type':'application/json'}}),()=>Response.json({workspaceConfigured:true,authenticated:!anonymous,user:anonymous?null:{uid:'owner',status:'approved'},csrf:anonymous?null:'csrf-owner'}));
+  let anonymous=false,clock=1_000_000;
+  const client=await transportFixture(()=>new Response(JSON.stringify({error:'Denied'}),{status:403,headers:{'content-type':'application/json'}}),()=>Response.json({workspaceConfigured:true,authenticated:!anonymous,user:anonymous?null:{uid:'owner',status:'approved'},csrf:anonymous?null:'csrf-owner'}),()=>clock);
   await client.loadSession();expect(client.canLogout).toBe(true);
-  if(kind==='clear')client.clear();else if(kind==='anonymous'){anonymous=true;await client.loadSession();}else await expect(client.request('/auth/logout',{})).rejects.toThrow();
+  if(kind==='clear')client.clear();else if(kind==='anonymous'){anonymous=true;clock+=11000;await client.loadSession();}else await expect(client.request('/auth/logout',{})).rejects.toThrow();
   expect(client.canLogout).toBe(false);
  });
  it('refuses a terminal chat beyond its separate8MiB bound without a retry',async()=>{
@@ -118,13 +121,49 @@ describe('browser transport adversarial streams and admission',()=>{
   await expect(result).rejects.toThrow(/account|session|interrupted/i);
  });
  it('clears previously admitted identity when canonical session verification becomes unavailable',async()=>{
-  let unavailable=false;
+  let unavailable=false,clock=1_000_000;
   const client=await transportFixture(()=>Response.json({}),()=>unavailable?new Response('unavailable',{status:503}):Response.json({
    workspaceConfigured:true,authenticated:true,user:{uid:'owner',status:'approved'},csrf:'csrf-owner',ownerAccess:true
-  }));
-  await client.loadSession();unavailable=true;
+  }),()=>clock);
+  await client.loadSession();unavailable=true;clock+=11000;
   await expect(client.loadSession()).rejects.toThrow();
   expect((client as unknown as {session:unknown}).session).toBeNull();
+ });
+ it('shares one /api/session read across transports, reuses it for 10 s, and forgets it on clear(), a login or a failed read',async()=>{
+  let clock=1_000_000,calls=0,hold=true,fail=false;const pending:Array<()=>void>=[];
+  const window:Record<string,unknown>={};
+  runInNewContext(await readFile(new URL('../ui/echo-prime/workspace-client.js',import.meta.url),'utf8'),{window,TextDecoder,TextEncoder,Uint8Array});
+  const Transport=window.EchoPrimeWorkspaceTransport as TransportClass;Transport.now=()=>clock;
+  expect(Transport.SESSION_MEMO_MS).toBe(10000);
+  const session={workspaceConfigured:true,authenticated:true,user:{uid:'owner',role:'owner',status:'approved'},csrf:'csrf-owner',ownerAccess:true};
+  const fetchImpl=(async(path:string)=>{
+   if(path==='/api/workspace/auth/login')return Response.json({user:{uid:'owner'},csrf:'csrf-owner'});
+   expect(path).toBe('/api/session');calls++;
+   if(hold)await new Promise<void>(resolve=>{pending.push(resolve);});
+   if(fail)throw new Error('issuer offline');
+   return Response.json(session);
+  }) as typeof fetch;
+  const changesA:unknown[]=[],changesB:unknown[]=[],changesC:unknown[]=[];
+  const a=new Transport({fetch:fetchImpl,onIdentityChange:s=>changesA.push(s)}),b=new Transport({fetch:fetchImpl,onIdentityChange:s=>changesB.push(s)}),c=new Transport({fetch:fetchImpl,onIdentityChange:s=>changesC.push(s)});
+  // Three transports (workspace.js, fleet.js and a third) read at once and share one request; the joiner that aborts neither
+  // cancels it for the others nor loses the identity it holds.
+  const controller=new AbortController();
+  const settled=Promise.allSettled([a.loadSession(),b.loadSession(),c.loadSession(controller.signal)]);
+  await vi.waitFor(()=>expect(pending).toHaveLength(1));controller.abort();pending.splice(0).forEach(release=>release());
+  const [first,second,third]=await settled;
+  expect(first).toMatchObject({status:'fulfilled',value:{authenticated:true}});expect(second).toMatchObject({status:'fulfilled',value:{authenticated:true}});
+  expect(third).toMatchObject({status:'rejected',reason:expect.objectContaining({message:'Session read interrupted.'})});
+  expect(calls).toBe(1);expect(changesA).toHaveLength(1);expect(changesB).toHaveLength(1);expect(changesC).toHaveLength(0);
+  expect((a as unknown as {session:unknown}).session).toMatchObject({authenticated:true});expect((c as unknown as {session:unknown}).session).toBeNull();
+  hold=false;
+  clock+=9999;await a.loadSession();await b.loadSession();expect(calls).toBe(1);// memo hits within 10 s: no request, no change event
+  expect(changesA).toHaveLength(1);expect(changesB).toHaveLength(1);
+  clock+=1;await a.loadSession();expect(calls).toBe(2);// the memo is good for 10 s, not longer
+  a.clear();expect(changesA).toHaveLength(2);await b.loadSession();expect(calls).toBe(3);// clear() on any transport forgets the shared readback
+  await a.auth('login',{email:'fixture@example.test'});await a.loadSession();expect(calls).toBe(4);// a login forgets it too
+  expect(changesA).toHaveLength(3);await b.loadSession();expect(calls).toBe(4);
+  clock+=11000;fail=true;await expect(a.loadSession()).rejects.toThrow();expect(calls).toBe(5);
+  fail=false;await b.loadSession();expect(calls).toBe(6);// a failed read is never memoized
  });
  it('preserves local logout when an account is pending and current issuer verification is unavailable',async()=>{
   let unavailable=false,logoutCalls=0;
@@ -226,12 +265,15 @@ describe('canonical Workspace boundary in the existing Prime host',()=>{
  it('binds public Host and Origin explicitly, secures both cookies, and retains current tenant/owner admission behind the TLS proxy',async()=>{
   const upstream=await ownerFixture(),publicOrigin='https://echoomegaprime.com';
   const server=await startPrimeServer(new PrimeHub({capabilities:[]}),ui,0,{workspace:{baseUrl:upstream.baseUrl,ownerUid:'owner'},publicOrigin});cleanup.push(server.close);
-  const request=(path:string,extra:Record<string,string>={},body?:unknown)=>new Promise<{status:number;cookie:string;body:string}>((resolve,reject)=>{
+  const request=(path:string,extra:Record<string,string>={},body?:unknown)=>new Promise<{status:number;cookie:string;body:string;csp:string}>((resolve,reject)=>{
    const req=httpRequest(server.url+path,{method:body===undefined?'GET':'POST',headers:{host:'echoomegaprime.com','x-prime-request':'1',...(body===undefined?{}:{'content-type':'application/json'}),...extra}},res=>{
-    let text='';res.setEncoding('utf8');res.on('data',chunk=>{text+=chunk;});res.on('end',()=>resolve({status:res.statusCode!,cookie:res.headers['set-cookie']?.[0]??'',body:text}));
+    let text='';res.setEncoding('utf8');res.on('data',chunk=>{text+=chunk;});res.on('end',()=>resolve({status:res.statusCode!,cookie:res.headers['set-cookie']?.[0]??'',body:text,csp:String(res.headers['content-security-policy']??'')}));
    });req.on('error',reject);req.end(body===undefined?undefined:JSON.stringify(body));
   });
   const root=await request('/');expect(root.status).toBe(200);expect(root.cookie).toMatch(/; Secure(?:;|$)/);expect(root.cookie).toContain('HttpOnly');
+  // Behind the TLS proxy Cloudflare may inject its Web Analytics beacon; only the public-origin server admits its two origins.
+  expect(root.csp).toContain("script-src 'self' https://accounts.google.com/gsi/client https://static.cloudflareinsights.com;");
+  expect(root.csp).toContain("connect-src 'self' https://accounts.google.com https://cloudflareinsights.com;");
   const primeCookie=root.cookie.split(';')[0];
   expect((await request('/api/session',{cookie:primeCookie})).status).toBe(200);
   expect((await request('/api/session',{cookie:primeCookie,host:'www.echoomegaprime.com'})).status).toBe(403);
@@ -246,6 +288,19 @@ describe('canonical Workspace boundary in the existing Prime host',()=>{
   const logout=await request('/api/workspace/auth/logout',{cookie,origin:publicOrigin,'x-echo-csrf':csrf},{});expect(logout.status).toBe(200);expect(logout.cookie).toContain('Max-Age=0');expect(logout.cookie).toMatch(/; Secure(?:;|$)/);
   expect(JSON.parse((await request('/api/session',{cookie})).body)).toMatchObject({authenticated:false,user:null,csrf:null});
   expect(upstream.calls.every(c=>!c.cookie.includes('echo_prime=')&&!c.authorization)).toBe(true);
+ });
+ it('keeps the Cloudflare beacon origins out of a loopback CSP and serves the shipped Echo orb favicon the page links',async()=>{
+  const upstream=await ownerFixture(),p=await prime(upstream.baseUrl);
+  const page=await fetch(p.url);expect(page.status).toBe(200);
+  expect(page.headers.get('content-security-policy')).toContain("script-src 'self' https://accounts.google.com/gsi/client;");
+  expect(page.headers.get('content-security-policy')).not.toContain('cloudflareinsights');
+  expect(await page.text()).toContain('<link rel="icon" type="image/svg+xml" href="favicon.svg">');
+  for(const path of ['/favicon.svg','/favicon.ico']){
+   const icon=await fetch(p.url+path);expect(icon.status,path).toBe(200);expect(icon.headers.get('content-type')).toBe('image/svg+xml');
+   const svg=await icon.text();expect(svg).toContain('<svg xmlns="http://www.w3.org/2000/svg"');expect(svg).not.toMatch(/https?:\/\/(?!www\.w3\.org\/)/);// the mark carries no external asset (only the SVG namespace)
+   const head=await fetch(p.url+path,{method:'HEAD'});expect(head.status).toBe(200);expect(head.headers.get('content-length')).toBe(String(Buffer.byteLength(svg)));expect(await head.text()).toBe('');
+  }
+  const head=await fetch(p.url,{method:'HEAD'});expect(head.status).toBe(200);expect(head.headers.get('set-cookie')).toMatch(/^echo_prime=/);expect(await head.text()).toBe('');
  });
  it.each(['demoted owner','configured UID mismatch'])('refuses unisolated legacy-owner data and model tools for %s',async(kind)=>{
   const upstream=await ownerFixture(),p=await login(await prime(upstream.baseUrl,kind==='configured UID mismatch'?'admin':'owner'),'owner');

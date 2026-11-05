@@ -318,6 +318,71 @@ describe('Logs & debugging and Journal & ECF receipts',()=>{
  });
 });
 
+describe('richer node states from the 2026-11-04 backend probes',()=>{
+ const richFleet=(at=now())=>({observed_at:at,summary:{connected:2,degraded:1,offline:1,dormant:1,unknown:0},nodes:[
+  {id:'quench',connection:'connected',reason:'SSH quench answered hostname=QUENCH in 300 ms',checked_at:at,role:'operator console (Windows)',reachable:true,service:'ssh ok'},
+  {id:'forge',connection:'connected',reason:'this Workspace runs on forge; SDK gate ok',checked_at:at,role:'SDK gate + Postgres'},
+  {id:'anvil',connection:'degraded',reason:'Host answers (SSH anvil answered hostname=anvil in 228 ms) but MinIO did not: MinIO did not answer (http://192.168.1.49:9000/minio/health/live -> timed out)',checked_at:at,role:'storage (MinIO) + batch',reachable:true,service:'ssh ok',probe_host:'forge',
+   checks:[{kind:'ssh',target:'anvil',ok:true,ms:228,detail:'anvil'},{kind:'http',target:'MinIO@http://192.168.1.49:9000/minio/health/live',ok:false,ms:3000,detail:'<img src=x onerror=alert(1)>'}]},
+  {id:'hammer',connection:'offline',reason:'No answer: SSH gave no answer (hammer: Connection timed out); TCP 22, 5985 closed on 100.85.253.44',checked_at:at,reachable:false,service:'ssh failed: hammer: Connection timed out'},
+  {id:'temper',connection:'disconnected',error:'legacy probe failure',checked_at:at},
+  {id:'crucible',connection:'dormant',reason:'Security node: LAN firewalled to ICMP and the Tailscale peer is parked; it answers only while a security task runs. No answer: SSH gave no answer',checked_at:at,dormant_policy:'Security node: LAN firewalled to ICMP',reachable:false},
+ ]});
+ const {core}=(()=>{const w=world();return boot(w).window.EchoPrimeFleet;})();
+
+ it('honours degraded, offline and dormant as states and still never promotes anything else to connected',()=>{
+  for(const value of ['connected','degraded','disconnected','offline','dormant'])expect(core.connectionState(value)).toBe(value);
+  for(const value of ['ok','CONNECTED','Degraded','online','reachable',true,1,null,undefined,{}])expect(core.connectionState(value)).toBe('unknown');
+ });
+ it('turns a probe timestamp into a compact age label and stays silent on bad input',()=>{
+  const at=Date.parse('2026-11-04T12:00:00Z');
+  expect(core.ageLabel('2026-11-04T11:59:55Z',at)).toBe('5s');
+  expect(core.ageLabel('2026-11-04T11:57:55Z',at)).toBe('2m');
+  expect(core.ageLabel('2026-11-04T09:00:00Z',at)).toBe('3h');
+  for(const value of [undefined,null,'','not a date',42])expect(core.ageLabel(value,at)).toBe('');
+ });
+ it('does not trust a degraded or dormant result older than five minutes either',()=>{
+  const at=Date.parse('2026-11-04T12:00:00Z');
+  const rows=core.normalizeFleet(richFleet('2026-11-04T11:50:00Z'),at);
+  expect(rows.every((n:any)=>n.connection==='unknown')).toBe(true);
+  expect(rows.find((n:any)=>n.id==='crucible').reason).toMatch(/older than five minutes.*dormant/);
+ });
+ it('renders the state colour, a reason tooltip and the last-checked age on every chip',async()=>{
+  const w=world();w.handlers['/fleet']=()=>richFleet();const h=boot(w);await flush();
+  expect(h.leds()).toEqual({quench:'connected',forge:'connected',anvil:'degraded',hammer:'offline',temper:'disconnected',crucible:'dormant'});
+  const anvil=h.nodeButton('anvil');
+  expect(anvil.title).toContain('ANVIL: degraded');expect(anvil.title).toContain('MinIO did not');expect(anvil.title).toMatch(/checked \d\d:\d\d:\d\d UTC \(\d+s ago\)/);
+  expect(anvil.attributes['aria-label']).toContain('ANVIL: degraded');expect(anvil.attributes['aria-label']).toContain('MinIO did not');
+  expect(anvil.attributes['data-state']).toBe('degraded');
+  const crucible=h.nodeButton('crucible');
+  expect(crucible.title).toContain('CRUCIBLE: dormant');expect(crucible.title).toContain('Security node');
+  const age=(id:string)=>all(h.nodeButton(id)).find(n=>n.className==='fleet-age')!;
+  expect(age('quench').textContent).toMatch(/^\d+s$/);
+  expect(age('temper').textContent).toMatch(/^\d+s$/);
+  expect(h.nodeButton('hammer').title).toContain('TCP 22, 5985 closed');
+ });
+ it('clears the age and keeps the honest tooltip when no probe has been reported',async()=>{
+  const w=world({session:member()}),h=boot(w);await flush();
+  const age=all(h.nodeButton('forge')).find(n=>n.className==='fleet-age')!;
+  expect(age.textContent).toBe('');
+  expect(h.nodeButton('forge').title).toContain('FORGE: unknown');expect(h.nodeButton('forge').title).toContain('primary owner only');
+  expect(h.nodeButton('forge').title).not.toContain('checked');
+ });
+ it('opens evidence for a degraded node with the reason, reachability and every probe check as inert text',async()=>{
+  const w=world();w.handlers['/fleet']=()=>richFleet();const h=boot(w);await flush();
+  await h.nodeButton('anvil').fire('click');
+  const dialog=h.created.find(n=>n.tagName==='DIALOG')!,body=text(dialog);
+  for(const expected of ['ANVIL','Degraded','Reason','MinIO did not answer','Reachable','Yes','Service','ssh ok','Probed from','forge','Probe checks','ssh anvil','228 ms','MinIO@http://192.168.1.49:9000/minio/health/live','3000 ms','<img src=x onerror=alert(1)>'])expect(body).toContain(expected);
+  expect(h.created.some(n=>n.tagName==='IMG')).toBe(false);
+  const items=all(dialog).filter(n=>n.tagName==='LI');
+  expect(items).toHaveLength(2);expect(text(items[0])).toContain('ok');expect(text(items[1])).toContain('failed');
+  await h.nodeButton('crucible').fire('click');
+  expect(text(dialog)).toContain('Dormant');expect(text(dialog)).toContain('Policy');expect(text(dialog)).toContain('LAN firewalled');
+  await h.nodeButton('hammer').fire('click');
+  expect(text(dialog)).toContain('Offline');expect(text(dialog)).toContain('No');
+ });
+});
+
 describe('static delivery',()=>{
  it('serves the new scripts and stylesheet and no longer ships the hardcoded scene nodes',async()=>{
   const server=await startPrimeServer(new PrimeHub({capabilities:[]}),fileURLToPath(new URL('../ui/echo-prime/',import.meta.url)),0);
