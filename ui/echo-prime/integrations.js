@@ -27,7 +27,7 @@
  }
  function render(){
   const query=$('#creative-search').value.toLowerCase(),category=$('#creative-category').value,target=$('#creative-tools');target.replaceChildren();
-  const rows=catalog.filter(c=>(category==='all'||c.category===category)&&(c.id+' '+c.description).toLowerCase().includes(query));
+  const rows=catalog.filter(c=>(category==='all'||category==='auto'||c.category===category)&&(c.id+' '+c.description).toLowerCase().includes(query));
   status.textContent=rows.length+' of '+catalog.length+' creative capabilities · '+(host?'Host connected; availability checked per request':'Registry snapshot · live availability unverified');
   for(const c of rows){const b=document.createElement('button');b.className='creative-tool';b.setAttribute('aria-pressed',String(selected?.id===c.id));const title=document.createElement('strong'),small=document.createElement('small'),state=document.createElement('span');title.textContent=c.id.replace(/^echo\./,'');small.textContent=c.description;state.textContent=c.health+' · '+(c.scope||'scope unknown');b.append(title,state,small);b.addEventListener('click',()=>choose(c));target.append(b);}
  }
@@ -66,7 +66,15 @@
  $('#execute-request').addEventListener('click',async()=>{
   if(!ticket||submitting)return;submitting=true;$('#execute-request').disabled=true;const current=ticket,epoch=generation;ticket=null;
   $('#review-dialog').close();result.textContent='Submitting the reviewed request…';
-  try{const r=await api('execute',{id:current.id,digest:current.digest});if(epoch===generation){result.textContent=JSON.stringify(r,null,2);debug('execute','returned');}}catch(e){if(epoch===generation){result.textContent='Outcome unknown. Do not resubmit automatically. Request ID: '+current.requestId+'\n'+e.message;debug('execute','unconfirmed');}}finally{if(epoch===generation)submitting=false;}
+  // The auto-router listens for this to offer the next-best tool after a failure; it never resubmits by itself.
+  const executed=(state,detail)=>{try{window.dispatchEvent(new CustomEvent('echo-studio-executed',{detail:{state,detail:String(detail||'').slice(0,600),name:current.request.name,requestId:current.requestId}}));}catch{}};
+  try{const r=await api('execute',{id:current.id,digest:current.digest});if(epoch===generation){result.textContent=JSON.stringify(r,null,2);debug('execute','returned');executed(r.state,r.detail);}}catch(e){if(epoch===generation){result.textContent='Outcome unknown. Do not resubmit automatically. Request ID: '+current.requestId+'\n'+e.message;debug('execute','unconfirmed');executed('uncertain',e.message);}}finally{if(epoch===generation)submitting=false;}
  });
- window.EchoPrimeStudio={open};models();render();
+ window.EchoPrimeStudio={open,
+  /** Auto-router hooks: select a listed capability by id, or select it and set the exact request the router prepared. */
+  select(id){const c=catalog.find(x=>x.id===id);if(c)choose(c);return !!c;},
+  apply(pick){const c=pick&&catalog.find(x=>x.id===pick.id);if(!c)return false;choose(c);if(pick.arguments&&typeof pick.arguments==='object'&&!Array.isArray(pick.arguments))$('#creative-arguments').value=JSON.stringify(pick.arguments,null,2);return true;},
+  catalog(){return catalog.slice();},
+  selected(){return selected?{id:selected.id,category:selected.category}:null;},
+ };models();render();
 })();

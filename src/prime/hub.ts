@@ -6,6 +6,9 @@ import {disconnectedSteward,type StewardOwner} from './steward.js';
 import type {ModelRouter} from '../code/model-factory.js';
 import {SwarmError,type SwarmClient} from './swarm.js';
 import {AdkError,type AdkClient} from './agents.js';
+import {MediaRouter} from './media.js';
+import {PromptEnhancer} from './enhance.js';
+import {WorkspaceHttpError} from './workspace.js';
 const debugOwnerResponse=debuglog('echo-prime');
 export type Json=Record<string,unknown>;
 export interface Tool {name:string;description?:string;inputSchema:Json}
@@ -21,6 +24,10 @@ export interface PrimeOptions {
  capabilities:Capability[];sdk?:SdkBroker;esh?:McpConnection;chat?:SharedChat;steward?:StewardOwner;models?:ModelRouter;swarm?:SwarmClient;
  /** Opt-in loopback `echo-adk-api` client (Agents view). Absent = the feature is off. */
  adk?:AdkClient;
+ /** Auto media routing over this hub's catalog (built on demand from `capabilities`, `sdk.read` and `models` when absent). */
+ media?:MediaRouter;
+ /** Enhance-prompt runner over `models` (built on demand when absent; without `models` the route says enhancement is off). */
+ enhancer?:PromptEnhancer;
  /** Existing host approval, never supplied by model output or the browser. */
  approveEsh?:(request:PrimeRequest,digest:string)=>Promise<boolean>;
 }
@@ -126,6 +133,20 @@ export class PrimeHub {
  async chat(input:unknown,signal?:AbortSignal){
   if(!this.options.chat)throw new Refused('Shared chat host not connected; owner admission is required');
   return this.options.chat.submit(input,signal);
+ }
+ private media?:MediaRouter;private enhancer?:PromptEnhancer;
+ /** Auto media routing: classify the prompt, rank the catalog's generators, return one explicit pick plus alternatives.
+  * Spends nothing: the pick is a request shape for the existing prepare -> review -> execute path. Health probes reuse the
+  * same `sdk.read` that `prepare` trusts (unwrapped, bounded, cached 60 s in the router). */
+ async mediaRoute(input:unknown,signal?:AbortSignal){
+  this.media??=this.options.media??new MediaRouter({catalog:()=>this.capabilities(),read:this.options.sdk?id=>bounded(()=>this.options.sdk!.read(id),8000).then(unwrap):undefined,models:this.options.models});
+  return this.media.route(input,signal);
+ }
+ /** Enhance prompt on exactly the chosen provider through the reviewed model router. No router = the feature is off (503). */
+ async enhance(input:unknown,sessionKey:string,signal?:AbortSignal){
+  if(!this.options.models&&!this.options.enhancer)throw new WorkspaceHttpError(503,'Prompt enhancement is off: the reviewed Prime configuration has no models section, so no provider can be asked');
+  this.enhancer??=this.options.enhancer??new PromptEnhancer(this.options.models!);
+  return this.enhancer.enhance(input,sessionKey,signal);
  }
  async refresh(query:string){
   if(!this.options.sdk)throw new Refused('SDK host not connected');

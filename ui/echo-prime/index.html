@@ -6,7 +6,7 @@
   <title>ECHO Prime · Your intelligence, connected</title>
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="fleet.css"><link rel="stylesheet" href="composer.css"><link rel="stylesheet" href="swarm.css"><link rel="stylesheet" href="agents.css">
-  <link rel="stylesheet" href="views.css">
+  <link rel="stylesheet" href="views.css"><link rel="stylesheet" href="media.css">
   <script defer src="composer.js"></script><script defer src="voicebar.js"></script><script defer src="plugins.js"></script>
 </head>
 <body>
@@ -69,7 +69,7 @@
 <div id="workspace-conversation-controls" class="workspace-conversation-controls" hidden><label>Conversation<select id="workspace-chat-kind"><option value="workspace">Echo conversation</option><option value="coding">ECHO Code · read-only</option></select></label><label>Project<select id="workspace-project"><option value="">No project</option></select></label><button class="quiet-button" id="workspace-rename">Rename</button><button class="quiet-button" id="workspace-compact">Compact</button><button class="quiet-button" id="workspace-fork">Continue in a new chat</button><button class="quiet-button" id="workspace-journal">Journal</button><span id="workspace-context" role="status"></span><span id="workspace-attachments"></span></div>
 <dialog id="creative-dialog" class="panel-dialog creative-dialog"><div class="dialog-title"><div><span class="eyebrow">ECHO CREATIVE STUDIO</span><h2>Make something yours.</h2></div><button class="icon-button close-dialog" aria-label="Close creative studio"><svg><use href="#i-close"/></svg></button></div>
 <p class="dialog-description">Images, video, songs, sound and voices from your ECHO tools.</p>
-<div class="creative-filters"><label>Find a tool<input id="creative-search" type="search" placeholder="Model, provider or capability…"></label><label>Medium<select id="creative-category"><option value="all">Everything</option><option value="image">Images</option><option value="video">Video</option><option value="music">Music &amp; songs</option><option value="sound">Sound effects</option><option value="voice">Voice</option><option value="tools">Production tools</option></select></label></div>
+<div class="creative-filters"><label>Find a tool<input id="creative-search" type="search" placeholder="Model, provider or capability…"></label><label>Medium<select id="creative-category"><option value="auto">Auto · Echo picks the tool</option><option value="all">Everything</option><option value="image">Images</option><option value="video">Video</option><option value="music">Music &amp; songs</option><option value="sound">Sound effects</option><option value="voice">Voice</option><option value="tools">Production tools</option></select></label></div>
 <label class="model-filter"><input type="checkbox" id="include-adult" checked> Include NSFW-capable model listings</label><div id="model-list" class="model-list"></div>
 <p id="catalog-state" class="connection-note"></p><div id="creative-tools" class="creative-tools"></div>
 <div class="creative-request"><h3 id="selected-tool">Select a tool to prepare a request</h3><p id="tool-details"></p><label>Creative brief<textarea id="creative-prompt" rows="3" maxlength="12000" placeholder="Describe what you want to create…"></textarea></label><details><summary>Request details</summary><label>Owner request JSON<textarea id="creative-arguments" rows="6" spellcheck="false">{}</textarea></label></details><div class="creative-actions"><button id="prepare-creative" class="new-chat">Review request</button><button id="refresh-catalog" class="quiet-button">Search live registry</button></div><pre id="creative-result" aria-live="polite"></pre></div></dialog>
@@ -87,7 +87,7 @@
 <section id="agents-run" class="adk-run" aria-live="polite" aria-label="Live agent run" hidden></section>
 <div id="agents-runs" class="agents-runs"></div>
 <p class="connection-note">Budgets are clamped to the agent lane and the service caps (120 calls, $5, 80 min). Stop ends a run after its current step; a provider call already running is not interrupted.</p></dialog>
-<script src="catalog.js"></script><script src="orb.js"></script><script src="chat.js"></script><script src="workspace-client.js"></script><script src="workspace.js"></script><script src="app.js"></script><script src="models.js"></script><script src="integrations.js"></script><script src="steward.js"></script><script src="swarm.js"></script><script src="agents.js"></script>
+<script src="catalog.js"></script><script src="orb.js"></script><script src="chat.js"></script><script src="workspace-client.js"></script><script src="workspace.js"></script><script src="app.js"></script><script src="models.js"></script><script src="integrations.js"></script><script src="steward.js"></script><script src="swarm.js"></script><script src="agents.js"></script><script src="media-router.js"></script>
 <script src="fleet.js"></script><script src="logs.js"></script>
 <script src="views.js"></script>
 </body></html>

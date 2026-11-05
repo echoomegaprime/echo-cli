@@ -1,0 +1,39 @@
+/* Auto media routing panel (Creative Studio) and the Enhance prompt controls (chat composer + Studio). */
+.media-auto{border:1px solid #2b4a3f;border-radius:12px;background:#0b1a16;padding:14px 16px;margin:14px 0 4px;display:grid;gap:10px}
+.media-auto[hidden]{display:none}
+.media-auto .media-status{margin:0;font-size:12px;color:#9fbfb3;line-height:1.6}
+.media-pick{display:grid;gap:6px}
+.media-pick strong{font-size:13px;color:#d9f3e8;overflow-wrap:anywhere}
+.media-pick .media-reason{margin:0;font-size:12px;color:#a9c7bb;line-height:1.55}
+.media-badges{display:flex;flex-wrap:wrap;gap:6px}
+.media-badge{font-size:10px;color:#b4cec5;border:1px solid #31483e;border-radius:20px;padding:4px 9px}
+.media-badge.health-green{border-color:#3f8d6a;color:#9df0c7}
+.media-badge.health-amber{border-color:#8d7a3f;color:#f0dd9d}
+.media-badge.health-unknown,.media-badge.health-red,.media-badge.health-orphaned{border-color:#6c5a5a;color:#d9b3b3}
+.media-actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.media-actions .quiet-button{display:inline-flex;border:1px solid #456e5b;background:#172b22;border-radius:6px;padding:7px 10px;font-size:11px;color:#d5efdf}
+.media-alternatives{display:grid;gap:6px}
+.media-alternatives[hidden]{display:none}
+.media-alternative{background:#0a1915;border:1px solid #263d34;border-radius:10px;text-align:left;padding:10px 12px;display:grid;grid-template-columns:1fr auto;gap:4px 10px;color:#cee2d9;cursor:pointer;min-width:0}
+.media-alternative:hover{border-color:#4f8a70}
+.media-alternative strong{font-size:12px;overflow-wrap:anywhere}
+.media-alternative span{font-size:10px;color:#a5bdb3;white-space:nowrap}
+.media-alternative small{grid-column:1/-1;font-size:11px;color:#8fa79d;line-height:1.5}
+.media-failure{border-top:1px solid #4a3030;padding-top:10px;font-size:12px;color:#e2b9b9;line-height:1.55;display:grid;gap:8px}
+.media-failure[hidden]{display:none}
+.media-excluded{margin:0;padding:0;list-style:none;font-size:11px;color:#86a095;display:grid;gap:3px}
+.enhance-wrap{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
+.enhance-button{display:inline-flex;align-items:center;gap:6px;border:1px solid #456e5b;background:#172b22;border-radius:7px;padding:8px 11px;font-size:11px;color:#d5efdf;white-space:nowrap}
+.enhance-button:disabled{opacity:.55}
+.enhance-provider{max-width:160px;font-size:10px;padding:7px 8px}
+.enhance-undo{display:inline-flex;border:1px solid #6b5a3a;background:#2b2419;border-radius:6px;padding:6px 9px;font-size:10px;color:#f0dd9d}
+.enhance-undo[hidden]{display:none}
+.enhance-note{display:block;width:100%;font-size:11px;color:#9fbfb3;line-height:1.55;margin:8px 0 0}
+.enhance-note[hidden]{display:none}
+.enhance-added{margin:4px 0 0;padding-left:16px;font-size:11px;color:#b4cec5;line-height:1.5;display:grid;gap:2px}
+.enhance-added[hidden]{display:none}
+.composer .enhance-wrap{margin-right:2px}
+.composer-caption .enhance-note{margin:0}
+#enhance-composer-notice{width:min(100%,760px);margin:8px auto 0}
+.mode-tabs button[data-mode="Auto"].selected{color:#dffff0;background:#1f4d3c;box-shadow:inset 0 1px 0 #cdffdd0a,0 0 14px #5fe8b322}
+@media(max-width:800px){.enhance-provider{max-width:120px}.media-alternative{grid-template-columns:1fr}.media-alternative span{white-space:normal}}
