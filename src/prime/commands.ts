@@ -5,6 +5,7 @@ import {homedir} from 'node:os';
 import {join} from 'node:path';
 import {PrimeHub,type Capability,type Json} from './hub.js';
 import {SharedChat} from './chat.js';
+import {PersonalityForge} from './personality.js';
 import {Workspace} from '../code/workspace.js';
 import {SessionStore} from '../code/sessions.js';
 import {ModelRouter,parseModelsConfig} from '../code/model-factory.js';
@@ -41,7 +42,8 @@ export function registerPrimeCommands(code:Command){
    // and the code agent is not attached, so a bare config never opens the working directory or starts a vendor CLI.
    const router=config.models!==undefined?new ModelRouter(parseModelsConfig(config.models)):undefined;
    let chat:SharedChat|undefined;
-   if(router){const store=new SessionStore(opts.codeStateDir);chat=new SharedChat({workspace:new Workspace(opts.codeWorkspace,[store.directory]),store,models:router});}
+   // Personality Forge settings (off switch, pinned profile) are an owner setting kept beside the code sessions.
+   if(router){const store=new SessionStore(opts.codeStateDir);chat=new SharedChat({workspace:new Workspace(opts.codeWorkspace,[store.directory]),store,models:router,personality:new PersonalityForge({file:join(store.directory,'personality-settings.json')})});}
    const hub=new PrimeHub({capabilities:snapshot.capabilities,esh,steward,models:router,chat,swarm:config.swarm!==undefined?new SwarmClient(parseSwarmConfig(config.swarm)):undefined,
     // The reviewed `adk` section (loopback echo-adk-api, default 127.0.0.1:8378) is opt-in like `swarm`: absent = Agents view says it is off.
     adk:config.adk!==undefined?new AdkClient(parseAdkConfig(config.adk)):undefined,sdk:sdk&&config.sdk?await sdkBroker(sdk,config.sdk.tools,config.sdk.fixedArguments):undefined});

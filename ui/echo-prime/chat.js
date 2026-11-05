@@ -8,6 +8,7 @@
   article.className='chat-message '+role;label.textContent=role==='user'?'You':'ECHO Code';content.textContent=text;
   article.append(label,content);if(detail){const meta=document.createElement('small');meta.textContent=detail;article.append(meta);}
   $('#chat-log').append(article);$('#chat-log').hidden=false;$('#welcome').hidden=true;article.scrollIntoView({block:'nearest'});
+  return {article,content};
  }
  async function api(path,body,signal){
   const current=generation;let headers={};if(window.EchoPrimeWorkspace)headers=await window.EchoPrimeWorkspace.ownerHeaders();
@@ -36,9 +37,11 @@
     if(current!==generation)return {cancelled:true};
     sessionId=result.sessionId;
     const evidence=Array.isArray(result.evidence)?result.evidence.map(e=>e.path+' ['+e.sha256+']').join('; '):'';
-    line('assistant',result.answer||'Turn ended without an answer.',
+    const rendered=line('assistant',result.answer||'Turn ended without an answer.',
      (result.answerVerification==='unverified_model_text'?'Model text; verify claims. ':'Application result. ')+
      'Read-only · '+result.status+' · Session '+sessionId+(evidence?' · Sources: '+evidence:'')+(result.model&&window.EchoPrimeModels?' · '+window.EchoPrimeModels.describe(result.model):''));
+    // Brain surface (brain.js): personality tag, unverified-claim markers, Verify action. Optional; a failure never hides the reply.
+    try{window.EchoPrimeBrain?.decorate?.(rendered.article,result,rendered.content);}catch{}
     console.debug('[echo.code]',{schema_version:1,event:'coding_turn',outcome:result.status==='completed'?'completed':'returned'});
     return {sent:result.status==='completed',detail:result.status==='completed'?'Answer received.':'Turn '+result.status+'. No automatic retry was made.'};
    }catch(error){

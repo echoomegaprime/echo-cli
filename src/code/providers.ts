@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseAction, type Action, type Model } from './model.js';
 import { redact } from './workspace.js';
+import { detectRefusal, type RefusalDetection } from './refusal.js';
 import type { Message } from './sessions.js';
 
 /**
@@ -15,9 +16,22 @@ export type ProviderId = 'claude' | 'gpt' | 'grok' | 'argon';
 export interface RunOptions { cwd: string; env: NodeJS.ProcessEnv; input?: string; timeoutMs: number; signal?: AbortSignal; maxBytes: number }
 export interface RunResult { code: number | null; stdout: string; stderr: string; timedOut: boolean }
 export type Runner = (cmd: string, args: string[], options: RunOptions) => Promise<RunResult>;
-export interface Answered { provider: ProviderId; requested: string | null; model: string | null; reported: boolean }
+/** `declinedBy` is set by the Prime chat when a vendor declined and the turn was re-run on Qwen (Commander directive 2026-11-04). */
+export interface Answered { provider: ProviderId; requested: string | null; model: string | null; reported: boolean; declinedBy?: ProviderId }
 export class ProviderUnavailableError extends Error {
   constructor(readonly provider: ProviderId, detail: string) { super(`${PROVIDER_LABEL[provider]} is unavailable: ${detail}; no fallback was used`); this.name = 'ProviderUnavailableError'; }
+}
+/**
+ * The vendor answered, but with a refusal instead of an action (its classifier declined the request).
+ * Distinct from ProviderUnavailableError on purpose: an outage is never re-routed; a decline is re-run on
+ * Qwen by the Prime chat and labelled. The refusal text itself is kept out of the message so it never
+ * reaches the owner as a final reply; only the detector's pattern names and confidence are carried.
+ */
+export class ProviderDeclinedError extends Error {
+  constructor(readonly provider: ProviderId, readonly detection: RefusalDetection) {
+    super(`${PROVIDER_LABEL[provider]} declined the request (refusal detected, confidence ${detection.confidence}, patterns: ${detection.matched.join(', ') || 'none'}); the declined reply was not used`);
+    this.name = 'ProviderDeclinedError';
+  }
 }
 export const PROVIDER_LABEL: Record<ProviderId, string> = { claude: 'Claude (claude CLI)', gpt: 'GPT (codex CLI)', grok: 'Grok (grok CLI)', argon: 'Argon (agy CLI)' };
 export const PROVIDER_BIN: Record<ProviderId, string> = { claude: 'claude', gpt: 'codex', grok: 'grok', argon: 'agy' };
@@ -151,7 +165,12 @@ export class CliModel implements Model {
     if (result.code) throw new ProviderUnavailableError(this.provider, `exited with code ${result.code}`);
     let action: Action;
     try { action = parseAction(JSON.parse(extractJson(redact(parsed.text)))); }
-    catch { throw new Error(`${PROVIDER_LABEL[this.provider]} returned an invalid action; no tools were executed for that response`); }
+    catch {
+      // A vendor that declines answers in prose, never with an action. Tell a decline apart from garbage so the chat can re-route it (labelled) instead of failing the turn.
+      const detection = detectRefusal(parsed.text);
+      if (detection.refused) throw new ProviderDeclinedError(this.provider, detection);
+      throw new Error(`${PROVIDER_LABEL[this.provider]} returned an invalid action; no tools were executed for that response`);
+    }
     this.last = { provider: this.provider, requested: this.requested ?? DEFAULT_MODEL[this.provider] ?? null, model: parsed.model, reported: parsed.model !== null };
     return action;
   }

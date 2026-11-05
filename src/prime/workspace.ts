@@ -126,6 +126,14 @@ export class WorkspaceBridge {
   checkCsrf(req,session.csrf!);
  }
  ownerAccess(session:WorkspaceSession):boolean{return !!this.ownerUid&&session.authenticated&&session.user?.role==='owner'&&session.user.status==='approved'&&session.user.uid===this.ownerUid;}
+ /** The Workspace's personality catalog (`/api/state` → `personalities`, the same list its composer shows), read with this request's own session cookie. Raw state is never returned; the caller parses the list. */
+ async personalities(req:IncomingMessage,signal?:AbortSignal):Promise<unknown>{
+  const cookie=sessionCookie(req);
+  const response=await this.fetch('/api/state',cookie?{cookie,accept:'application/json'}:{accept:'application/json'},signal);
+  if(response.status!==200){await response.body?.cancel();throw new WorkspaceHttpError(503,'Workspace personality catalog unavailable');}
+  const state=await jsonResponse(response,8*1024*1024) as {personalities?:unknown};
+  return Array.isArray(state?.personalities)?state.personalities:[];
+ }
  async handle(req:IncomingMessage,res:ServerResponse,url:URL,signal:AbortSignal):Promise<void>{
   const started=Date.now(),requestId=randomUUID(),path=route(url,req.method??''),pathname=path.split('?')[0];
   const operation=pathname.startsWith('/api/auth/')?'account':pathname==='/api/chat'?'chat':'workspace';

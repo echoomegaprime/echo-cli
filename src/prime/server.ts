@@ -14,6 +14,7 @@ assets['/privacy']='privacy.html';assets['/privacy.css']='privacy.css';
 Object.assign(assets,{'/fleet.js':'fleet.js','/logs.js':'logs.js','/fleet.css':'fleet.css'});
 for(const name of ['composer.js','voicebar.js','plugins.js','composer.css'])assets['/'+name]=name;
 Object.assign(assets,{'/views.js':'views.js','/views.css':'views.css'});
+Object.assign(assets,{'/brain.js':'brain.js','/brain.css':'brain.css'});
 async function body(req:IncomingMessage){
  let size=0;const chunks:Buffer[]=[];
  for await(const part of req){size+=part.length;if(size>131072)throw new Error('Request exceeds 128 KiB');chunks.push(part);}
@@ -61,8 +62,11 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
      await workspace.handle(req,res,new URL(req.url??'/',url),abort.signal);return;
     }
     if(workspace)await workspace.requireOwner(req,abort.signal);
+    // Personality catalog loader bound to this owner request's Workspace cookie; the forge caches it 60 s. Absent without a Workspace (built-in catalog).
+    const personalities=workspace?()=>workspace.personalities(req,abort.signal):undefined;
     if(path==='/api/status'&&req.method==='GET'){send(200,await hub.status());return;}
     if(path==='/api/prime/models'&&req.method==='GET'){send(200,await hub.models());return;}
+    if(path==='/api/prime/personality'&&req.method==='GET'){send(200,await hub.personality(personalities));return;}
     if(path==='/api/prime/swarm/health'&&req.method==='GET'){send(200,await hub.swarmHealth(abort.signal));return;}
     const swarmRun=/^\/api\/prime\/swarm\/runs\/([^/]{1,80})$/.exec(path);
     if(swarmRun&&req.method==='GET'){send(200,await hub.swarmStatus(decodeURIComponent(swarmRun[1]),abort.signal));return;}
@@ -84,7 +88,10 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     if(path==='/api/search')send(200,{capabilities:await hub.refresh(String(data.query??''))});
     else if(path==='/api/prepare')send(200,await hub.prepare(data as unknown as PrimeRequest));
     else if(path==='/api/execute')send(200,await hub.execute(String(data.id??''),String(data.digest??'')));
-    else if(path==='/api/chat')send(200,await hub.chat(data,abort.signal));
+    else if(path==='/api/chat')send(200,await hub.chat(data,abort.signal,personalities?{personalities}:{}));
+    else if(path==='/api/chat/verify')send(200,await hub.verify(data,abort.signal));
+    else if(path==='/api/prime/personality')send(200,await hub.personalitySettings(data));
+    else if(path==='/api/prime/personality/select')send(200,await hub.personalitySelect(data,personalities));
     else if(path==='/api/prime/swarm/run')send(202,await hub.swarmRun(data,abort.signal));
     else if(path==='/api/prime/adk/runs')send(202,await hub.adkRun(data,abort.signal));
     else if(adkStop)send(200,await hub.adkStop(decodeURIComponent(adkStop[1]),abort.signal));

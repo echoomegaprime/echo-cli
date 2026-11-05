@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { debuglog } from 'node:util';
 import { redact } from '../code/workspace.js';
-import type {SharedChat} from './chat.js';
+import type {SharedChat,SubmitContext} from './chat.js';
+import {scorePersonalities,type CatalogLoader} from './personality.js';
 import {disconnectedSteward,type StewardOwner} from './steward.js';
 import type {ModelRouter} from '../code/model-factory.js';
 import {SwarmError,type SwarmClient} from './swarm.js';
@@ -123,9 +124,37 @@ export class PrimeHub {
  async adkStatus(runId:string,signal?:AbortSignal){return this.adkClient().status(runId,signal);}
  async adkStop(runId:string,signal?:AbortSignal){return this.adkClient().stop(runId,signal);}
  async adkRuns(query:unknown,signal?:AbortSignal){return this.adkClient().runs(query,signal);}
- async chat(input:unknown,signal?:AbortSignal){
+ async chat(input:unknown,signal?:AbortSignal,context:SubmitContext={}){
   if(!this.options.chat)throw new Refused('Shared chat host not connected; owner admission is required');
-  return this.options.chat.submit(input,signal);
+  return this.options.chat.submit(input,signal,context);
+ }
+ /** "Verify" action: evidence for each claim in the last reply of a conversation. */
+ async verify(input:unknown,signal?:AbortSignal){
+  if(!this.options.chat)throw new Refused('Shared chat host not connected; owner admission is required');
+  return this.options.chat.verify(input,signal);
+ }
+ private forge(){const forge=this.options.chat?.personality;if(!forge)throw new Refused('Personality Forge is not attached to this host');return forge;}
+ /** Owner view of the Personality Forge: settings, the catalog (Workspace list when the loader is bound, else built-in) and the last selection. */
+ async personality(loader?:CatalogLoader){
+  const forge=this.options.chat?.personality;
+  if(!forge)return {configured:false,settings:null,catalog:{entries:[],source:'none',reason:'Personality Forge is not attached to this host'},last:null};
+  return {configured:true,settings:forge.settings(),catalog:await bounded(()=>forge.catalog(loader),30000),last:forge.last()};
+ }
+ /** Owner setting: {enabled?, pinned?}. Persisted by the forge. */
+ async personalitySettings(input:unknown){return this.forge().update(input);}
+ /** Score-only preview for the Workspace conversation path: the browser sends the message and recent turns, gets the pick, then calls the Workspace's own personality_select. */
+ async personalitySelect(input:unknown,loader?:CatalogLoader){
+  const forge=this.forge(),data=object(input);
+  if(typeof data.text!=='string'||!data.text.trim()||data.text.length>12000)throw new Refused('Invalid personality request');
+  const history=Array.isArray(data.history)?data.history.slice(-12).filter(h=>h&&typeof h==='object'&&typeof (h as {role?:unknown}).role==='string'&&typeof (h as {content?:unknown}).content==='string').map(h=>({role:String((h as {role:string}).role).slice(0,20),content:String((h as {content:string}).content).slice(0,4000)})):[];
+  const settings=forge.settings();
+  if(!settings.enabled)return {enabled:false,selection:null};
+  const {entries,source}=await bounded(()=>forge.catalog(loader),30000);
+  const names=new Map(entries.map(e=>[e.id,e.name]));
+  if(settings.pinned)return {enabled:true,selection:{id:settings.pinned,name:names.get(settings.pinned)??settings.pinned,reason:'pinned by the owner',pinned:true},source};
+  const {ranked,intent,tone}=scorePersonalities(data.text,history,entries),best=ranked[0];
+  const reason=[intent?`${intent} intent`:'no clear intent',tone?`${tone} tone`:null,best.cues.length?`cues: ${best.cues.map(c=>`'${c}'`).join(', ')}`:(best.id==='echo'?'default':null)].filter(Boolean).join('; ');
+  return {enabled:true,selection:{id:best.id,name:names.get(best.id)??best.id,reason,pinned:false},source};
  }
  async refresh(query:string){
   if(!this.options.sdk)throw new Refused('SDK host not connected');
