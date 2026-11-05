@@ -240,4 +240,8 @@ it('ships the modules in index.html after workspace.js and in the server allowli
  for(const file of ['esh-dock.js','chat-actions.js','layout.js'])expect(html.indexOf('<script src="'+file+'">')).toBeGreaterThan(html.indexOf('<script src="workspace.js">'));
  expect(html).toContain('id="conversation-subtitle"');
  const css=source('styles.css');for(const token of ['--sidebar-width','--dock-height','.sidebar-right','.panel-resizer-se','.esh-status','.tool-card','.thinking'])expect(css).toContain(token);
+ // A floating ESH panel must keep its own x whichever side the navigation is on: every later (0,2,0) rule that
+ // sets `left` on .workspace-esh needs this (0,3,0) counterpart after it.
+ expect(css.match(/\.sidebar-right \.workspace-esh\.floating\{[^}]*\}/g)).toEqual(['.sidebar-right .workspace-esh.floating{left:var(--esh-x);right:auto}']);
+ expect(css).not.toMatch(/\.sidebar-right \.workspace-esh\.floating\.[\w-]+\{/);// nothing more specific overrides it
 });
