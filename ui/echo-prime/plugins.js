@@ -32,7 +32,16 @@
   if(sync&&Number.isFinite(sync.verified)&&Number.isFinite(sync.remaining))return `${sync.verified} records have exact ECF readback; ${sync.remaining} awaiting confirmation.`;
   return sync?pretty(sync):'No delivery status has been reported.';
  }
- window.EchoPrimePlugins={open:()=>open(),toolSummary,connectionCards,syncSummary,navLabels};
+ // Live tools (web search/fetch, Wolfram, Echo knowledge/memory, Agent Skills, MCP plugins) are always on for every model
+ // turn; the owner may toggle a family for this Prime process through the owner-only Prime route /api/prime/tools.
+ const familyLabels={web:'Live internet (web_search, web_fetch)',wolfram:'Wolfram|Alpha',knowledge:'Echo knowledge & memory',skills:'Agent Skills (owner)',mcp:'MCP plugins (owner, allow-listed)'};
+ function toolRows(report){
+  const families=report&&Array.isArray(report.families)?report.families:[];
+  return families.map(family=>({id:String(family.id||''),label:familyLabels[family.id]||String(family.id||'tools'),enabled:family.enabled===true,
+   tools:(Array.isArray(family.tools)?family.tools:[]).map(tool=>({name:String(tool.name||''),available:tool.available===true,detail:tool.available===true?'Live':String(tool.reason||'Unavailable').slice(0,300)}))}));
+ }
+ const budgetText=report=>report&&report.budget&&Number.isFinite(report.budget.calls)?`${report.budget.calls} calls or ${Math.round(Number(report.budget.wallMs)/1000)} s per turn · results compacted to ${report.budget.resultChars} characters · ${report.cache&&Number.isFinite(report.cache.entries)?report.cache.entries:0} cached results`:'Budget not reported.';
+ window.EchoPrimePlugins={open:()=>open(),toolSummary,connectionCards,syncSummary,navLabels,toolRows,budgetText};
 
  let dialog,body,notice,fields=[],generation=0;
  function field(label,node,key){if(key)node.setAttribute('data-field',key);if(['INPUT','TEXTAREA'].includes(String(node.tagName).toUpperCase()))fields.push(node);return el('label',{class:'workspace-field'},el('span',{},label),node);}
@@ -87,11 +96,40 @@
   for(const value of b.state.data?.preferences||[])cards.push(card(String(value.content||value.value||'Preference').slice(0,300),act('Forget this preference',async now=>{await now.api('/action',{action:'memory_forget',id:value.id,chat_id:now.state.chat?.id});await now.refresh();await rerender();})));
   return cards;
  }
+ // Prime's own owner-only route (not a Workspace route): same-origin cookie plus the Workspace owner headers, like models.js.
+ async function primeApi(path,body){
+  const headers={'x-prime-request':'1',...(window.EchoPrimeWorkspace?.ownerHeaders?await window.EchoPrimeWorkspace.ownerHeaders():{}),...(body?{'content-type':'application/json'}:{})};
+  const response=await fetch(path,{method:body?'POST':'GET',credentials:'same-origin',cache:'no-store',headers,...(body?{body:JSON.stringify(body)}:{})});
+  const data=await response.json().catch(()=>({}));
+  if(!response.ok)throw new Error(typeof data.error==='string'?data.error.slice(0,600):'Prime request failed. No automatic retry was made.');
+  return data;
+ }
+ function liveToolsCard(){
+  const list=el('div',{class:'plugin-statuses'}),summary=el('p',{},'Loading live tool status…');
+  let turn=generation;
+  const paint=report=>{
+   if(turn!==generation)return;
+   if(!report||report.configured!==true){summary.textContent=String(report?.reason||'Live tools are not configured on this host.');list.replaceChildren();return;}
+   summary.textContent=(report.enabled?'On for every model turn. ':'Off for this Prime process. ')+budgetText(report);
+   list.replaceChildren(el('label',{class:'workspace-field'},el('span',{},'All live tools'),toggle(report.enabled,async value=>paint(await primeApi('/api/prime/tools',{enabled:value})))),
+    ...toolRows(report).map(row=>card(row.label,el('label',{class:'workspace-field'},el('span',{},row.enabled?'Enabled':'Disabled'),toggle(row.enabled,async value=>paint(await primeApi('/api/prime/tools',{family:row.id,enabled:value})))),
+     ...row.tools.map(tool=>el('p',{},el('span',{class:'pill '+(tool.available?'good':'pending')},tool.available?'Live':'Unavailable'),' ',tool.name,tool.available?'':' · '+tool.detail)))));
+  };
+  function toggle(checked,change){
+   const node=el('input',{type:'checkbox'});node.checked=checked===true;
+   node.addEventListener('change',async()=>{const now=generation;node.disabled=true;try{if(!isOwner())throw new Error('Primary owner admission required.');await change(node.checked);}catch(error){if(now===generation){node.checked=!node.checked;say(error instanceof Error?error.message:'Tool toggle failed. No automatic retry was made.');}}finally{node.disabled=false;}});
+   return node;
+  }
+  const refresh=act('Refresh tool status',async()=>{turn=generation;paint(await primeApi('/api/prime/tools'));},{owner:true});
+  void (async()=>{try{paint(await primeApi('/api/prime/tools'));}catch(error){if(turn===generation)summary.textContent=error instanceof Error?error.message:'Live tool status is unavailable.';}})();
+  return card('Live tools · always on',el('p',{},'Every model turn (Qwen and the Claude, GPT, Grok and Gemini CLIs) may search the live internet, read public pages, ask Wolfram|Alpha, recall Echo knowledge and memory, load Agent Skills and call allow-listed MCP plugins. Results are untrusted data; keys stay on the SDK gate. Toggles last until this Prime process restarts; the reviewed `tools` config section is the durable setting.'),summary,refresh,list);
+ }
  function ownerCards(b){
   const result=el('div',{}),show=value=>result.replaceChildren(pre(value));
   const statuses=el('div',{class:'plugin-statuses'}),paint=data=>statuses.replaceChildren(...connectionCards(data).map(c=>card(c.title,el('p',{},c.detail),el('span',{class:'pill '+(c.ok?'good':'pending')},c.ok?'Readable':c.detail==='Not checked'?'Not checked':'Unavailable'))));paint(null);
   const query=input('What would you like to recall?'),source=el('select',{},el('option',{value:'ecf'},'Continuity Fabric (ECF)'),el('option',{value:'crystal'},'Crystal')),memory=area('A memory to save explicitly to Crystal');
   const cards=[
+   liveToolsCard(),
    card('Check connections',el('p',{},'Reads Crystal, Continuity Fabric and ESH status live.'),act('Check connections',async now=>{say('Checking Echo connections…');paint(await now.api('/plugins'));say('');},{owner:true}),statuses),
    card('Recall a memory',el('p',{},'Results keep their original provenance.'),field('Source',source,'recall-source'),field('Search',query,'recall-query'),
     act('Search memories',async now=>{show(await now.api('/action',{action:'memory_search',plugin:source.value,query:query.value,chat_id:now.state.chat?.id}));},{owner:true})),
@@ -117,7 +155,7 @@
   try{connections=(await b.api('/mcp')).connections||[];}catch(error){if(turn===generation)say(error instanceof Error?error.message:'MCP connections are unavailable.');}
   if(turn!==generation)return;
   const rerender=()=>render();
-  body.replaceChildren(...mcpCards(connections,b,rerender),...preferenceCards(b,rerender),...(isOwner()?ownerCards(b):[]));
+  body.replaceChildren(...mcpCards(connections,b,rerender),...preferenceCards(b,rerender),...(isOwner()?ownerCards(b):[card('Live tools · always on',el('p',{},'Your conversations may search the live internet, read public pages, ask Wolfram|Alpha and recall Echo knowledge. Agent Skills and MCP plugins are owner-only. Tool results are untrusted data and are shown as activity lines in the chat.'))]));
  }
  async function open(){
   ensureDialog();generation++;say('');

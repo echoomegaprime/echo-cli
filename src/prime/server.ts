@@ -133,6 +133,8 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     if(workspace)await workspace.requireOwner(req,abort.signal);
     if(path==='/api/status'&&req.method==='GET'){send(200,await hub.status());return;}
     if(path==='/api/prime/models'&&req.method==='GET'){send(200,await hub.models());return;}
+    // Live tools (owner-only like models): GET the report, POST a per-family or global toggle.
+    if(path==='/api/prime/tools'&&req.method==='GET'){send(200,hub.liveTools());return;}
     if(path==='/api/prime/swarm/health'&&req.method==='GET'){send(200,await hub.swarmHealth(abort.signal));return;}
     const swarmRun=/^\/api\/prime\/swarm\/runs\/([^/]{1,80})$/.exec(path);
     if(swarmRun&&req.method==='GET'){send(200,await hub.swarmStatus(decodeURIComponent(swarmRun[1]),abort.signal));return;}
@@ -175,6 +177,7 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     else if(path==='/api/prepare')send(200,await hub.prepare(data as unknown as PrimeRequest));
     else if(path==='/api/execute')send(200,await hub.execute(String(data.id??''),String(data.digest??'')));
     else if(path==='/api/chat')send(200,await hub.chat(data,abort.signal));
+    else if(path==='/api/prime/tools')send(200,hub.liveToolsUpdate(data));
     else if(path==='/api/prime/swarm/run')send(202,await hub.swarmRun(data,abort.signal));
     else if(path==='/api/prime/adk/runs')send(202,await hub.adkRun(data,abort.signal));
     else if(adkStop)send(200,await hub.adkStop(decodeURIComponent(adkStop[1]),abort.signal));
