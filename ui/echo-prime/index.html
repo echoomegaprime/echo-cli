@@ -7,7 +7,7 @@
   <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="fleet.css"><link rel="stylesheet" href="composer.css"><link rel="stylesheet" href="swarm.css"><link rel="stylesheet" href="agents.css"><link rel="stylesheet" href="bots.css"><link rel="stylesheet" href="nav.css"><link rel="stylesheet" href="browser.css">
-  <link rel="stylesheet" href="views.css"><link rel="stylesheet" href="autoagents.css"><link rel="stylesheet" href="activity.css"><link rel="stylesheet" href="library.css"><link rel="stylesheet" href="brain.css">
+  <link rel="stylesheet" href="views.css"><link rel="stylesheet" href="autoagents.css"><link rel="stylesheet" href="activity.css"><link rel="stylesheet" href="library.css"><link rel="stylesheet" href="build.css"><link rel="stylesheet" href="brain.css">
   <script defer src="composer.js"></script><script defer src="voicebar.js"></script><script defer src="plugins.js"></script>
 </head>
 <body>
@@ -46,6 +46,7 @@
   <button class="nav-item" id="open-steward"><svg><use href="#i-shield"/></svg>Node Steward</button>
   <button class="nav-item" id="open-library"><svg><use href="#i-memory"/></svg>Library &amp; Artifacts</button>
   <button class="nav-item" id="open-agents" data-owner-only><svg><use href="#i-code"/></svg>Agents</button>
+  <button class="nav-item" id="open-build" data-owner-only><svg><use href="#i-code"/></svg>Echo Build</button>
   <button class="nav-item" id="workspace-open-esh" data-owner-only hidden><svg><use href="#i-code"/></svg>ESH shell</button>
   <button class="nav-item" id="open-browser" data-owner-only hidden><svg><use href="#i-chip"/></svg>In-chat browser</button>
   <div id="workspace-navigation" hidden><button class="nav-item" data-prime-view="projects">Projects</button><button class="nav-item" data-prime-view="library">Library</button><button class="nav-item" id="open-artifacts">Artifact Center</button><button class="nav-item" id="workspace-open-plugins">Plugins &amp; memory</button><button class="nav-item" data-prime-view="sdk" data-owner-only>SDK</button><button class="nav-item" data-prime-view="vault" data-owner-only>Vault</button><button class="nav-item" data-prime-view="review">Code review</button><button class="nav-item" data-view="logs" data-owner-only>Logs &amp; debugging</button><button class="nav-item" data-workspace-view="voice">Voice &amp; personality</button></div>
@@ -108,6 +109,21 @@
 <script src="catalog.js"></script><script src="orb.js"></script><script src="activity.js"></script><script src="chat.js"></script><script src="workspace-client.js"></script><script src="workspace.js"></script><script src="app.js"></script><script src="models.js"></script><script src="integrations.js"></script><script src="steward.js"></script><script src="swarm.js"></script><script src="agents.js"></script>
 <script src="fleet.js"></script><script src="logs.js"></script><script src="bots.js"></script><script src="autoagents.js"></script>
 <script src="views.js"></script><script src="library.js"></script>
+<dialog id="build-dialog" class="panel-dialog build-dialog" aria-labelledby="build-label">
+ <div class="dialog-title"><div><span class="eyebrow">APPS · PROGRAMS · WEBSITES</span><h2 id="build-label">Echo Build</h2></div><button id="close-build" class="icon-button" aria-label="Close Echo Build"><svg><use href="#i-close"/></svg></button></div>
+ <p class="dialog-description">Describe what you want to build. Your chosen engine writes a real project, builds it and verifies its preview. Each engine uses its own CLI login; no automatic fallback.</p>
+ <div class="build-toolbar"><button id="refresh-build" type="button" class="quiet-button">Refresh</button><p id="build-status" role="status" aria-live="polite">Echo Build has not been checked.</p></div>
+ <div class="build-layout"><div><div id="build-list" class="build-list"></div><form id="build-form" class="build-form"><label>Title<input id="build-title" maxlength="120" required></label><label>What should it do?<textarea id="build-prompt" rows="5" maxlength="12000" required placeholder="Describe the app, API, program, CLI or website. Do not include credentials."></textarea></label><label>Engine<select id="build-engine" required></select></label><button id="build-submit" class="new-chat" type="submit" disabled>Build it</button></form></div>
+ <section id="build-view" hidden aria-label="Selected build"><h3 id="build-heading"></h3><p id="build-meta" class="build-meta"></p><a id="build-repo" hidden target="_blank" rel="noopener noreferrer"></a>
+ <div class="build-actions"><button id="build-hibernate" type="button" class="quiet-button">Hibernate</button><button id="build-revive" type="button" class="quiet-button">Revive</button><button id="build-stop" type="button" class="quiet-button">Stop</button><button id="build-deploy" type="button" class="quiet-button">Deploy</button></div><div id="build-deploy-review"></div>
+ <iframe id="build-preview" class="build-preview" title="Live build preview" sandbox="allow-scripts allow-forms" referrerpolicy="no-referrer" hidden></iframe>
+ <p class="build-muted">Embedded preview supports GET requests. Sign-in, data mutations and WebSockets need the app’s direct test or deployment environment.</p>
+ <details open><summary>Live build log</summary><pre id="build-log" class="build-log" role="log" aria-label="Redacted build log"></pre></details>
+ <form id="build-turn" class="build-turn"><label>Follow-up<textarea id="build-turn-prompt" rows="3" maxlength="12000" required placeholder="What should change in this app?"></textarea></label><button id="build-turn-submit" class="quiet-button" type="submit">Apply follow-up</button></form><pre id="build-receipt" class="build-receipt" aria-live="polite"></pre></section></div>
+</dialog>
+<script src="catalog.js"></script><script src="orb.js"></script><script src="chat.js"></script><script src="workspace-client.js"></script><script src="workspace.js"></script><script src="app.js"></script><script src="models.js"></script><script src="integrations.js"></script><script src="steward.js"></script><script src="swarm.js"></script><script src="agents.js"></script><script src="build.js"></script>
+<script src="fleet.js"></script><script src="logs.js"></script><script src="bots.js"></script>
+<script src="views.js"></script>
 <script src="esh-dock.js"></script><script src="chat-actions.js"></script><script src="layout.js"></script>
 <script src="browser.js"></script>
 <script src="brain.js"></script>

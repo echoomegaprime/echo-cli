@@ -12,6 +12,7 @@ assets['/swarm.js']='swarm.js';assets['/swarm.css']='swarm.css';
 assets['/agents.js']='agents.js';assets['/agents.css']='agents.css';
 assets['/bots.js']='bots.js';assets['/bots.css']='bots.css';
 assets['/browser.js']='browser.js';assets['/browser.css']='browser.css';
+assets['/build.js']='build.js';assets['/build.css']='build.css';
 const debug=debuglog('echo-prime-server');
 assets['/privacy']='privacy.html';assets['/privacy.css']='privacy.css';
 Object.assign(assets,{'/fleet.js':'fleet.js','/logs.js':'logs.js','/fleet.css':'fleet.css'});
@@ -46,10 +47,13 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
  const workspace=options.workspace?new WorkspaceBridge(options.workspace,!!externalOrigin,uploadStore):undefined;
  if(workspace)await workspace.validateBackend();
  const token=randomBytes(32).toString('hex');let url='',active=0,mediaActive=0;
+ // Opaque-origin sandbox frames cannot send owner headers or SameSite cookies. A short-lived, build-only read ticket is
+ // minted by an authenticated JSON POST. Its captured session is revalidated on every resource; never sent to the app.
+ const previews=new Map<string,{id:string;expires:number;headers:IncomingMessage['headers']}>();
  const server=createServer(async(req,res)=>{
   res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Cache-Control','no-store');res.setHeader('Referrer-Policy','no-referrer');
   // Behind the public TLS proxy Cloudflare may inject its Web Analytics beacon; only a server with a public origin allows those two origins.
-  res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'"+(workspace?' https://accounts.google.com/gsi/client':'')+(externalOrigin?' https://static.cloudflareinsights.com':'')+"; style-src 'self' 'unsafe-inline'"+(workspace?' https://accounts.google.com/gsi/style':'')+"; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'"+(workspace?' https://accounts.google.com':'')+(externalOrigin?' https://cloudflareinsights.com':'')+"; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"+(workspace?"; frame-src 'self' https://accounts.google.com":''));
+  res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'"+(workspace?' https://accounts.google.com/gsi/client':'')+(externalOrigin?' https://static.cloudflareinsights.com':'')+"; style-src 'self' 'unsafe-inline'"+(workspace?' https://accounts.google.com/gsi/style':'')+"; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'"+(workspace?' https://accounts.google.com':'')+(externalOrigin?' https://cloudflareinsights.com':'')+"; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; frame-src 'self'"+(workspace?' https://accounts.google.com':''));
   res.setHeader('Permissions-Policy','microphone=(self), camera=()');
   const send=(status:number,value:unknown)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(value));};
   const expectedOrigin=externalOrigin??url;
@@ -57,18 +61,32 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
   const path=new URL(req.url??'/',url).pathname;
   if(path.startsWith('/api/')){
    const started=Date.now(),requestId=randomUUID();
-   const operation=path.startsWith('/api/workspace/')?'workspace':path.startsWith('/api/steward/')?'steward':path.startsWith('/api/prime/swarm/')?'swarm':path.startsWith('/api/prime/adk/')?'adk':path.startsWith('/api/prime/bots/')?'bots':path.startsWith('/api/prime/browser/')?'browser':path==='/api/prime/uploads'||path.startsWith('/api/prime/uploads/')?'uploads':path==='/api/prime/artifacts'||path.startsWith('/api/prime/artifacts/')?'artifacts':path==='/api/session'?'session':'owner';
+   const operation=path.startsWith('/api/workspace/')?'workspace':path.startsWith('/api/steward/')?'steward':path.startsWith('/api/prime/swarm/')?'swarm':path.startsWith('/api/prime/adk/')?'adk':path.startsWith('/api/prime/bots/')?'bots':path.startsWith('/api/prime/browser/')?'browser':path.startsWith('/api/prime/build/')?'build':path==='/api/prime/uploads'||path.startsWith('/api/prime/uploads/')?'uploads':path==='/api/prime/artifacts'||path.startsWith('/api/prime/artifacts/')?'artifacts':path==='/api/session'?'session':'owner';
    const record=(outcome:string)=>debug('%j',{schemaVersion:1,event:'prime_api_request',operation,requestId,status:res.statusCode,outcome,durationMs:Date.now()-started});
    res.once('finish',()=>record('returned'));res.once('close',()=>{if(!res.writableEnded)record('disconnected');});
    const supplied=(req.headers.cookie??'').split(';').map(c=>c.trim()).find(c=>c.startsWith('echo_prime='))?.slice(11)??'';
    const allowed=/^[0-9a-f]{64}$/.test(supplied)&&timingSafeEqual(Buffer.from(supplied),Buffer.from(token));
+   const previewRoute=/^\/api\/prime\/build\/([a-f0-9]{32})\/preview\/([a-f0-9]{48})\/(.*)$/.exec(path);
+   const previewTicket=previewRoute?previews.get(previewRoute[2]):undefined;
+   const previewRead=!!previewRoute&&req.method==='GET'&&previewTicket?.id===previewRoute[1]&&previewTicket.expires>Date.now()&&[undefined,'null',expectedOrigin].includes(req.headers.origin);
    const mediaFileGet=req.method==='GET'&&(/^\/api\/prime\/uploads\/upl_[0-9a-f]{32}\/file$/.test(path)||/^\/api\/prime\/artifacts\/art_[0-9a-f]{32}\/file$/.test(path));
    const fetchSite=req.headers['sec-fetch-site'];
-   if(!allowed||(!mediaFileGet&&req.headers['x-prime-request']!=='1')||fetchSite==='cross-site'||(mediaFileGet&&fetchSite==='same-site')||(req.headers.origin!==undefined&&req.headers.origin!==expectedOrigin)||(req.method==='POST'&&req.headers.origin!==expectedOrigin)){send(403,{error:'Same-origin Prime session required'});return;}
+   if(!previewRead&&(!allowed||(!mediaFileGet&&req.headers['x-prime-request']!=='1')||fetchSite==='cross-site'||(mediaFileGet&&fetchSite==='same-site')||(req.headers.origin!==undefined&&req.headers.origin!==expectedOrigin)||(req.method==='POST'&&req.headers.origin!==expectedOrigin))){send(403,{error:'Same-origin Prime session required'});return;}
    if(mediaFileGet){if(mediaActive>=24){send(429,{error:'Too many requests'});return;}mediaActive++;}
    else{if(active>=8){send(429,{error:'Too many requests'});return;}active++;}
    const abort=new AbortController();const disconnected=()=>{if(!res.writableEnded)abort.abort();};res.once('close',disconnected);
    try{
+    if(previewRoute){
+     if(!previewRead||!previewTicket){send(403,{error:'Preview session expired; reopen the build'});return;}
+     if(workspace)await workspace.requireOwner({headers:previewTicket.headers,rawHeaders:['Cookie',previewTicket.headers.cookie??'']} as IncomingMessage,abort.signal);
+     const base='/api/prime/build/'+previewRoute[1]+'/preview/'+previewRoute[2]+'/';
+     const proxied=await hub.buildPreview(previewRoute[1],previewRoute[3]+new URL(req.url??'/',url).search,base,abort.signal);
+     // No allow-same-origin: generated scripts cannot read Prime DOM/storage, cookies, or any owner API.
+     const source=expectedOrigin+base;
+     res.setHeader('Content-Security-Policy',"sandbox allow-scripts allow-forms; default-src "+source+"; script-src "+source+" 'unsafe-inline'; style-src "+source+" 'unsafe-inline'; img-src "+source+" data: blob:; connect-src "+source+"; font-src "+source+" data:; base-uri "+source+"; form-action "+source+"; frame-ancestors 'self'; object-src 'none'; worker-src 'none'");
+     res.setHeader('Access-Control-Allow-Origin','null');
+     res.writeHead(proxied.status,{'Content-Type':proxied.type});res.end(proxied.data);return;
+    }
     if(path==='/api/session'&&req.method==='GET'){
      const session=workspace?await workspace.session(req,abort.signal):{authenticated:false,user:null,csrf:null};
      send(200,{workspaceConfigured:!!workspace,...session,ownerAccess:workspace?.ownerAccess(session)??false});return;
@@ -140,6 +158,15 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     // Live tools (owner-only like models): GET the report, POST a per-family or global toggle.
     if(path==='/api/prime/tools'&&req.method==='GET'){send(200,hub.liveTools());return;}
     if(path==='/api/prime/personality'&&req.method==='GET'){send(200,await hub.personality(personalities));return;}
+    if(path==='/api/prime/build/health'&&req.method==='GET'){send(200,hub.buildHealth());return;}
+    if(path==='/api/prime/build/list'&&req.method==='GET'){send(200,hub.buildList());return;}
+    const buildOne=/^\/api\/prime\/build\/([^/]{1,80})$/.exec(path);
+    const buildLog=/^\/api\/prime\/build\/([^/]{1,80})\/log$/.exec(path);
+    const buildPlan=/^\/api\/prime\/build\/([^/]{1,80})\/deploy-plan$/.exec(path);
+    const buildAction=/^\/api\/prime\/build\/([^/]{1,80})\/(turn|turns|hibernate|revive|stop|deploy|repository|preview-session)$/.exec(path);
+    if(buildOne&&req.method==='GET'){send(200,hub.buildGet(decodeURIComponent(buildOne[1])));return;}
+    if(buildLog&&req.method==='GET'){send(200,hub.buildLog(decodeURIComponent(buildLog[1]),new URL(req.url??'/',url).searchParams.get('since')??0));return;}
+    if(buildPlan&&req.method==='GET'){send(200,hub.buildDeploymentPlan(decodeURIComponent(buildPlan[1]),new URL(req.url??'/',url).searchParams.get('target')));return;}
     if(path==='/api/prime/swarm/health'&&req.method==='GET'){send(200,await hub.swarmHealth(abort.signal));return;}
     const swarmRun=/^\/api\/prime\/swarm\/runs\/([^/]{1,80})$/.exec(path);
     if(swarmRun&&req.method==='GET'){send(200,await hub.swarmStatus(decodeURIComponent(swarmRun[1]),abort.signal));return;}
@@ -176,6 +203,28 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     if(path==='/api/steward/status'&&req.method==='GET'){send(200,await hub.stewardStatus());return;}
     if(req.method!=='POST'||!req.headers['content-type']?.startsWith('application/json')){send(405,{error:'JSON POST required'});return;}
     const data=await body(req);
+    if(path==='/api/prime/build/create'){send(202,await hub.buildCreate(data));return;}
+    if(buildAction){
+     const id=decodeURIComponent(buildAction[1]),action=buildAction[2];
+     if(action==='preview-session'){
+      if(Object.keys(data).length)throw new WorkspaceHttpError(400,'Preview session takes no fields');
+      const b=hub.buildGet(id);if(!['running','deployed'].includes(b.status))throw new WorkspaceHttpError(409,'Build preview is not running');
+      for(const [key,t] of previews)if(t.expires<=Date.now())previews.delete(key);
+      // Reuse this owner's existing ticket so polling never reloads the iframe.
+      let key=[...previews].find(([,t])=>t.id===id&&t.headers.cookie===req.headers.cookie)?.[0];
+      if(!key){if(previews.size>=100)throw new WorkspaceHttpError(429,'Too many preview sessions');key=randomBytes(24).toString('hex');}
+      previews.set(key,{id,expires:Date.now()+600000,headers:{cookie:req.headers.cookie,'x-echo-csrf':req.headers['x-echo-csrf']}});
+      send(200,{url:'/api/prime/build/'+id+'/preview/'+key+'/',expiresIn:600});return;
+     }
+     if(['hibernate','revive','stop'].includes(action)&&Object.keys(data).length)throw new WorkspaceHttpError(400,'Build lifecycle action takes no fields');
+     if(action==='turn'||action==='turns')send(202,await hub.buildTurn(id,data));
+     else if(action==='hibernate')send(200,await hub.buildHibernate(id));
+     else if(action==='revive')send(202,await hub.buildRevive(id));
+     else if(action==='stop')send(200,await hub.buildStop(id));
+     else if(action==='deploy')send(200,await hub.buildDeploy(id,data));
+     else if(action==='repository')send(201,await hub.buildRepository(id,data));
+     return;
+    }
     // Delete is a JSON POST on purpose: the Origin check above applies to POST only, so a DELETE verb would skip it.
     const botsAction=/^\/api\/prime\/bots\/([^/]{1,80})\/(pause|resume|delete|message)$/.exec(path);
     if(path==='/api/search')send(200,{capabilities:await hub.refresh(String(data.query??''))});

@@ -12,6 +12,7 @@ import {BrowserError,type BrowserClient} from './browser.js';
 import type {AutoAgents,ChatTool} from '../code/tools/autoagents.js';
 import {UPLOAD_ID_RE,UploadError,validateStudioInputs,type UploadStore} from './uploads.js';
 import type {ToolKit} from '../code/tools/index.js';
+import {BuildError,type BuildRunner} from './build.js';
 const debugOwnerResponse=debuglog('echo-prime');
 export type Json=Record<string,unknown>;
 export interface Tool {name:string;description?:string;inputSchema:Json}
@@ -35,6 +36,7 @@ export interface PrimeOptions {
  uploadsOwner?:string;
  /** Always-on live tools for model turns (web, Wolfram, Echo knowledge/memory, skills, MCP); owner toggles per family. */
  tools?:ToolKit;
+ build?:BuildRunner;
  /** Existing host approval, never supplied by model output or the browser. */
  approveEsh?:(request:PrimeRequest,digest:string)=>Promise<boolean>;
 }
@@ -116,9 +118,24 @@ export class PrimeHub {
  /** Per-provider availability (cached 60 s) and the model that answered last. Never falls back or substitutes. */
  async models(){
   const router=this.options.models;
-  if(!router)return {configured:false,routing:false,default:null,contextTokens:null,providers:[]};
-  return {configured:true,routing:this.options.chat?.status().routing===true,...await bounded(()=>router.report(),30000)};
+  const buildInfo=this.options.build?{buildProviders:await this.options.build.models()}:{};
+  if(!router)return {configured:false,routing:false,default:null,contextTokens:null,providers:[],...buildInfo};
+  return {configured:true,routing:this.options.chat?.status().routing===true,...await bounded(()=>router.report(),30000),...buildInfo};
  }
+ buildHealth(){return this.options.build?.health()??{configured:false,available:false,reason:'Echo Build is off: add a reviewed build section with root and engines to the Prime config'};}
+ private buildRunner(){if(!this.options.build)throw new BuildError(503,'Echo Build is off: add a build section to the Prime config');return this.options.build;}
+ buildList(){return this.buildRunner().list();}
+ buildGet(id:string){return this.buildRunner().get(id);}
+ buildLog(id:string,since:unknown){return this.buildRunner().log(id,since);}
+ buildCreate(input:unknown){return this.buildRunner().create(input);}
+ buildTurn(id:string,input:unknown){return this.buildRunner().turn(id,input);}
+ buildHibernate(id:string){return this.buildRunner().hibernate(id);}
+ buildRevive(id:string){return this.buildRunner().revive(id);}
+ buildStop(id:string){return this.buildRunner().stop(id);}
+ buildDeploy(id:string,input:unknown){return this.buildRunner().deploy(id,input);}
+ buildDeploymentPlan(id:string,target:unknown){return this.buildRunner().deploymentPlan(id,target);}
+ buildRepository(id:string,input:unknown){return this.buildRunner().repository(id,input);}
+ buildPreview(id:string,path:string,base:string,signal?:AbortSignal){return this.buildRunner().preview(id,path,base,signal);}
  /** Opt-in 40-seat swarm worker: status never throws for an unconfigured or unreachable worker, it says why. Runs never fall back to another model. */
  async swarmHealth(signal?:AbortSignal){
   const swarm=this.options.swarm;
