@@ -2,12 +2,22 @@
  'use strict';
  // Persistent voice controls under the composer. Shown only when the Workspace
  // backend reports voice.configured === true. Every label comes from the backend
- // voice status; nothing is read from or written to browser storage, so spoken
- // replies, brief speech and automatic sends start off in every session.
+ // voice status. Brief speech and automatic sends are remembered per signed-in
+ // account in localStorage (try/catch, two booleans, nothing else); spoken
+ // replies and hands-free voice are never stored and start off in every session.
  const $=selector=>document.querySelector(selector);
  const bridge=()=>window.EchoPrimeWorkspace?.bridge;
  const providerNames={elevenlabs:'ElevenLabs','elevenlabs-scribe':'ElevenLabs Scribe'};
  const providerName=id=>typeof id==='string'&&id?providerNames[id.toLowerCase()]||id:'';
+ const storageKey='echo-prime-voice-v1',persisted=['brief','autoSend'],maxAccounts=16;
+ function readStore(){try{const value=JSON.parse(localStorage.getItem(storageKey)||'{}');return value&&typeof value==='object'&&!Array.isArray(value)?value:{};}catch{return {};}}
+ function savedFor(uid){const entry=readStore()[uid],out={};for(const key of persisted)out[key]=entry?.[key]===true;return out;}
+ function remember(uid,options){
+  const store=readStore();delete store[uid];store[uid]={brief:options?.brief===true,autoSend:options?.autoSend===true};
+  for(const key of Object.keys(store).slice(0,Math.max(0,Object.keys(store).length-maxAccounts)))delete store[key];
+  try{localStorage.setItem(storageKey,JSON.stringify(store));return true;}catch{return false;}
+ }
+ const uidOf=b=>{const session=b?.session;const uid=session?.user?.uid;return session?.authenticated===true&&typeof uid==='string'&&uid?uid:null;};
  function el(tag,attributes={},...children){
   const node=document.createElement(tag);
   for(const [key,value] of Object.entries(attributes)){if(key==='class')node.className=value;else if(value!==false&&value!==undefined)node.setAttribute(key,String(value));}
@@ -23,13 +33,21 @@
   const flag=key=>options?.[key]===true;
   return {visible:true,line,footer:'Personality Forge · '+usage,toggles:{spoken:flag('spoken'),brief:flag('brief'),autoSend:flag('autoSend')},conversation:flag('conversation'),limitReached:flag('limitReached')};
  }
- window.EchoPrimeVoiceBar={model,providerName};
+ window.EchoPrimeVoiceBar={model,providerName,storageKey,persisted,savedFor,remember};
 
- let ui=null;
+ let ui=null,known=null;// {uid,brief,autoSend}: the saved toggles applied to the current account
  function snapshot(b){return model({voice:b.state.data?.voice,options:b.voiceOptions,capture:b.state.capture,micPending:b.state.micPending,speaking:!!b.state.speech});}
  function say(text){if(ui)ui.message.textContent=String(text||'').slice(0,400);}
+ // Restore the two remembered toggles once per signed-in account (after workspace.js has reset
+ // every option on the identity change), then write them back whenever either one changes.
+ function persistence(b){
+  const uid=uidOf(b);if(!uid){known=null;return;}
+  if(known?.uid!==uid){const saved=savedFor(uid);for(const key of persisted)b.voiceOptions[key]=saved[key];known={uid,...saved};return;}
+  if(persisted.some(key=>known[key]!==(b.voiceOptions[key]===true))){for(const key of persisted)known[key]=b.voiceOptions[key]===true;remember(uid,known);}
+ }
  function sync(){
   const b=bridge();if(!b||!ui)return;
+  persistence(b);
   const view=snapshot(b);ui.root.hidden=!view.visible;b.state.voiceBar=view.visible;
   if(!view.visible)return;
   ui.line.textContent=view.line;ui.footer.textContent=view.footer;
@@ -66,7 +84,7 @@
   ui.root.hidden=true;
   ($('#composer-extras')||$('.composer-caption'))?.after(ui.root);
   const b=bridge();
-  for(const name of ['echo-workspace-context','echo-account-changed'])window.addEventListener(name,()=>{if(name==='echo-account-changed')say('');sync();});
+  for(const name of ['echo-workspace-context','echo-account-changed'])window.addEventListener(name,()=>{if(name==='echo-account-changed'){say('');known=null;}sync();});
   b.onStatus(text=>{say(text);sync();});
   sync();
  }

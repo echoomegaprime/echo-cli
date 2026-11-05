@@ -36,7 +36,7 @@ function walk(root:Node):Node[]{return [...root.children,...root.inserted].flatM
 const source=(name:string)=>readFileSync(new URL('../ui/echo-prime/'+name,import.meta.url),'utf8');
 const tick=()=>new Promise(r=>setTimeout(r,0));
 
-interface World {nodes:Map<string,Node>;window:any;body:Node;get:(s:string)=>Node;emit:(t:string)=>void;all:()=>Node[];button:(label:string)=>Node|undefined;input:(attr:string,value:string)=>Node|undefined;storage:Record<string,unknown>;clipboard:string[]}
+interface World {nodes:Map<string,Node>;window:any;body:Node;get:(s:string)=>Node;emit:(t:string)=>void;all:()=>Node[];button:(label:string)=>Node|undefined;input:(attr:string,value:string)=>Node|undefined;storage:Record<string,unknown>;written:string[];clipboard:string[]}
 function voiceFixture(extra:Record<string,unknown>={}){return {configured:true,persona:'forge-voice',label:'Test Voice',provider:'elevenlabs',provider_usage:'Cloud speech uses your ElevenLabs account.',...extra};}
 function fakeBridge(over:Record<string,any>={}){
  const hooks:Array<(text:string)=>void>=[];
@@ -50,20 +50,20 @@ function fakeBridge(over:Record<string,any>={}){
  return bridge;
 }
 async function world(files:string[],bridge:any,options:{enabled?:boolean}={}):Promise<World>{
- const nodes=new Map<string,Node>(),events:Record<string,((event:any)=>unknown)[]>={},storage:Record<string,unknown>={},clipboard:string[]=[];
+ const nodes=new Map<string,Node>(),events:Record<string,((event:any)=>unknown)[]>={},storage:Record<string,unknown>={},written:string[]=[],clipboard:string[]=[];
  const get=(selector:string)=>{if(!nodes.has(selector))nodes.set(selector,new Node());return nodes.get(selector)!;};
  const body=new Node('body');
  const window:any={addEventListener:(name:string,fn:(e:any)=>unknown)=>(events[name]??=[]).push(fn),dispatchEvent:(event:any)=>{for(const fn of events[event.type]||[])fn(event);},
   EchoPrimeWorkspace:{ready:Promise.resolve(options.enabled??true),get enabled(){return options.enabled??true;},bridge}};
  const document:any={body,head:new Node('head'),hidden:false,querySelector:get,querySelectorAll:()=>[],createElement:(t:string)=>new Node(t),createTextNode:(t:string)=>Object.assign(new Node('#text'),{_text:t}),addEventListener(){}};
- const localStorage={getItem:()=>{storage.read=true;return null;},setItem:()=>{storage.written=true;},removeItem:()=>{storage.written=true;}};
+ const localStorage={getItem:()=>{storage.read=true;return null;},setItem:(_key:string,value:string)=>{storage.written=true;written.push(String(value));},removeItem:()=>{storage.written=true;}};
  const context={window,document,localStorage,sessionStorage:localStorage,navigator:{clipboard:{writeText:async(t:string)=>{clipboard.push(t);}}},crypto:{randomUUID},Event,setTimeout,clearTimeout,console:{debug:vi.fn()},Error,Number,Math,JSON,Set,Array,Object,String,Promise,Boolean};
  for(const file of files)runInNewContext(source(file),context);
  await tick();
  const all=()=>[body,...nodes.values()].flatMap(n=>[n,...walk(n)]);
  const button=(label:string)=>all().find(n=>n.tagName==='BUTTON'&&n.textContent.trim()===label);
  const input=(attr:string,value:string)=>all().find(n=>n.attributes[attr]===value);
- return {nodes,window,body,get,emit:(t:string)=>window.dispatchEvent(new Event(t)),all,button,input,storage,clipboard};
+ return {nodes,window,body,get,emit:(t:string)=>window.dispatchEvent(new Event(t)),all,button,input,storage,written,clipboard};
 }
 
 // ---------- context meter maths ----------
@@ -194,18 +194,21 @@ it('builds the status line from the real backend voice and provider values',asyn
  expect(v.model({...base,voice:voiceFixture({provider_usage:'Cloud speech uses your acme account.'})}).footer).toBe('Personality Forge · Cloud speech uses your acme account.');
  expect(JSON.stringify(source('voicebar.js'))).not.toMatch(/M Freeman|Freeman/);
 });
-it('starts with every voice preference off and never reads or writes browser storage',async()=>{
+it('starts with every voice preference off and never persists spoken replies or hands-free voice',async()=>{
  const bridge=fakeBridge();bridge.state.data.voice=voiceFixture();const w=await world(['voicebar.js'],bridge);
  const box=(k:string)=>w.input('data-voice-option',k)!;
  for(const k of ['spoken','brief','autoSend'])expect(box(k).checked).toBe(false);
  box('brief').checked=true;await box('brief').fire('change');box('autoSend').checked=true;await box('autoSend').fire('change');box('spoken').checked=true;await box('spoken').fire('change');
  expect(bridge.voiceOptions).toMatchObject({spoken:true,brief:true,autoSend:true,conversation:false});
  box('spoken').checked=false;await box('spoken').fire('change');expect(bridge.voiceOptions.spoken).toBe(false);expect(bridge.endConversation).toHaveBeenCalled();expect(bridge.stopAudio).toHaveBeenCalled();
- expect(w.storage).toEqual({});
- // A new account resets the shared options in place; the bar must follow, not remember.
- Object.assign(bridge.voiceOptions,{spoken:false,brief:false,autoSend:false});w.emit('echo-account-changed');
+ // Brief speech and automatic sends are remembered per account (see prime-chat-surface-ui.test.ts); spoken replies never reach storage.
+ expect(w.storage.written).toBe(true);expect(w.written.length).toBeGreaterThan(0);
+ for(const value of w.written)expect(value).not.toMatch(/spoken|conversation/);
+ expect(JSON.parse(w.written.at(-1)!)).toEqual({owner:{brief:true,autoSend:true}});
+ // A new account resets the shared options in place; the bar must follow, not remember the previous account.
+ Object.assign(bridge.voiceOptions,{spoken:false,brief:false,autoSend:false});bridge.session={authenticated:true,ownerAccess:false,user:{uid:'member',status:'approved'}};w.emit('echo-account-changed');
  for(const k of ['spoken','brief','autoSend'])expect(box(k).checked).toBe(false);
- expect(JSON.stringify(source('voicebar.js'))).not.toMatch(/localStorage|sessionStorage|indexedDB/);
+ expect(source('voicebar.js')).not.toMatch(/sessionStorage|indexedDB/);
 });
 it('shows or hides the bar with the account and lets the bridge know it is visible',async()=>{
  const bridge=fakeBridge();const w=await world(['voicebar.js'],bridge),root=w.all().find(n=>n.attributes['data-voice-bar']!==undefined)!;
