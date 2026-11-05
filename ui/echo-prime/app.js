@@ -7,6 +7,9 @@
   let palette=['prism','emerald','aurora'].includes(saved.palette)?saved.palette:'prism';
   let quality=['adaptive','high','quiet'].includes(saved.quality)?saved.quality:'adaptive';
   let mode='Chat',toastTimer,generation=0;
+  // The document root carries the same palette/motion signal as the orb wordmark so the sidebar wordmark, the Echo
+  // mark and the sign-in card (nav.css) follow the active palette without each module asking the orb.
+  const root=document.documentElement;
   const orb=window.EchoPrimeOrb.mount($('#echo-orb'),{
     onFallback(){ $('#echo-orb').hidden=true;$('#orb-fallback').hidden=false; },
     onMotionChange(value){motionUI(value);},
@@ -44,8 +47,8 @@
     ['MUSIC FORGE','Production and arrangement','i-spark','Awaiting connection'],
   ];
   for(const [name,description,icon,status] of systems){const row=document.createElement('div');row.className='system-row';row.dataset.system=name;const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');const use=document.createElementNS('http://www.w3.org/2000/svg','use');use.setAttribute('href','#'+icon);svg.append(use);const copy=document.createElement('div'),title=document.createElement('strong'),small=document.createElement('small'),state=document.createElement('span');title.textContent=name;small.textContent=description;copy.append(title,small);state.className='system-state';state.textContent=status;row.append(svg,copy,state);$('#systems-list').append(row);}
-  function motionUI(value){$('#motion-toggle').setAttribute('aria-checked',String(value));$('.orb-wordmark').dataset.motion=value?'running':'paused';}
-  function paletteUI(){$('.orb-wordmark').dataset.palette=palette;$$('button[data-palette]').forEach(b=>{const selected=b.dataset.palette===palette;b.classList.toggle('selected',selected);b.setAttribute('aria-pressed',String(selected));});}
+  function motionUI(value){$('#motion-toggle').setAttribute('aria-checked',String(value));$('.orb-wordmark').dataset.motion=value?'running':'paused';if(root?.dataset)root.dataset.motion=value?'running':'paused';}
+  function paletteUI(){$('.orb-wordmark').dataset.palette=palette;if(root?.dataset)root.dataset.palette=palette;$$('button[data-palette]').forEach(b=>{const selected=b.dataset.palette===palette;b.classList.toggle('selected',selected);b.setAttribute('aria-pressed',String(selected));});}
   $$('button[data-palette]').forEach(b=>b.addEventListener('click',()=>{palette=b.dataset.palette;orb.setPalette(palette);paletteUI();persist();}));
   $('#motion-toggle').addEventListener('click',()=>{const next=$('#motion-toggle').getAttribute('aria-checked')!=='true';orb.setMotion(next);motionUI(next);persist();});
   $('#quality').addEventListener('change',e=>{quality=e.target.value;orb.setQuality(quality);persist();});

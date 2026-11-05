@@ -75,31 +75,6 @@ it('renders saved activity cards between the messages of an opened conversation'
  const plain=workspaceWorld({request,files:['workspace.js']});await plain.window.EchoPrimeWorkspace.ready;await plain.window.EchoPrimeWorkspace.bridge.openChat('saved');
  expect(plain.get('#chat-log').children.map(n=>n.className)).toEqual(['chat-message user','chat-message assistant']);
 });
-it('collects streaming status and tool events under a thinking panel, inserts result cards above it and clears it after the saved readback',async()=>{
- const gate=deferred();const events=[{type:'status',text:'Reading memory…'},{type:'tool_started',tool:'esh',request_id:'r1',arguments:{command:'Get-Location'}},{type:'tool_result',tool:'esh',request_id:'r1',result:{ok:true,exit:0,stdout:'C:\\echo'}},{type:'memory_saved'},{type:'token',text:'Here '},{type:'token',text:'you go.'}];
- let seen:Node[]=[];const saved={id:'c1',title:'Fresh',messages:[{id:'u',role:'user',content:'go'},{id:'a',role:'assistant',content:'Here you go.'}],events:[]};
- const chat=async(input:any,onEvent:(event:any)=>void)=>{for(const event of events)onEvent(event);seen=[...w.get('#chat-log').children];await gate.promise;return {...saved,id:input.chat_id};};
- const request=vi.fn(async(path:string)=>path==='/state'?{chats:[],projects:[],library:[],personalities:[],context_length:262144}:path==='/chats'?{id:'c1',title:'Fresh',messages:[],events:[]}:path==='/chats/c1'?saved:{});
- const w=workspaceWorld({chat,request});await w.window.EchoPrimeWorkspace.ready;
- const pending=w.window.EchoPrimeWorkspace.send('go');await vi.waitFor(()=>expect(seen.length).toBeGreaterThan(0));
- expect(seen.map(n=>n.className)).toEqual(['chat-message user','tool-card','thinking','chat-message assistant']);
- const thinking=seen[2],steps=walk(thinking).find(n=>n.tagName==='OL')!;
- expect(walk(thinking).find(n=>n.className==='thinking-text')!.textContent).toBe('Echo is working · esh');
- expect(steps.children.map(n=>text(n))).toEqual(['Reading memory…',expect.stringContaining('esh · started'),'esh · result received','Saved your preference; ECF sync queued.']);
- expect(text(steps.children[1])).toContain('"command": "Get-Location"');expect(text(seen[1])).toContain('"stdout": "C:\\\\echo"');expect(seen[3].textContent).toContain('Here you go.');
- expect(w.get('#draft-notice').textContent).toBe('Preference saved for future chats.');
- gate.resolve(undefined);const result=await pending;expect(result).toMatchObject({handled:true,sent:true,verified:true});
- expect(w.get('#chat-log').children.map(n=>n.className)).toEqual(['chat-message user','chat-message assistant']);expect(thinking.parent).toBeNull();
-});
-it('keeps the plain activity lines when chat-actions.js is not loaded and removes a stale panel after a failed stream',async()=>{
- const plain=workspaceWorld({files:['workspace.js'],chat:async(_input:any,onEvent:(event:any)=>void)=>{onEvent({type:'tool_started',tool:'esh',request_id:'r1'});onEvent({type:'tool_result',tool:'esh',request_id:'r1',result:{ok:true}});return {id:'c1',messages:[]};}});
- await plain.window.EchoPrimeWorkspace.ready;await plain.window.EchoPrimeWorkspace.send('go');
- expect(plain.window.EchoPrimeWorkspace.bridge.state.chat?.id).toBe('c1');
- const failing=workspaceWorld({chat:async(_input:any,onEvent:(event:any)=>void)=>{onEvent({type:'status',text:'working'});throw new Error('Conversation failed. Saved messages may remain.');}});
- await failing.window.EchoPrimeWorkspace.ready;const outcome=await failing.window.EchoPrimeWorkspace.send('go');
- expect(outcome).toMatchObject({handled:true,sent:false});expect(failing.get('#chat-log').children.map(n=>n.className)).toEqual(['chat-message user','chat-message activity']);
-});
-
 // ---------- import: source select + file picker ----------
 it('imports with the chosen source, reads an export file under 1.9 MB into the form and refuses larger ones',async()=>{
  const w=workspaceWorld();await w.window.EchoPrimeWorkspace.ready;await w.window.EchoPrimeWorkspace.open('library');

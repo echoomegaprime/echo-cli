@@ -34,7 +34,18 @@
  }
 
  // ---- pure state mapping (exported for tests) -------------------------------
- function connectionState(value){return value==='connected'||value==='disconnected'?value:'unknown';}
+ // Every state the canonical backend reports (fleet.py probes, 2026-11-04) plus the legacy
+ // "disconnected". Anything else is shown unknown, so no typo or new value can read as green.
+ const STATES=new Set(['connected','degraded','disconnected','offline','dormant']);
+ const STATE_LABEL={connected:'Connected',degraded:'Degraded',disconnected:'Disconnected',offline:'Offline',dormant:'Dormant',unknown:'Unknown'};
+ function connectionState(value){return STATES.has(value)?value:'unknown';}
+ function ageLabel(stamp,now=Date.now()){
+  const at=typeof stamp==='string'?Date.parse(stamp):NaN;
+  if(!Number.isFinite(at))return '';
+  const s=Math.max(0,Math.round((now-at)/1000));
+  return s<60?`${s}s`:s<3600?`${Math.floor(s/60)}m`:`${Math.floor(s/3600)}h`;
+ }
+ function clock(stamp){const at=typeof stamp==='string'?Date.parse(stamp):NaN;return Number.isFinite(at)?new Date(at).toISOString().slice(11,19)+' UTC':'';}
  function placeholder(reason){return NODES.map(id=>({id,connection:'unknown',reason}));}
  function normalizeFleet(response,now=Date.now()){
   const rows=Array.isArray(response?.nodes)?response.nodes:[];
@@ -71,7 +82,7 @@
  const identityKey=session=>session&&session.authenticated===true&&session.user?`${session.user.uid}|${session.user.status}|${!!session.ownerAccess}`:'anon';
  const later=fn=>void Promise.resolve().then(fn);
  let lastKey='anon',epoch=0,controller=new AbortController(),access='checking',nodes=placeholder(REASONS.checking),health='checking',sync=null;
- const busy={fleet:-1,health:-1},listeners=new Set(),buttons=new Map();
+ const busy={fleet:-1,health:-1},listeners=new Set(),buttons=new Map(),ages=new Map();
  let bar=null,forgeText=null,dialog=null,dialogBody=null,dialogTitle=null;
 
  const snapshot=()=>({generation:epoch,access,nodes:nodes.map(n=>({...n})),health,sync:sync&&typeof sync==='object'?{...sync}:null});
@@ -129,9 +140,10 @@
   const right=doc.querySelector('main header .topbar-right'),header=doc.querySelector('main header');
   bar=el('div',{class:'fleet-bar',id:'fleet-bar',role:'group','aria-label':'Node connections'});
   for(const id of NODES){
-   const button=el('button',{type:'button',class:'fleet-node unknown','data-node':id},el('span',{class:'fleet-led','aria-hidden':'true'}),el('span',{class:'fleet-label'},id.toUpperCase()));
+   const age=el('span',{class:'fleet-age','aria-hidden':'true'});
+   const button=el('button',{type:'button',class:'fleet-node unknown','data-node':id},el('span',{class:'fleet-led','aria-hidden':'true'}),el('span',{class:'fleet-label'},id.toUpperCase()),age);
    button.addEventListener('click',()=>openEvidence(id));
-   buttons.set(id,button);bar.append(button);
+   buttons.set(id,button);ages.set(id,age);bar.append(button);
   }
   forgeText=el('span',{class:'forge-connection',id:'forge-connection',role:'status','aria-live':'polite'},HEALTH_TEXT.checking);
   bar.append(forgeText);
@@ -141,10 +153,14 @@
   if(!bar)return;
   for(const node of nodes){
    const button=buttons.get(node.id);if(!button)continue;
-   const label=`${node.id.toUpperCase()}: ${node.connection}`;
+   // The chip itself tells the whole truth: state colour, the backend's reason and when it was checked.
+   const label=`${node.id.toUpperCase()}: ${node.connection}`,reason=typeof node.reason==='string'?node.reason:'',checked=clock(node.checked_at),age=ageLabel(node.checked_at);
    button.className='fleet-node '+node.connection;
-   button.setAttribute('aria-label',label+(node.connection==='unknown'?' · evidence available':''));
-   button.title=label+(node.role?` · ${node.role}`:'');
+   button.setAttribute('data-state',node.connection);
+   button.setAttribute('aria-label',label+(reason?` — ${reason}`:'')+(node.connection==='unknown'?' · evidence available':''));
+   button.title=label+(node.role?` · ${node.role}`:'')+(reason?` · ${reason}`:'')+(checked?` · checked ${checked}${age?` (${age} ago)`:''}`:'');
+   const ageNode=ages.get(node.id);
+   if(ageNode&&ageNode.textContent!==age)ageNode.textContent=age;
   }
   const line=HEALTH_TEXT[health]||HEALTH_TEXT.unknown;
   if(forgeText.textContent!==line)forgeText.textContent=line;
@@ -152,7 +168,8 @@
  }
  function evidenceRows(node){
   const latency=Number.isFinite(node.latency_ms)?`${node.latency_ms} ms`:null;
-  return [['Connection',node.connection],['Evidence',node.evidence||node.reason||'Awaiting live probe'],['Role',node.role],['Checked',node.checked_at],['Observed',node.observed_at],['Latency',latency],['Host',node.hostname],['Operating system',node.os],['LAN address',node.lan_address],['Tailscale address',node.tailscale_address],['SSH user',node.ssh_user],['Address source',node.address_source],['Remote control',node.remote_control],['Error',node.error]]
+  const reachable=node.reachable===true?'Yes':node.reachable===false?'No':null;
+  return [['Connection',node.connection],['Reason',node.reason],['Evidence',node.evidence||node.reason||'Awaiting live probe'],['Reachable',reachable],['Service',node.service],['Policy',node.dormant_policy],['Role',node.role],['Checked',node.checked_at],['Observed',node.observed_at],['Latency',latency],['Host',node.hostname],['Operating system',node.os],['LAN address',node.lan_address],['Tailscale address',node.tailscale_address],['SSH user',node.ssh_user],['SSH alias',node.ssh_alias],['Address source',node.address_source],['Probed from',node.probe_host],['Remote control',node.remote_control],['Error',node.error]]
    .filter(([,value])=>(typeof value==='string'&&value)||typeof value==='number');
  }
  function ensureDialog(){
@@ -172,7 +189,13 @@
   dialogTitle.textContent=id.toUpperCase();
   const list=el('dl',{class:'fleet-evidence-list'});
   for(const [name,value] of evidenceRows(node))list.append(el('dt',{},name),el('dd',{},String(value)));
-  const children=[el('p',{class:'fleet-evidence-state '+node.connection},node.connection==='connected'?'Connected':node.connection==='disconnected'?'Disconnected':'Unknown'),list];
+  const children=[el('p',{class:'fleet-evidence-state '+node.connection},STATE_LABEL[node.connection]||'Unknown'),list];
+  if(Array.isArray(node.checks)&&node.checks.length){
+   // Each probe the backend ran, as inert text: what was tried, whether it answered, how long it took.
+   const items=node.checks.slice(0,40).filter(c=>c&&typeof c==='object').map(c=>el('li',{class:c.ok===true?'ok':'failed'},
+    `${c.ok===true?'ok':'failed'} · ${typeof c.kind==='string'?c.kind:'check'} ${typeof c.target==='string'?c.target:''}`+(Number.isFinite(c.ms)?` · ${c.ms} ms`:'')+(typeof c.detail==='string'&&c.detail?` · ${c.detail}`:'')));
+   children.push(el('h3',{},'Probe checks'),el('ul',{class:'fleet-checks'},items));
+  }
   if(typeof node.health==='string'&&node.health)children.push(el('h3',{},'Probe output'),el('pre',{class:'workspace-receipt'},node.health.slice(0,5000)));
   let raw='';try{raw=JSON.stringify(node,null,2).slice(0,20000);}catch{raw='';}
   if(raw)children.push(el('details',{},el('summary',{},'Raw probe record'),el('pre',{class:'workspace-receipt'},raw)));
@@ -202,7 +225,7 @@
 
  window.EchoPrimeFleet={
   NODES,FLEET_MS,HEALTH_MS,el,subscribe,snapshot,request,pollAll,pollFleet,pollHealth,
-  core:{connectionState,normalizeFleet,healthState,classify,placeholder},
+  core:{connectionState,normalizeFleet,healthState,classify,placeholder,ageLabel},
  };
  start();
 })();

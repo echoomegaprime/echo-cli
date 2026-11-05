@@ -1,12 +1,22 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { debuglog } from 'node:util';
 import { redact } from '../code/workspace.js';
-import type {SharedChat} from './chat.js';
+import type {SharedChat,SubmitContext} from './chat.js';
+import {scorePersonalities,type CatalogLoader} from './personality.js';
 import {disconnectedSteward,type StewardOwner} from './steward.js';
 import type {ModelRouter} from '../code/model-factory.js';
 import {SwarmError,type SwarmClient} from './swarm.js';
 import {AdkError,type AdkClient} from './agents.js';
 import {BotsError,type BotsClient} from './bots.js';
+import {BrowserError,type BrowserClient} from './browser.js';
+import type {AutoAgents,ChatTool} from '../code/tools/autoagents.js';
+import {UPLOAD_ID_RE,UploadError,validateStudioInputs,type UploadStore} from './uploads.js';
+import type {ToolKit} from '../code/tools/index.js';
+import {BuildError,type BuildRunner} from './build.js';
+import {EshAutonomy,type AutonomyConfig} from '../code/tools/esh.js';
+import {EcfTools} from '../code/tools/ecf.js';
+import {ContinuityClient} from '../code/continuity.js';
+import {type AutonomyEvents,envelope} from '../code/tools/autonomy.js';
 const debugOwnerResponse=debuglog('echo-prime');
 export type Json=Record<string,unknown>;
 export interface Tool {name:string;description?:string;inputSchema:Json}
@@ -23,6 +33,15 @@ export interface PrimeOptions {
  /** Opt-in loopback `echo-adk-api` client (Agents view). Absent = the feature is off. */
  adk?:AdkClient;
  bots?:BotsClient;
+ browser?:BrowserClient;
+ /** Autonomous agent/bot creation from chat prompts (needs adk + bots + sdk). Absent = the make_* tools are not offered. */
+ autoagents?:AutoAgents;
+ uploads?:UploadStore;
+ uploadsOwner?:string;
+ /** Always-on live tools for model turns (web, Wolfram, Echo knowledge/memory, skills, MCP); owner toggles per family. */
+ tools?:ToolKit;
+ build?:BuildRunner;
+ autonomy?:AutonomyConfig;ecf?:EcfTools;autonomyEvents?:AutonomyEvents;
  /** Existing host approval, never supplied by model output or the browser. */
  approveEsh?:(request:PrimeRequest,digest:string)=>Promise<boolean>;
 }
@@ -88,8 +107,20 @@ type Ticket={id:string;digest:string;request:PrimeRequest;requestId:string;expir
 const digest=(request:PrimeRequest)=>createHash('sha256').update(JSON.stringify(request)).digest('hex');
 export class PrimeHub {
  private catalog:Map<string,Capability>;private tickets=new Map<string,Ticket>();private tools:Tool[]=[];
- constructor(private options:PrimeOptions){this.catalog=new Map(options.capabilities.map(c=>[c.id,{...c}]));}
+ private eshAutonomy:EshAutonomy;private ecf:EcfTools;
+ constructor(private options:PrimeOptions){this.catalog=new Map(options.capabilities.map(c=>[c.id,{...c}]));
+  this.eshAutonomy=new EshAutonomy({connection:options.esh,config:options.autonomy,events:options.autonomyEvents,prepare:r=>this.prepareTicket(r,true),execute:(id,hash)=>this.execute(id,hash)});
+  this.ecf=options.ecf??new EcfTools(new ContinuityClient(),options.autonomyEvents);
+ }
+ /** One additive registry spread for the lead's owner tool loop. Never browser-supplied tools. */
+ autonomyTools(){return [...this.eshAutonomy.tools(),...this.ecf.tools()];}
  capabilities(){return [...this.catalog.values()];}
+ get uploads(){return this.options.uploads;}
+ /** Additive server-side hook for producing modules to register outputs in the Artifact Center. */
+ async registerArtifact(owner:string,input:unknown){
+  if(!this.options.uploads)throw new UploadError(503,'Uploads and Artifact Center are not enabled: add an `uploads` section to the Prime config');
+  return this.options.uploads.registerArtifact(owner,input);
+ }
  async stewardStatus(){return this.options.steward?bounded(()=>this.options.steward!.status()):disconnectedSteward();}
  async stewardAsk(input:unknown){
   if(!this.options.steward)throw new Refused('Node Steward owner not connected');
@@ -98,9 +129,24 @@ export class PrimeHub {
  /** Per-provider availability (cached 60 s) and the model that answered last. Never falls back or substitutes. */
  async models(){
   const router=this.options.models;
-  if(!router)return {configured:false,routing:false,default:null,contextTokens:null,providers:[]};
-  return {configured:true,routing:this.options.chat?.status().routing===true,...await bounded(()=>router.report(),30000)};
+  const buildInfo=this.options.build?{buildProviders:await this.options.build.models()}:{};
+  if(!router)return {configured:false,routing:false,default:null,contextTokens:null,providers:[],...buildInfo};
+  return {configured:true,routing:this.options.chat?.status().routing===true,...await bounded(()=>router.report(),30000),...buildInfo};
  }
+ buildHealth(){return this.options.build?.health()??{configured:false,available:false,reason:'Echo Build is off: add a reviewed build section with root and engines to the Prime config'};}
+ private buildRunner(){if(!this.options.build)throw new BuildError(503,'Echo Build is off: add a build section to the Prime config');return this.options.build;}
+ buildList(){return this.buildRunner().list();}
+ buildGet(id:string){return this.buildRunner().get(id);}
+ buildLog(id:string,since:unknown){return this.buildRunner().log(id,since);}
+ buildCreate(input:unknown){return this.buildRunner().create(input);}
+ buildTurn(id:string,input:unknown){return this.buildRunner().turn(id,input);}
+ buildHibernate(id:string){return this.buildRunner().hibernate(id);}
+ buildRevive(id:string){return this.buildRunner().revive(id);}
+ buildStop(id:string){return this.buildRunner().stop(id);}
+ buildDeploy(id:string,input:unknown){return this.buildRunner().deploy(id,input);}
+ buildDeploymentPlan(id:string,target:unknown){return this.buildRunner().deploymentPlan(id,target);}
+ buildRepository(id:string,input:unknown){return this.buildRunner().repository(id,input);}
+ buildPreview(id:string,path:string,base:string,signal?:AbortSignal){return this.buildRunner().preview(id,path,base,signal);}
  /** Opt-in 40-seat swarm worker: status never throws for an unconfigured or unreachable worker, it says why. Runs never fall back to another model. */
  async swarmHealth(signal?:AbortSignal){
   const swarm=this.options.swarm;
@@ -125,6 +171,13 @@ export class PrimeHub {
  async adkStatus(runId:string,signal?:AbortSignal){return this.adkClient().status(runId,signal);}
  async adkStop(runId:string,signal?:AbortSignal){return this.adkClient().stop(runId,signal);}
  async adkRuns(query:unknown,signal?:AbortSignal){return this.adkClient().runs(query,signal);}
+ /** Agent definitions Prime creates, replaces or deletes (contract `POST/PUT/DELETE /agents`). Owner-only routes; the client validates before any request. */
+ async adkCreateAgent(input:unknown,signal?:AbortSignal){return this.adkClient().createAgent(input,signal);}
+ async adkUpdateAgent(name:string,input:unknown,signal?:AbortSignal){return this.adkClient().updateAgent(name,input,signal);}
+ async adkDeleteAgent(name:string,signal?:AbortSignal){return this.adkClient().deleteAgent(name,signal);}
+ /** The autonomous-creation chat tools in registration shape; an empty list when the feature is off. The tool loop spreads this into its tools. */
+ autoagentTools():ChatTool[]{return this.options.autoagents?this.options.autoagents.tools():[];}
+ autoagentsStatus(){return this.options.autoagents?this.options.autoagents.status():{configured:false,reason:'Autonomous agents are off: the Prime config needs adk, bots and sdk configured'};}
  /** Opt-in echoBots (loopback echo-adk-api): health never throws for an unconfigured or unreachable service, it says why. Nothing here falls back. */
  async botsHealth(signal?:AbortSignal){
   const bots=this.options.bots;
@@ -147,9 +200,97 @@ export class PrimeHub {
  async botsMessages(botId:string,options:{since?:unknown;limit?:unknown},signal?:AbortSignal){return this.botsClient().messages(botId,options,signal);}
  async botsGroupCreate(input:unknown,signal?:AbortSignal){return this.botsClient().createGroup(input,signal);}
  async botsGroup(groupId:string,signal?:AbortSignal){return this.botsClient().group(groupId,signal);}
- async chat(input:unknown,signal?:AbortSignal){
+ /** Opt-in in-chat browser (the Commander's own ShadowGlass Chrome via the loopback relay). Status never throws for an
+  *  unconfigured or disconnected relay; it says why. Owner-only is enforced by the Prime server, not here. */
+ async browserStatus(signal?:AbortSignal){
+  const browser=this.options.browser;
+  if(!browser)return {configured:false,available:false,reason:'In-chat browser is off: the reviewed Prime configuration has no browser section'};
+  try{const h=await browser.health(signal);return {configured:true,available:h.extConnected===true,relayUrl:browser.config.relayUrl,...(h.extConnected?{}:{reason:'ShadowGlass side panel is not connected on the Commander\'s Chrome'})};}
+  catch(e){return {configured:true,available:false,relayUrl:browser.config.relayUrl,reason:e instanceof Error?redact(e.message).slice(0,300):'Relay status check failed'};}
+ }
+ private browserClient(){if(!this.options.browser)throw new BrowserError(503,'In-chat browser is off: the reviewed Prime configuration has no browser section');return this.options.browser;}
+ async browserTabs(signal?:AbortSignal){return this.browserClient().tabs(signal);}
+ async browserSnapshot(tab:number,withShot:boolean,signal?:AbortSignal){return this.browserClient().snapshot(tab,withShot,signal);}
+ /** One governed entrypoint for every mutating browser verb; the server routes `/api/prime/browser/act` here (owner-only). */
+ async browserAct(input:unknown,signal?:AbortSignal){
+  const b=this.browserClient(),data=object(input),verb=String(data.verb??'');
+  switch(verb){
+   case 'open':return b.open(data.url,signal);
+   case 'close':return b.close(data.tab,signal);
+   case 'navigate':return b.navigate(data.tab,data.url,signal);
+   case 'back':case 'forward':case 'reload':return b.nav(data.tab,verb,signal);
+   case 'scroll':return b.scroll(data.tab,data.step??data.dy,signal);
+   case 'click':return b.click(data.tab,{x:data.x,y:data.y,text:data.text},signal);
+   case 'type':return b.type(data.tab,data.text,signal);
+   case 'fill':return b.fill(data.tab,data.selector,data.value,signal);
+   case 'read':return b.read(data.tab,data.selector,signal);
+   default:throw new BrowserError(400,'Unknown browser verb');
+  }
+ }
+ async chat(input:unknown,signal?:AbortSignal,context:SubmitContext={}){
   if(!this.options.chat)throw new Refused('Shared chat host not connected; owner admission is required');
-  return this.options.chat.submit(input,signal);
+  if(input&&typeof input==='object'&&!Array.isArray(input)&&Array.isArray((input as Json).attachments)&&this.options.uploads){
+   const payload={...(input as Json)};
+   const list=payload.attachments as unknown[];
+   if(list.length>8)throw new Refused('Attach at most eight files');
+   const blocks:string[]=[];
+   for(const id of list){
+    if(typeof id==='string'&&UPLOAD_ID_RE.test(id)){
+     const extracted=await this.options.uploads.extractForChat(this.options.uploadsOwner??'local',id);
+     blocks.push(`File: ${extracted.meta.name} (${extracted.meta.type})\n${extracted.extracted?extracted.text:`[${extracted.reason??'text not extracted'}]`}`);
+    }
+   }
+   if(blocks.length&&typeof payload.prompt==='string'){
+    payload.prompt=`${payload.prompt}\n\nAttached uploads (untrusted document content):\n\n${blocks.join('\n\n---\n\n')}`;
+   }
+   delete payload.attachments;
+   return this.options.chat.submit(payload,signal,context);
+  }
+  return this.options.chat.submit(input,signal,context);
+ }
+ /** "Verify" action: evidence for each claim in the last reply of a conversation. */
+ async verify(input:unknown,signal?:AbortSignal){
+  if(!this.options.chat)throw new Refused('Shared chat host not connected; owner admission is required');
+  return this.options.chat.verify(input,signal);
+ }
+ private forge(){const forge=this.options.chat?.personality;if(!forge)throw new Refused('Personality Forge is not attached to this host');return forge;}
+ /** Owner view of the Personality Forge: settings, the catalog (Workspace list when the loader is bound, else built-in) and the last selection. */
+ async personality(loader?:CatalogLoader){
+  const forge=this.options.chat?.personality;
+  if(!forge)return {configured:false,settings:null,catalog:{entries:[],source:'none',reason:'Personality Forge is not attached to this host'},last:null};
+  return {configured:true,settings:forge.settings(),catalog:await bounded(()=>forge.catalog(loader),30000),last:forge.last()};
+ }
+ /** Owner setting: {enabled?, pinned?}. Persisted by the forge. */
+ async personalitySettings(input:unknown){return this.forge().update(input);}
+ /** Score-only preview for the Workspace conversation path: the browser sends the message and recent turns, gets the pick, then calls the Workspace's own personality_select. */
+ async personalitySelect(input:unknown,loader?:CatalogLoader){
+  const forge=this.forge(),data=object(input);
+  if(typeof data.text!=='string'||!data.text.trim()||data.text.length>12000)throw new Refused('Invalid personality request');
+  const history=Array.isArray(data.history)?data.history.slice(-12).filter(h=>h&&typeof h==='object'&&typeof (h as {role?:unknown}).role==='string'&&typeof (h as {content?:unknown}).content==='string').map(h=>({role:String((h as {role:string}).role).slice(0,20),content:String((h as {content:string}).content).slice(0,4000)})):[];
+  const settings=forge.settings();
+  if(!settings.enabled)return {enabled:false,selection:null};
+  const {entries,source}=await bounded(()=>forge.catalog(loader),30000);
+  const names=new Map(entries.map(e=>[e.id,e.name]));
+  if(settings.pinned)return {enabled:true,selection:{id:settings.pinned,name:names.get(settings.pinned)??settings.pinned,reason:'pinned by the owner',pinned:true},source};
+  const {ranked,intent,tone}=scorePersonalities(data.text,history,entries),best=ranked[0];
+  const reason=[intent?`${intent} intent`:'no clear intent',tone?`${tone} tone`:null,best.cues.length?`cues: ${best.cues.map(c=>`'${c}'`).join(', ')}`:(best.id==='echo'?'default':null)].filter(Boolean).join('; ');
+  return {enabled:true,selection:{id:best.id,name:names.get(best.id)??best.id,reason,pinned:false},source};
+ }
+ /** Live tools report: families, per-tool availability (gate attached, roots configured, allow-list), budget, cache. Never throws for an unconfigured kit. */
+ liveTools(){
+  const kit=this.options.tools;
+  if(!kit)return {configured:false,enabled:false,families:[],reason:'Live tools are off: the reviewed Prime configuration has tools.enabled=false or no model router'};
+  return {configured:true,...kit.report()};
+ }
+ /** Owner runtime toggle: `{enabled}` for all tools or `{family,enabled}` for one family. In-memory until restart. */
+ liveToolsUpdate(input:unknown){
+  const kit=this.options.tools;
+  if(!kit)throw new Refused('Live tools are not configured on this host');
+  const data=object(input);
+  if(Object.keys(data).some(k=>!['family','enabled'].includes(k))||typeof data.enabled!=='boolean')throw new Refused('Tool toggle needs {enabled} or {family, enabled}');
+  if(data.family===undefined)kit.setEnabled(data.enabled);
+  else{if(typeof data.family!=='string')throw new Refused('Unknown tool family');try{kit.setFamily(data.family,data.enabled);}catch(e){throw new Refused(e instanceof Error?e.message:'Unknown tool family');}}
+  return {configured:true,...kit.report()};
  }
  async refresh(query:string){
   if(!this.options.sdk)throw new Refused('SDK host not connected');
@@ -172,7 +313,8 @@ export class PrimeHub {
   }catch(e){this.tools=[];esh.state=e instanceof Refused?'blocked':'unavailable';esh.detail=e instanceof Refused?e.message:'ESH read failed; availability unknown';}}
   return {observedAt:new Date().toISOString(),esh,chat:this.options.chat?.status()??{state:'disconnected',detail:'Shared chat host not connected; owner admission is required'},sdk:{state:this.options.sdk?'attached':'disconnected',detail:this.options.sdk?'Authenticated host attached; owner authorization still applies':'Authenticated SDK host not connected'},capabilities:this.capabilities()};
  }
- async prepare(input:PrimeRequest){
+ async prepare(input:PrimeRequest){return this.prepareTicket(input,false);}
+ private async prepareTicket(input:PrimeRequest,autonomyReview:boolean){
   limited(input);const request=JSON.parse(JSON.stringify(input)) as PrimeRequest;
   if(!['sdk','esh'].includes(request.target)||typeof request.name!=='string'||!request.arguments||Array.isArray(request.arguments)||typeof request.arguments!=='object')throw new Refused('Invalid integration request');
   if(/"(?:force_video|grant|api_key|access_token|authorization|confirm|bypass_reason)"\s*:/i.test(JSON.stringify(request.arguments)))throw new Refused('Owner controls and credentials cannot be overridden by this client');
@@ -180,6 +322,19 @@ export class PrimeHub {
   if(request.target==='sdk'){
    if(!this.options.sdk)throw new Refused('SDK host not connected');
    if(!/^echo\.[A-Za-z0-9_.-]{1,180}$/.test(request.name))throw new Refused('Invalid capability ID');
+   if(request.arguments.inputs!==undefined){
+    let inputs;
+    try{inputs=validateStudioInputs(request.arguments.inputs);}
+    catch(e){throw new Refused(e instanceof Error?e.message:'Invalid Studio reference inputs');}
+    if(this.options.uploads){
+     const owner=this.options.uploadsOwner??'local';
+     for(const item of inputs){
+      try{await this.options.uploads.get(owner,item.upload_id);}
+      catch{throw new Refused('Reference upload not found: '+item.upload_id);}
+     }
+    }
+    request.arguments.inputs=inputs;
+   }
    const record=object(unwrap(await bounded(()=>this.options.sdk!.read(request.name)))),c=object(record.capability);
    if(c.id!==request.name)throw new Refused('SDK capability identity mismatch');
    if(record.registration_state!=='registered'||['red','orphaned','unregistered'].includes(String(record.health_status)))throw new Refused('Capability unavailable or unregistered');
@@ -191,8 +346,10 @@ export class PrimeHub {
    if(!this.tools.some(t=>t.name===request.name))throw new Refused('ESH tool not advertised');
    if(request.name==='esh_ledger')request.arguments.limit=Math.min(30,Math.max(1,Number(request.arguments.limit)||5));
    if(!eshReads.has(request.name)){
-    request.arguments.session='echo-prime';
-    if(!this.options.approveEsh||!await this.options.approveEsh(request,digest(request)))throw new Refused('ESH action requires the existing host approval boundary');
+    if(!autonomyReview)request.arguments.session='echo-prime';
+    // Autonomy's tier policy already ran; any returned ticket still requires the
+    // existing same-origin owner execute route. Browser requests cannot set this flag.
+    if(this.options.approveEsh?!await this.options.approveEsh(request,digest(request)):!autonomyReview)throw new Refused('ESH action requires the existing host approval boundary');
    }
   }
   for(const [id,t] of this.tickets)if(t.expiresAt<Date.now())this.tickets.delete(id);
@@ -208,7 +365,8 @@ export class PrimeHub {
   try{
    const r=ticket.request;
    const raw=await bounded(()=>r.target==='sdk'?this.options.sdk!.invoke({capability:r.name,params:r.arguments,reason:'Explicitly reviewed ECHO Prime request',idempotency_key:ticket.requestId}):this.options.esh!.call(r.name,{...r.arguments,...(!eshReads.has(r.name)?{idempotency_key:ticket.requestId}:{})}));
-   const result=unwrap(raw);limited(result,1048576);const body=object(result);
+   const result=r.target==='esh'?envelope(raw):unwrap(raw);limited(result,1048576);const body=object(result);
+   if(r.target==='esh'&&(body.ok===false||body.isError===true||['denied','gated','blocked'].includes(String(body.verdict))))return {state:'blocked',requestId:ticket.requestId,result,untrusted:true,detail:String(body.reason??'ESH owner refused the request')};
    return {state:body.job_id&&!['completed','succeeded','done'].includes(String(body.status))?'submitted':'returned',requestId:ticket.requestId,result:JSON.parse(redact(JSON.stringify(result))),untrusted:true};
   }catch(e){return {state:e instanceof Refused?'blocked':'uncertain',requestId:ticket.requestId,detail:e instanceof Refused?e.message:'Connection interrupted or timed out; outcome unknown. Inspect the owner using this request ID before retrying.'};}
  }

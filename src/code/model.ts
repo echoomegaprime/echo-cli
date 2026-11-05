@@ -1,7 +1,25 @@
 import { redact } from './workspace.js';
 import type { Message } from './sessions.js';
-export type Action = { action: 'list' | 'read'; path: string } | { action: 'search'; query: string } | { action: 'propose'; path: string; content: string } | { action: 'final'; content: string };
+export type Action = { action: 'list' | 'read'; path: string } | { action: 'search'; query: string } | { action: 'propose'; path: string; content: string } | { action: 'final'; content: string }
+  | { action: 'tool'; tool: string; args: Record<string, unknown> } | { action: 'tools'; calls: { tool: string; args: Record<string, unknown> }[] };
 export interface Model { next(messages: Message[], signal?: AbortSignal): Promise<Action> }
+/** Tool names are registry identifiers, never free text; arguments must be a plain object (validated again per tool). */
+export const TOOL_NAME = /^[a-z][a-z0-9_]{1,40}$/;
+const TOOL_MAX_CALLS = 4;
+const plainArgs = (value: unknown): Record<string, unknown> | null => value === undefined ? {} : value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+function parseToolCall(value: unknown): { tool: string; args: Record<string, unknown> } {
+  const c = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const args = plainArgs(c.args);
+  if (typeof c.tool !== 'string' || !TOOL_NAME.test(c.tool) || !args) throw new Error('Model tool call needs a tool name and object args');
+  return { tool: c.tool, args };
+}
+/** Ollama structured-output schema for every action, including the two tool shapes. */
+export const ACTION_FORMAT = {
+  type: 'object', required: ['action'], properties: {
+    action: { type: 'string', enum: ['list', 'read', 'search', 'propose', 'final', 'tool', 'tools'] }, path: { type: 'string' }, query: { type: 'string' }, content: { type: 'string' },
+    tool: { type: 'string' }, args: { type: 'object' }, calls: { type: 'array', items: { type: 'object', required: ['tool'], properties: { tool: { type: 'string' }, args: { type: 'object' } } } },
+  }, additionalProperties: false,
+} as const;
 export function validateEndpoint(endpoint: string): URL {
   const url = new URL(endpoint);
   if (!['http:', 'https:'].includes(url.protocol) || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname) || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error('Model endpoint must be a credential-free loopback origin');
@@ -15,6 +33,11 @@ export function parseAction(value: unknown): Action {
   if (a.action === 'read' || a.action === 'list') return { action: a.action, path: a.path as string };
   if (a.action === 'propose' && typeof a.content === 'string') return { action: 'propose', path: a.path as string, content: a.content };
   if (a.action === 'final' && typeof a.content === 'string' && a.content.trim()) return { action: 'final', content: a.content };
+  if (a.action === 'tool') return { action: 'tool', ...parseToolCall(a) };
+  if (a.action === 'tools') {
+    if (!Array.isArray(a.calls) || !a.calls.length || a.calls.length > TOOL_MAX_CALLS) throw new Error(`Model tools action needs 1-${TOOL_MAX_CALLS} calls`);
+    return { action: 'tools', calls: a.calls.map(parseToolCall) };
+  }
   throw new Error('Model returned an unsupported action');
 }
 export interface LocalAnswered { requested: string; model: string | null; reported: boolean }
@@ -53,12 +76,28 @@ export class LocalModel implements Model {
       throw new Error('Local model unavailable, timed out, or returned invalid JSON; no provider fallback was used');
     }
   }
+  /** One short classification call (auto model routing): the endpoint must answer with one of `labels`. Anything else throws; callers fall back to their rules. */
+  async classify(text: string, labels: readonly string[], signal?: AbortSignal): Promise<string> {
+    if (!labels.length || labels.some(l => typeof l !== 'string' || !/^[a-z_]{1,40}$/.test(l))) throw new Error('Invalid classification labels');
+    const sample = typeof text === 'string' ? text.slice(0, 4000) : '';
+    const response = await this.request('api/chat', { model: this.model, stream: false, think: false,
+      format: { type: 'object', required: ['label'], properties: { label: { type: 'string', enum: [...labels] } }, additionalProperties: false },
+      options: { temperature: 0, num_predict: 24, num_ctx: Math.min(this.numCtx, 8192) },
+      messages: [
+        { role: 'system', content: `Classify the user's request into exactly one label from: ${labels.join(', ')}. Reply with JSON {"label":"<label>"} and nothing else.` },
+        { role: 'user', content: sample },
+      ],
+    }, signal) as { message?: { content?: string }; done?: boolean };
+    if (!response.done || typeof response.message?.content !== 'string') throw new Error('Local model classification is incomplete');
+    let label: unknown;
+    try { label = (JSON.parse(response.message.content) as { label?: unknown }).label; } catch { throw new Error('Local model classification is not JSON'); }
+    if (typeof label !== 'string' || !labels.includes(label)) throw new Error('Local model classification is not one of the labels');
+    return label;
+  }
   async next(messages: Message[], signal?: AbortSignal): Promise<Action> {
     if (Buffer.byteLength(JSON.stringify(messages)) > 180000) throw new Error('Context limit reached; start a focused session');
     const response = await this.request('api/chat', { model: this.model, stream: false, think: false,
-      format: { type: 'object', required: ['action'], properties: {
-        action: { type: 'string', enum: ['list', 'read', 'search', 'propose', 'final'] }, path: { type: 'string' }, query: { type: 'string' }, content: { type: 'string' },
-      }, additionalProperties: false },
+      format: ACTION_FORMAT,
       options: { temperature: 0, num_predict: 4096, num_ctx: this.numCtx }, messages,
     }, signal) as { message?: { content?: string }; done?: boolean; model?: unknown };
     if (!response.done || typeof response.message?.content !== 'string') throw new Error('Local model response is incomplete');

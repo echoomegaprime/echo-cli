@@ -118,6 +118,7 @@
   attr(art,{'data-bot-id':bot.bot_id});
   const head=el('div',undefined,'bots-card-head');
   head.append(el('h3',str(bot.name,80)||'(unnamed bot)'),el('span',str(bot.mode,20)||'personal','bots-badge bots-mode'),badge(bot));
+  if(bot.origin&&typeof bot.origin==='object'&&bot.origin.by==='echo')head.append(el('span','Echo-made from your prompt','bots-badge autoagent-badge'));// created by Echo from a chat prompt (autoagents.js)
   art.append(head,row('Agent',str(bot.agent,80)||'not reported'),row('Schedule',schedule(bot)),row('Plugins',list(bot.plugins).length?list(bot.plugins).slice(0,12).map(p=>str(p,40)).join(', '):'none'),meter(bot),
    row('Inbox',num(bot.inbox_depth)===null?'not reported':bot.inbox_depth+' waiting'),row('Last run',when(bot.last_run_at)||'never'));
   if(typeof bot.last_error==='string'&&bot.last_error)art.append(el('p','Last error: '+str(bot.last_error,300),'bots-error'));
@@ -225,6 +226,7 @@
     bots=[...bots.filter(b=>b.bot_id!==bot.bot_id),bot];
     note('Created '+str(bot.name,80)+': status '+(STATUSES.includes(bot.status)?bot.status:'not reported')+(bot.status==='paused'?' (resume it from its card when ready)':'')+'.');
     debug('create',{outcome:'returned',status:bot.status});
+    if(window.EchoPrimeAutoagents&&typeof window.EchoPrimeAutoagents.satellites==='function')window.EchoPrimeAutoagents.satellites({source:'bots',action:'created',botId:bot.bot_id,status:bot.status});// the orb listens for echo-orb-satellites
     select(bot.bot_id);
    }catch(error){if(gen!==generation)return;note('Bot not created: '+(error instanceof Error?error.message:'request failed')+'. No automatic retry was made.');debug('create',{outcome:'failed'});}
    finally{if(gen===generation){busy=false;submit.disabled=false;renderList();}}

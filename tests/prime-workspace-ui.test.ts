@@ -124,18 +124,20 @@ it('dispatches echo-account-changed only on a real identity change: anonymous re
  // The shipped transport runs here too, because the 2026-11-04 request storm was the pair of them:
  // an owner-only 401 -> invalidate() -> /api/session re-read -> echo-account-changed -> refetch -> 401 ...
  const anonymous={workspaceConfigured:true,authenticated:false,ownerAccess:false,csrf:null,user:null},owner={workspaceConfigured:true,authenticated:true,ownerAccess:true,csrf:'csrf-owner',user:{uid:'owner',role:'owner',status:'approved'}};
- let current:any=anonymous;
+ let current:any=anonymous,clock=1_000_000;
  const fetch=vi.fn(async(url:string)=>{if(url!=='/api/session')throw new Error('unexpected '+url);return new Response(JSON.stringify(current),{status:200,headers:{'content-type':'application/json'}});});
  const h=harness(['workspace-client.js','workspace.js'],{window:{fetch}}),dispatched=vi.fn();h.window.addEventListener('echo-account-changed',dispatched);
+ h.window.EchoPrimeWorkspaceTransport.now=()=>clock;// the transport's 10 s session memo runs on this clock
  const ws=h.window.EchoPrimeWorkspace;await ws.ready;
  expect(fetch).toHaveBeenCalledTimes(1);expect(ws.session).toMatchObject({authenticated:false});expect(ws.enabled).toBe(true);
  expect(dispatched).not.toHaveBeenCalled();// the first readback is an observation, not a change; every module bootstraps from the session itself
  expect(h.get('#draft-notice').hidden).toBe(false);expect(h.get('#draft-notice').textContent).toContain('Sign in');
  for(let i=0;i<5;i++){ws.invalidate();await expect(ws.ownerHeaders()).rejects.toThrow('Primary owner admission required.');}
- expect(fetch).toHaveBeenCalledTimes(6);expect(dispatched).not.toHaveBeenCalled();
+ expect(fetch).toHaveBeenCalledTimes(6);expect(dispatched).not.toHaveBeenCalled();// every invalidate() forgets the memo, so each re-read is real
  expect(h.get('#draft-notice').hidden).toBe(false);// an unchanged anonymous identity must not wipe the visitor's page either
- current=owner;await ws.ownerHeaders();expect(dispatched).toHaveBeenCalledTimes(1);// anonymous -> owner
- await ws.ownerHeaders();await ws.ownerHeaders();expect(dispatched).toHaveBeenCalledTimes(1);// owner -> owner
+ current=owner;clock+=11000;// a sign-in made elsewhere becomes visible once the 10 s session memo has expired
+ await ws.ownerHeaders();expect(dispatched).toHaveBeenCalledTimes(1);expect(fetch).toHaveBeenCalledTimes(7);// anonymous -> owner
+ await ws.ownerHeaders();await ws.ownerHeaders();expect(dispatched).toHaveBeenCalledTimes(1);expect(fetch).toHaveBeenCalledTimes(7);// owner -> owner, served from the memo
  ws.invalidate();expect(dispatched).toHaveBeenCalledTimes(2);expect(ws.session).toBeNull();// owner -> signed out is a real change
  ws.invalidate();expect(dispatched).toHaveBeenCalledTimes(2);
  expect(h.get('.profile > span:nth-child(2)').textContent).toBe('Sign in');
@@ -217,13 +219,15 @@ it('cancels opted-in late speech on visibility loss without starting a microphon
  const toggle=descendants(h.get('#workspace-panel-content')).find(n=>n.attributes.id==='workspace-voice-spoken')!;toggle.checked=true;await toggle.fire('change');const pending=h.window.EchoPrimeWorkspace.send('prompt');await vi.waitFor(()=>expect(request.mock.calls.some(c=>c[0]==='/voice/start')).toBe(true));
  h.document.hidden=true;h.emitDocument('visibilitychange');done.resolve({audio_url:'/api/voice/audio/fixture',session_id:'speech',chunk_index:0,has_more:false});await pending;expect(play).not.toHaveBeenCalled();expect(getUserMedia).not.toHaveBeenCalled();
 });
-it('bounds an explicitly started hands-free conversation to ten captures before explicit resume',async()=>{
+it('runs an explicitly started hands-free conversation without a turn cap until the microphone fails (Commander directive 2026-11-04)',async()=>{
  let processor:any,grants=0;const chat={id:'bounded',messages:[{id:'reply',role:'assistant',content:'saved'}]},getUserMedia=vi.fn(async()=>{if(++grants>11)throw new Error('fixture budget exceeded');return {getTracks:()=>[{stop(){}}]};}),request=vi.fn(async(path:string)=>path==='/state'?{chats:[],projects:[],library:[],personalities:[],voice:{configured:true}}:path==='/chats'||path==='/chats/bounded'?chat:path==='/voice/start'?{audio_url:'/api/voice/audio/fixture',session_id:'speech',chunk_index:0,has_more:false}:path==='/voice/transcribe'?{provider:'elevenlabs-scribe',text:'synthetic turn'}:{});
  const audioNode=()=>({connect(){},disconnect(){}}),h=workspaceHarness(request,{navigator:{mediaDevices:{getUserMedia},userAgent:'fixture'},btoa:(text:string)=>Buffer.from(text,'binary').toString('base64'),setTimeout:(fn:()=>void,delay:number)=>setTimeout(fn,delay===300?0:delay),Audio:class {events:Record<string,()=>void>={};addEventListener(type:string,fn:()=>void){this.events[type]=fn;}removeEventListener(type:string){delete this.events[type];}play=async()=>{queueMicrotask(()=>this.events.ended?.());};pause(){}}});
  // Eight seconds of speech followed by two seconds of silence ends each capture (the cap is now two minutes).
  h.window.AudioContext=class {sampleRate=16000;destination={};close=async()=>{};resume=async()=>{processor.onaudioprocess({inputBuffer:{getChannelData:()=>new Float32Array(128000).fill(.15)}});processor.onaudioprocess({inputBuffer:{getChannelData:()=>new Float32Array(32000)}});};createMediaStreamSource=audioNode;createScriptProcessor=()=>processor={...audioNode(),onaudioprocess:null};createGain=()=>({...audioNode(),gain:{value:0}});};
- await h.window.EchoPrimeWorkspace.ready;await h.window.EchoPrimeWorkspace.newChat();await h.window.EchoPrimeWorkspace.open('voice');expect(getUserMedia).not.toHaveBeenCalled();await h.find('Start voice conversation · up to ten turns').fire('click');
- await vi.waitFor(()=>expect(h.get('#workspace-panel-status').textContent).toContain('paused after ten turns'),{timeout:4000});expect(getUserMedia).toHaveBeenCalledTimes(10);expect(request.mock.calls.filter(c=>c[0]==='/voice/start')).toHaveLength(10);
+ await h.window.EchoPrimeWorkspace.ready;await h.window.EchoPrimeWorkspace.newChat();await h.window.EchoPrimeWorkspace.open('voice');expect(getUserMedia).not.toHaveBeenCalled();await h.find('Start voice conversation').fire('click');
+ // The old ten-turn cap is gone: the loop keeps listening until something fails (here the fixture refuses the 12th microphone grant).
+ await vi.waitFor(()=>expect(h.get('#workspace-panel-status').textContent).toContain('fixture budget exceeded'),{timeout:4000});expect(getUserMedia).toHaveBeenCalledTimes(12);expect(request.mock.calls.filter(c=>c[0]==='/voice/start')).toHaveLength(11);
+ expect(h.window.EchoPrimeWorkspace.bridge.voiceOptions.conversation).toBe(false);
 });
 it('reports rejected audio playback as unavailable and releases the player instead of claiming Playing',async()=>{
  const pause=vi.fn(),play=vi.fn(async()=>{throw new Error('synthetic autoplay rejection');}),chat={id:'rejected-audio',messages:[{id:'reply',role:'assistant',content:'saved reply'}]},request=vi.fn(async(path:string)=>path==='/state'?{chats:[],projects:[],library:[],personalities:[],voice:{configured:true}}:path==='/chats'?chat:path==='/voice/start'?{audio_url:'/api/voice/audio/fixture',session_id:'speech',chunk_index:0,has_more:false}:{});

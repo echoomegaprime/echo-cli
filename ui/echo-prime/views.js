@@ -378,6 +378,7 @@
   body.replaceChildren(...spec.render(b,()=>paint(view,turn)));
  }
  async function open(view){
+  if(view==='library'&&typeof window.EchoPrimeLibrary?.open==='function'){closeOwn();return window.EchoPrimeLibrary.open('library');}
   const spec=VIEWS[view];if(!spec)return false;
   ensureDialog();
   if(!dialog.open)dialog.showModal();
