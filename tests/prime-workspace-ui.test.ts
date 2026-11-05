@@ -124,18 +124,20 @@ it('dispatches echo-account-changed only on a real identity change: anonymous re
  // The shipped transport runs here too, because the 2026-11-04 request storm was the pair of them:
  // an owner-only 401 -> invalidate() -> /api/session re-read -> echo-account-changed -> refetch -> 401 ...
  const anonymous={workspaceConfigured:true,authenticated:false,ownerAccess:false,csrf:null,user:null},owner={workspaceConfigured:true,authenticated:true,ownerAccess:true,csrf:'csrf-owner',user:{uid:'owner',role:'owner',status:'approved'}};
- let current:any=anonymous;
+ let current:any=anonymous,clock=1_000_000;
  const fetch=vi.fn(async(url:string)=>{if(url!=='/api/session')throw new Error('unexpected '+url);return new Response(JSON.stringify(current),{status:200,headers:{'content-type':'application/json'}});});
  const h=harness(['workspace-client.js','workspace.js'],{window:{fetch}}),dispatched=vi.fn();h.window.addEventListener('echo-account-changed',dispatched);
+ h.window.EchoPrimeWorkspaceTransport.now=()=>clock;// the transport's 10 s session memo runs on this clock
  const ws=h.window.EchoPrimeWorkspace;await ws.ready;
  expect(fetch).toHaveBeenCalledTimes(1);expect(ws.session).toMatchObject({authenticated:false});expect(ws.enabled).toBe(true);
  expect(dispatched).not.toHaveBeenCalled();// the first readback is an observation, not a change; every module bootstraps from the session itself
  expect(h.get('#draft-notice').hidden).toBe(false);expect(h.get('#draft-notice').textContent).toContain('Sign in');
  for(let i=0;i<5;i++){ws.invalidate();await expect(ws.ownerHeaders()).rejects.toThrow('Primary owner admission required.');}
- expect(fetch).toHaveBeenCalledTimes(6);expect(dispatched).not.toHaveBeenCalled();
+ expect(fetch).toHaveBeenCalledTimes(6);expect(dispatched).not.toHaveBeenCalled();// every invalidate() forgets the memo, so each re-read is real
  expect(h.get('#draft-notice').hidden).toBe(false);// an unchanged anonymous identity must not wipe the visitor's page either
- current=owner;await ws.ownerHeaders();expect(dispatched).toHaveBeenCalledTimes(1);// anonymous -> owner
- await ws.ownerHeaders();await ws.ownerHeaders();expect(dispatched).toHaveBeenCalledTimes(1);// owner -> owner
+ current=owner;clock+=11000;// a sign-in made elsewhere becomes visible once the 10 s session memo has expired
+ await ws.ownerHeaders();expect(dispatched).toHaveBeenCalledTimes(1);expect(fetch).toHaveBeenCalledTimes(7);// anonymous -> owner
+ await ws.ownerHeaders();await ws.ownerHeaders();expect(dispatched).toHaveBeenCalledTimes(1);expect(fetch).toHaveBeenCalledTimes(7);// owner -> owner, served from the memo
  ws.invalidate();expect(dispatched).toHaveBeenCalledTimes(2);expect(ws.session).toBeNull();// owner -> signed out is a real change
  ws.invalidate();expect(dispatched).toHaveBeenCalledTimes(2);
  expect(h.get('.profile > span:nth-child(2)').textContent).toBe('Sign in');
