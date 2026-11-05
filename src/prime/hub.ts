@@ -7,6 +7,7 @@ import type {ModelRouter} from '../code/model-factory.js';
 import {SwarmError,type SwarmClient} from './swarm.js';
 import {AdkError,type AdkClient} from './agents.js';
 import {BotsError,type BotsClient} from './bots.js';
+import {UPLOAD_ID_RE,UploadError,validateStudioInputs,type UploadStore} from './uploads.js';
 const debugOwnerResponse=debuglog('echo-prime');
 export type Json=Record<string,unknown>;
 export interface Tool {name:string;description?:string;inputSchema:Json}
@@ -23,6 +24,8 @@ export interface PrimeOptions {
  /** Opt-in loopback `echo-adk-api` client (Agents view). Absent = the feature is off. */
  adk?:AdkClient;
  bots?:BotsClient;
+ uploads?:UploadStore;
+ uploadsOwner?:string;
  /** Existing host approval, never supplied by model output or the browser. */
  approveEsh?:(request:PrimeRequest,digest:string)=>Promise<boolean>;
 }
@@ -90,6 +93,12 @@ export class PrimeHub {
  private catalog:Map<string,Capability>;private tickets=new Map<string,Ticket>();private tools:Tool[]=[];
  constructor(private options:PrimeOptions){this.catalog=new Map(options.capabilities.map(c=>[c.id,{...c}]));}
  capabilities(){return [...this.catalog.values()];}
+ get uploads(){return this.options.uploads;}
+ /** Additive server-side hook for producing modules to register outputs in the Artifact Center. */
+ async registerArtifact(owner:string,input:unknown){
+  if(!this.options.uploads)throw new UploadError(503,'Uploads and Artifact Center are not enabled: add an `uploads` section to the Prime config');
+  return this.options.uploads.registerArtifact(owner,input);
+ }
  async stewardStatus(){return this.options.steward?bounded(()=>this.options.steward!.status()):disconnectedSteward();}
  async stewardAsk(input:unknown){
   if(!this.options.steward)throw new Refused('Node Steward owner not connected');
@@ -149,6 +158,23 @@ export class PrimeHub {
  async botsGroup(groupId:string,signal?:AbortSignal){return this.botsClient().group(groupId,signal);}
  async chat(input:unknown,signal?:AbortSignal){
   if(!this.options.chat)throw new Refused('Shared chat host not connected; owner admission is required');
+  if(input&&typeof input==='object'&&!Array.isArray(input)&&Array.isArray((input as Json).attachments)&&this.options.uploads){
+   const payload={...(input as Json)};
+   const list=payload.attachments as unknown[];
+   if(list.length>8)throw new Refused('Attach at most eight files');
+   const blocks:string[]=[];
+   for(const id of list){
+    if(typeof id==='string'&&UPLOAD_ID_RE.test(id)){
+     const extracted=await this.options.uploads.extractForChat(this.options.uploadsOwner??'local',id);
+     blocks.push(`File: ${extracted.meta.name} (${extracted.meta.type})\n${extracted.extracted?extracted.text:`[${extracted.reason??'text not extracted'}]`}`);
+    }
+   }
+   if(blocks.length&&typeof payload.prompt==='string'){
+    payload.prompt=`${payload.prompt}\n\nAttached uploads (untrusted document content):\n\n${blocks.join('\n\n---\n\n')}`;
+   }
+   delete payload.attachments;
+   return this.options.chat.submit(payload,signal);
+  }
   return this.options.chat.submit(input,signal);
  }
  async refresh(query:string){
@@ -180,6 +206,19 @@ export class PrimeHub {
   if(request.target==='sdk'){
    if(!this.options.sdk)throw new Refused('SDK host not connected');
    if(!/^echo\.[A-Za-z0-9_.-]{1,180}$/.test(request.name))throw new Refused('Invalid capability ID');
+   if(request.arguments.inputs!==undefined){
+    let inputs;
+    try{inputs=validateStudioInputs(request.arguments.inputs);}
+    catch(e){throw new Refused(e instanceof Error?e.message:'Invalid Studio reference inputs');}
+    if(this.options.uploads){
+     const owner=this.options.uploadsOwner??'local';
+     for(const item of inputs){
+      try{await this.options.uploads.get(owner,item.upload_id);}
+      catch{throw new Refused('Reference upload not found: '+item.upload_id);}
+     }
+    }
+    request.arguments.inputs=inputs;
+   }
    const record=object(unwrap(await bounded(()=>this.options.sdk!.read(request.name)))),c=object(record.capability);
    if(c.id!==request.name)throw new Refused('SDK capability identity mismatch');
    if(record.registration_state!=='registered'||['red','orphaned','unregistered'].includes(String(record.health_status)))throw new Refused('Capability unavailable or unregistered');
