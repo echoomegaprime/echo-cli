@@ -5,6 +5,7 @@ import type {SharedChat} from './chat.js';
 import {disconnectedSteward,type StewardOwner} from './steward.js';
 import type {ModelRouter} from '../code/model-factory.js';
 import {SwarmError,type SwarmClient} from './swarm.js';
+import {BrowserError,type BrowserClient} from './browser.js';
 const debugOwnerResponse=debuglog('echo-prime');
 export type Json=Record<string,unknown>;
 export interface Tool {name:string;description?:string;inputSchema:Json}
@@ -17,7 +18,7 @@ export interface SdkBroker {
 }
 export interface PrimeRequest {target:'sdk'|'esh';name:string;arguments:Json}
 export interface PrimeOptions {
- capabilities:Capability[];sdk?:SdkBroker;esh?:McpConnection;chat?:SharedChat;steward?:StewardOwner;models?:ModelRouter;swarm?:SwarmClient;
+ capabilities:Capability[];sdk?:SdkBroker;esh?:McpConnection;chat?:SharedChat;steward?:StewardOwner;models?:ModelRouter;swarm?:SwarmClient;browser?:BrowserClient;
  /** Existing host approval, never supplied by model output or the browser. */
  approveEsh?:(request:PrimeRequest,digest:string)=>Promise<boolean>;
 }
@@ -106,6 +107,33 @@ export class PrimeHub {
  private swarmClient(){if(!this.options.swarm)throw new SwarmError(503,'Swarm is not enabled: the reviewed Prime configuration has no swarm section');return this.options.swarm;}
  async swarmRun(input:unknown,signal?:AbortSignal){return this.swarmClient().run(input,signal);}
  async swarmStatus(runId:string,signal?:AbortSignal){return this.swarmClient().status(runId,signal);}
+ /** Opt-in in-chat browser (the Commander's own ShadowGlass Chrome via the loopback relay). Status never throws for an
+  *  unconfigured or disconnected relay; it says why. Owner-only is enforced by the Prime server, not here. */
+ async browserStatus(signal?:AbortSignal){
+  const browser=this.options.browser;
+  if(!browser)return {configured:false,available:false,reason:'In-chat browser is off: the reviewed Prime configuration has no browser section'};
+  try{const h=await browser.health(signal);return {configured:true,available:h.extConnected===true,relayUrl:browser.config.relayUrl,...(h.extConnected?{}:{reason:'ShadowGlass side panel is not connected on the Commander\'s Chrome'})};}
+  catch(e){return {configured:true,available:false,relayUrl:browser.config.relayUrl,reason:e instanceof Error?redact(e.message).slice(0,300):'Relay status check failed'};}
+ }
+ private browserClient(){if(!this.options.browser)throw new BrowserError(503,'In-chat browser is off: the reviewed Prime configuration has no browser section');return this.options.browser;}
+ async browserTabs(signal?:AbortSignal){return this.browserClient().tabs(signal);}
+ async browserSnapshot(tab:number,withShot:boolean,signal?:AbortSignal){return this.browserClient().snapshot(tab,withShot,signal);}
+ /** One governed entrypoint for every mutating browser verb; the server routes `/api/prime/browser/act` here (owner-only). */
+ async browserAct(input:unknown,signal?:AbortSignal){
+  const b=this.browserClient(),data=object(input),verb=String(data.verb??'');
+  switch(verb){
+   case 'open':return b.open(data.url,signal);
+   case 'close':return b.close(data.tab,signal);
+   case 'navigate':return b.navigate(data.tab,data.url,signal);
+   case 'back':case 'forward':case 'reload':return b.nav(data.tab,verb,signal);
+   case 'scroll':return b.scroll(data.tab,data.dy,signal);
+   case 'click':return b.click(data.tab,{x:data.x,y:data.y,text:data.text},signal);
+   case 'type':return b.type(data.tab,data.text,signal);
+   case 'fill':return b.fill(data.tab,data.selector,data.value,signal);
+   case 'read':return b.read(data.tab,data.selector,signal);
+   default:throw new BrowserError(400,'Unknown browser verb');
+  }
+ }
  async chat(input:unknown,signal?:AbortSignal){
   if(!this.options.chat)throw new Refused('Shared chat host not connected; owner admission is required');
   return this.options.chat.submit(input,signal);

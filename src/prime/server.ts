@@ -8,6 +8,7 @@ import {redact} from '../code/workspace.js';
 import {WorkspaceBridge,WorkspaceHttpError,type WorkspaceConfig} from './workspace.js';
 const assets:Record<string,string>={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/orb.js':'orb.js','/app.js':'app.js','/chat.js':'chat.js','/integrations.js':'integrations.js','/catalog.js':'catalog.js','/steward.js':'steward.js','/workspace-client.js':'workspace-client.js','/workspace.js':'workspace.js','/models.js':'models.js'};
 assets['/swarm.js']='swarm.js';assets['/swarm.css']='swarm.css';
+assets['/browser.js']='browser.js';assets['/browser.css']='browser.css';
 const debug=debuglog('echo-prime-server');
 assets['/privacy']='privacy.html';assets['/privacy.css']='privacy.css';
 Object.assign(assets,{'/fleet.js':'fleet.js','/logs.js':'logs.js','/fleet.css':'fleet.css'});
@@ -41,7 +42,7 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
   const path=new URL(req.url??'/',url).pathname;
   if(path.startsWith('/api/')){
    const started=Date.now(),requestId=randomUUID();
-   const operation=path.startsWith('/api/workspace/')?'workspace':path.startsWith('/api/steward/')?'steward':path.startsWith('/api/prime/swarm/')?'swarm':path==='/api/session'?'session':'owner';
+   const operation=path.startsWith('/api/workspace/')?'workspace':path.startsWith('/api/steward/')?'steward':path.startsWith('/api/prime/swarm/')?'swarm':path.startsWith('/api/prime/browser/')?'browser':path==='/api/session'?'session':'owner';
    const record=(outcome:string)=>debug('%j',{schemaVersion:1,event:'prime_api_request',operation,requestId,status:res.statusCode,outcome,durationMs:Date.now()-started});
    res.once('finish',()=>record('returned'));res.once('close',()=>{if(!res.writableEnded)record('disconnected');});
    const supplied=(req.headers.cookie??'').split(';').map(c=>c.trim()).find(c=>c.startsWith('echo_prime='))?.slice(11)??'';
@@ -64,6 +65,10 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     if(path==='/api/prime/swarm/health'&&req.method==='GET'){send(200,await hub.swarmHealth(abort.signal));return;}
     const swarmRun=/^\/api\/prime\/swarm\/runs\/([^/]{1,80})$/.exec(path);
     if(swarmRun&&req.method==='GET'){send(200,await hub.swarmStatus(decodeURIComponent(swarmRun[1]),abort.signal));return;}
+    if(path==='/api/prime/browser/status'&&req.method==='GET'){send(200,await hub.browserStatus(abort.signal));return;}
+    if(path==='/api/prime/browser/tabs'&&req.method==='GET'){send(200,{tabs:await hub.browserTabs(abort.signal)});return;}
+    const browserSnap=/^\/api\/prime\/browser\/snapshot\/([0-9]{1,16})$/.exec(path);
+    if(browserSnap&&req.method==='GET'){send(200,await hub.browserSnapshot(Number(browserSnap[1]),new URL(req.url??'/',url).searchParams.get('shot')==='1',abort.signal));return;}
     if(path==='/api/steward/status'&&req.method==='GET'){send(200,await hub.stewardStatus());return;}
     if(req.method!=='POST'||!req.headers['content-type']?.startsWith('application/json')){send(405,{error:'JSON POST required'});return;}
     const data=await body(req);
@@ -72,6 +77,7 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     else if(path==='/api/execute')send(200,await hub.execute(String(data.id??''),String(data.digest??'')));
     else if(path==='/api/chat')send(200,await hub.chat(data,abort.signal));
     else if(path==='/api/prime/swarm/run')send(202,await hub.swarmRun(data,abort.signal));
+    else if(path==='/api/prime/browser/act')send(200,await hub.browserAct(data,abort.signal));
     else if(path==='/api/steward/ask')send(200,await hub.stewardAsk(data));
     else send(404,{error:'Unknown route'});
    }catch(e){if(res.headersSent)res.destroy();else send(e instanceof WorkspaceHttpError?e.status:400,{error:redact(e instanceof Error?e.message:'Request failed').slice(0,600)});}
