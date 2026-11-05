@@ -100,6 +100,8 @@ export async function runSharedTurn(options: SharedTurnOptions) {
     // indicate corrupt/untrusted history and must not cross the owner boundary.
     if (messages[0]?.role !== 'system') throw new Error('Shared coding needs the trusted turn boundary');
     const history = messages.slice(1);
+    // v1 admits user context but owns its system prompt. Keep this contract intact.
+    if(turn.systemContext)history.unshift({role:'user',content:'Host-supplied role method and untrusted continuity records; no new tools or authority:\n'+turn.systemContext.slice(0,28000)});
     if (!history.length || history.length > 50 || history.some(m => !['user','assistant'].includes(m.role) ||
         typeof m.content !== 'string' || !m.content) ||
         history.reduce((n,m)=>n+Buffer.byteLength(m.content),0) > 98304)

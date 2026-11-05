@@ -6,7 +6,8 @@
 .composer-tools .composer-tool:hover,.message-actions .quiet-button:hover,.voice-controls .quiet-button:hover{border-color:#7ed7ae}
 .memory-chip{display:inline-flex;align-items:center;min-height:26px;padding:3px 10px;border:1px solid #2f5a49;border-radius:999px;background:#10241d;color:#9fd9bd;font-size:10px;letter-spacing:.2px}
 .attachment-chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
-.attachment-chips .chip{min-height:26px;padding:3px 10px;border:1px solid #3a6a55;border-radius:999px;background:#12281f;color:#bfe9d5;font-size:11px}
+.attachment-chips .chip{display:inline-flex;align-items:center;min-height:26px;padding:3px 10px;border:1px solid #3a6a55;border-radius:999px;background:#12281f;color:#bfe9d5;font-size:11px}
+.attachment-chips .chip .chip-thumb,.file-choice .chip-thumb{width:18px;height:18px;border-radius:4px;object-fit:cover;margin-right:5px;flex-shrink:0}
 .composer-extras{display:grid;gap:8px;margin-top:10px}
 .context-meter{display:flex;align-items:center;justify-content:flex-end;gap:10px;color:#7fa593;font-size:10px;min-width:0}
 .context-meter progress{width:min(220px,40%);height:6px;border-radius:999px;overflow:hidden;appearance:none;border:0;background:#17302a}

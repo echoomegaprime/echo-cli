@@ -61,6 +61,7 @@
  function agentCard(a){
   const lane=obj(a.lane),card=el('article',undefined,'workspace-card-content adk-agent');
   card.append(el('h3',String(a.name)),el('p',typeof a.role==='string'&&a.role?a.role:'role not stated','adk-agent-role'));
+  if(obj(a.origin).by==='echo')card.append(el('span','Echo-made from your prompt','autoagent-badge'));// definitions Prime created from a chat prompt (autoagents.js)
   const rows=el('dl',undefined,'adk-rows');
   const row=(k,v)=>{if(v===undefined||v===null||v==='')return;rows.append(el('dt',k),el('dd',v));};
   row('Skills',strings(a.skills).join(', ')||'none listed');
@@ -240,6 +241,23 @@
    if(data.done===true){
     renderRun(r,data);r.note='Finished after '+clock(Date.now()-r.startedAt)+'.';statusLine(r);
     debug('adk_run',data.status==='done'?'completed':'failed',{runId:r.runId,steps:Array.isArray(data.steps)?data.steps.length:0});
+    if(typeof window.EchoPrimeArtifacts?.register==='function'&&!r.artifactRegistered){
+     r.artifactRegistered=true;
+     const p=obj(data.proof),ft=finalText(Array.isArray(data.steps)?data.steps:[]);
+     void window.EchoPrimeArtifacts.register({
+      title:`ADK · ${clip(data.agent||r.agent||'agent',60)} · ${clip(r.runId,40)}`,
+      kind:'proof',
+      content:{run_id:r.runId,status:data.status,final_text:ft,proof:data.proof||null,spent:data.spent||null},
+      provenance:{
+       source:'adk',
+       agent:String(data.agent||r.agent||''),
+       run_id:String(r.runId),
+       ...(r.prompt?{prompt:String(r.prompt)}:{}),
+       ...(typeof p.verdict==='string'?{verdict:p.verdict}:{}),
+       ...(typeof p.events_sha256==='string'?{events_sha256:p.events_sha256}:{}),
+      },
+     }).catch(()=>{});
+    }
     finish(r);return;
    }
    renderRun(r,data);
@@ -283,8 +301,8 @@
    r.note='Stop was not accepted: '+(error instanceof Error?error.message:'request failed')+'. The run continues.';
   }finally{if(run===r){r.stopping=false;statusLine(r);r.lastPoll=0;}}
  }
- function watch(runId,agent,budget){
-  const r={runId,agent,budget,status:'queued',startedAt:Date.now(),lastPoll:0,inflight:false,failures:0,note:'',controller:new AbortController(),timer:null,stopRequested:false,stopping:false,statusLine:null,elapsed:null};
+ function watch(runId,agent,budget,runPrompt=''){
+  const r={runId,agent,budget,prompt:runPrompt,artifactRegistered:false,status:'queued',startedAt:Date.now(),lastPoll:0,inflight:false,failures:0,note:'',controller:new AbortController(),timer:null,stopRequested:false,stopping:false,statusLine:null,elapsed:null};
   run=r;
   renderRun(r,{status:'queued',agent,budget,steps:[],done:false});
   r.timer=setTimeout(()=>tick(r),0);
@@ -316,7 +334,7 @@
    if(mine!==generation)return;
    status.textContent='Run '+accepted.runId+' accepted ('+clip(accepted.status,20)+'). '+budgetText(accepted.budget)+'.';
    debug('adk_run','submitted',{runId:accepted.runId,agent:select.value});
-   watch(accepted.runId,select.value,accepted.budget);
+   watch(accepted.runId,select.value,accepted.budget,text);
   }catch(error){
    if(mine!==generation)return;
    const message=error instanceof Error?error.message:'request failed';

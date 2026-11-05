@@ -45,7 +45,9 @@
   reset();const revision=generation;controller=new AbortController();lock(true);result.textContent='Asking this node’s Steward…';
   try{
    const value=await request('ask',{node:select.value,mode:mode.value,text:input.value.trim(),...(mode.value==='proposal'?{target:target.value.trim()}:{})},controller.signal);
-   if(revision===generation){result.textContent=(value.text||JSON.stringify(value.proposal,null,2))+'\n\nAdvisory output. Verify the evidence before acting.';console.debug('[echo.steward]',{schema_version:1,event:'steward_advice',outcome:'returned'});}
+   if(revision===generation){const advice=value.text||JSON.stringify(value.proposal,null,2);result.textContent=advice+'\n\nAdvisory output. Verify the evidence before acting.';console.debug('[echo.steward]',{schema_version:1,event:'steward_advice',outcome:'returned'});
+    // Hook for speech.js (additive): offers a "Speak advice" action beside the result.
+    try{window.dispatchEvent(Object.assign(new Event('echo-result-rendered'),{detail:{source:'steward',text:String(advice??''),container:result}}));}catch{}}
   }catch(error){if(revision===generation)result.textContent=error.message;}
   finally{if(revision===generation)lock(false);}
  });

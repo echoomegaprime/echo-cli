@@ -119,6 +119,8 @@
   const ps=section('Provenance',false),prov=result.provenance&&typeof result.provenance==='object'?result.provenance:{};
   ps.append(el('p','Seats used: '+list(result.models_used).length+' · run '+info.runId+' · '+clock(info.elapsedMs)+' elapsed','swarm-meta'),el('pre',clip(JSON.stringify(prov,null,1),4000)));
   article.append(ps,el('small','Fused model text from many seats; verify claims before relying on them.','swarm-meta'));
+  // Hook for speech.js (additive): offers a "Speak result" action on the rendered answer.
+  try{window.dispatchEvent(Object.assign(new Event('echo-result-rendered'),{detail:{source:'swarm',text:answer,article}}));}catch{}
  }
  function failBox(article,title,detail){
   article.replaceChildren(el('strong','Swarm (40-seat brain)'),el('p',title,'swarm-error'),el('small',detail+' No other model was used.','swarm-meta'));
