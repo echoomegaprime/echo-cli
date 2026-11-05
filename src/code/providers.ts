@@ -30,9 +30,12 @@ export function childEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.Proces
   return env;
 }
 const SYSTEM = 'You are the planning model inside a read-only coding agent. You have no tools. Reply with one JSON object and nothing else.';
+// Tool shapes are valid only when the [system] message carries a "Live tools" catalogue; Prime runs the tool and feeds the
+// result back as the next [user] message: `UNTRUSTED TOOL RESULT (tool <name>):\n<json>` (see docs/echo-code/PRIME_TOOLS.md).
 const ACTIONS = 'Reply with exactly one JSON object and nothing else, shaped as one of:\n'
   + '{"action":"list","path":"<dir>"} {"action":"read","path":"<file>"} {"action":"search","query":"<text>"} '
-  + '{"action":"propose","path":"<file>","content":"<full new content>"} {"action":"final","content":"<answer>"}';
+  + '{"action":"propose","path":"<file>","content":"<full new content>"} {"action":"final","content":"<answer>"} '
+  + '{"action":"tool","tool":"<name from the Live tools catalogue>","args":{...}} {"action":"tools","calls":[{"tool":"<name>","args":{...}},...]}';
 function render(messages: Message[]): string {
   return `${ACTIONS}\n\n<conversation>\n${messages.map(m => `[${m.role}]\n${m.content}`).join('\n\n')}\n</conversation>\n`;
 }

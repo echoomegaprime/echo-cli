@@ -16,7 +16,9 @@ import {sdkBroker,type SdkTools} from './sdk.js';
 import {startPrimeServer} from './server.js';
 import {connectSteward,type StewardOwner,type StewardTools} from './steward.js';
 import type {WorkspaceConfig} from './workspace.js';
-interface PrimeConfig {esh?:StdioConfig;sdk?:StdioConfig&{tools:SdkTools;fixedArguments?:Json};steward?:StdioConfig&{tools:StewardTools};workspace?:WorkspaceConfig;publicOrigin?:string;models?:unknown;swarm?:unknown;adk?:unknown;bots?:unknown}
+import {ToolKit,TOOL_MODULES,parseToolsConfig} from '../code/tools/index.js';
+import {connectionGateway,sdkToolInvoke} from './tools-bridge.js';
+interface PrimeConfig {esh?:StdioConfig;sdk?:StdioConfig&{tools:SdkTools;fixedArguments?:Json};steward?:StdioConfig&{tools:StewardTools};workspace?:WorkspaceConfig;publicOrigin?:string;models?:unknown;swarm?:unknown;adk?:unknown;bots?:unknown;tools?:unknown}
 export function registerPrimeCommands(code:Command){
  code.command('prime').description('Open the local ECHO Prime interface with explicitly configured owner connections')
  .option('--config <file>','Reviewed local MCP connection configuration; never imported automatically')
@@ -41,11 +43,16 @@ export function registerPrimeCommands(code:Command){
    // The reviewed `models` section (default Qwen on a loopback endpoint) is opt-in: without it no router exists, nothing is probed
    // and the code agent is not attached, so a bare config never opens the working directory or starts a vendor CLI.
    const router=config.models!==undefined?new ModelRouter(parseModelsConfig(config.models)):undefined;
+   const broker=sdk&&config.sdk?await sdkBroker(sdk,config.sdk.tools,config.sdk.fixedArguments):undefined;
+   // Live tools are always on for router turns (Commander order 2026-11-04). The reviewed `tools` section only tunes them
+   // (families, budget, skill roots, MCP allow-list) or turns them off; vendor keys stay on the SDK gate, never in Prime.
+   const toolsConfig=parseToolsConfig(config.tools);
+   const tools=router&&toolsConfig.enabled?new ToolKit(toolsConfig,{sdk:broker?sdkToolInvoke(broker):undefined,mcp:connectionGateway({esh,sdk})},TOOL_MODULES):undefined;
    let chat:SharedChat|undefined;
-   if(router){const store=new SessionStore(opts.codeStateDir);chat=new SharedChat({workspace:new Workspace(opts.codeWorkspace,[store.directory]),store,models:router});}
-   const hub=new PrimeHub({capabilities:snapshot.capabilities,esh,steward,models:router,chat,swarm:config.swarm!==undefined?new SwarmClient(parseSwarmConfig(config.swarm)):undefined,
+   if(router){const store=new SessionStore(opts.codeStateDir);chat=new SharedChat({workspace:new Workspace(opts.codeWorkspace,[store.directory]),store,models:router,tools});}
+   const hub=new PrimeHub({capabilities:snapshot.capabilities,esh,steward,models:router,chat,tools,swarm:config.swarm!==undefined?new SwarmClient(parseSwarmConfig(config.swarm)):undefined,
     // The reviewed `adk` section (loopback echo-adk-api, default 127.0.0.1:8378) is opt-in like `swarm`: absent = Agents view says it is off.
-    adk:config.adk!==undefined?new AdkClient(parseAdkConfig(config.adk)):undefined,bots:config.bots!==undefined?new BotsClient(parseBotsConfig(config.bots)):undefined,sdk:sdk&&config.sdk?await sdkBroker(sdk,config.sdk.tools,config.sdk.fixedArguments):undefined});
+    adk:config.adk!==undefined?new AdkClient(parseAdkConfig(config.adk)):undefined,bots:config.bots!==undefined?new BotsClient(parseBotsConfig(config.bots)):undefined,sdk:broker});
    const server=await startPrimeServer(hub,ui,Number(opts.port),{workspace:config.workspace,publicOrigin:config.publicOrigin});
    process.stdout.write(JSON.stringify({url:server.url,publicOrigin:config.publicOrigin??null,esh:!!esh,sdk:!!sdk,steward:!!steward,scope:'loopback host; public ingress requires configured TLS proxy and release evidence'})+'\n');
    const close=async()=>{await server.close();connections.forEach(c=>c.close());};

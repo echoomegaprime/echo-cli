@@ -4,8 +4,9 @@ import type {SessionStore} from '../code/sessions.js';
 import {runSharedTurn,type CodingAdmission,type CodingInvoker} from '../code/shared.js';
 import {runTurn,type TurnResult} from '../code/agent.js';
 import {isModelId,VARIANT_ARG,type ModelId,type ModelRouter,type AnswerInfo} from '../code/model-factory.js';
-/** Either the authenticated host path (invoke + admission) or a reviewed model router (Qwen on loopback, or a vendor CLI). */
-export interface SharedChatOptions {workspace:Workspace;store:SessionStore;invoke?:CodingInvoker;admission?:CodingAdmission;models?:ModelRouter}
+import type {ToolKit} from '../code/tools/index.js';
+/** Either the authenticated host path (invoke + admission) or a reviewed model router (Qwen on loopback, or a vendor CLI). `tools` = the always-on live tools (web, Wolfram, knowledge, skills, MCP) for router turns. */
+export interface SharedChatOptions {workspace:Workspace;store:SessionStore;invoke?:CodingInvoker;admission?:CodingAdmission;models?:ModelRouter;tools?:ToolKit}
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const debug=debuglog('echo-prime');
 /** Attached by an authenticated embedding host. Browser data cannot select an
@@ -22,7 +23,7 @@ export class SharedChat {
  }
  status(){
   const models=this.options.models;
-  if(models)return {state:'attached',busy:this.busy,mode:'read-only',routing:true,defaultProvider:models.defaultId,detail:'Model router attached; the selected provider answers and no other provider is used as a fallback'};
+  if(models)return {state:'attached',busy:this.busy,mode:'read-only',routing:true,defaultProvider:models.defaultId,tools:this.options.tools?.enabled===true,detail:'Model router attached; the selected provider answers and no other provider is used as a fallback'};
   return {state:'attached',busy:this.busy,mode:'read-only',routing:false,detail:'Host attached; pinned owner contract and coding.invoke are checked on every turn'};
  }
  async submit(input:unknown,signal?:AbortSignal):Promise<TurnResult&{requestId:string;model?:AnswerInfo}>{
@@ -63,7 +64,8 @@ export class SharedChat {
   try{
    if(router&&provider){
     const turn=router.turn(provider,variant);
-    const result=await runTurn({workspace,store,model:turn.model,sessionId:session.id,prompt,mode:'read-only',maxSteps:10,signal:controller.signal});
+    const result=await runTurn({workspace,store,model:turn.model,sessionId:session.id,prompt,mode:'read-only',maxSteps:10,signal:controller.signal,
+     tools:this.options.tools?.forTurn({audience:'owner'})}); // live tools registry pass-through (src/code/tools); /api/chat is owner-only today
     turn.answered();
     debug('%j',{event:'prime_chat_finished',requestId,sessionId:session.id,provider,status:result.status,durationMs:Math.round(performance.now()-started)});
     return {...result,requestId,model:turn.info()};

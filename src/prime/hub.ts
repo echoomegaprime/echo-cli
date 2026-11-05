@@ -7,6 +7,7 @@ import type {ModelRouter} from '../code/model-factory.js';
 import {SwarmError,type SwarmClient} from './swarm.js';
 import {AdkError,type AdkClient} from './agents.js';
 import {BotsError,type BotsClient} from './bots.js';
+import type {ToolKit} from '../code/tools/index.js';
 const debugOwnerResponse=debuglog('echo-prime');
 export type Json=Record<string,unknown>;
 export interface Tool {name:string;description?:string;inputSchema:Json}
@@ -23,6 +24,8 @@ export interface PrimeOptions {
  /** Opt-in loopback `echo-adk-api` client (Agents view). Absent = the feature is off. */
  adk?:AdkClient;
  bots?:BotsClient;
+ /** Always-on live tools for model turns (web, Wolfram, Echo knowledge/memory, skills, MCP); owner toggles per family. */
+ tools?:ToolKit;
  /** Existing host approval, never supplied by model output or the browser. */
  approveEsh?:(request:PrimeRequest,digest:string)=>Promise<boolean>;
 }
@@ -150,6 +153,22 @@ export class PrimeHub {
  async chat(input:unknown,signal?:AbortSignal){
   if(!this.options.chat)throw new Refused('Shared chat host not connected; owner admission is required');
   return this.options.chat.submit(input,signal);
+ }
+ /** Live tools report: families, per-tool availability (gate attached, roots configured, allow-list), budget, cache. Never throws for an unconfigured kit. */
+ liveTools(){
+  const kit=this.options.tools;
+  if(!kit)return {configured:false,enabled:false,families:[],reason:'Live tools are off: the reviewed Prime configuration has tools.enabled=false or no model router'};
+  return {configured:true,...kit.report()};
+ }
+ /** Owner runtime toggle: `{enabled}` for all tools or `{family,enabled}` for one family. In-memory until restart. */
+ liveToolsUpdate(input:unknown){
+  const kit=this.options.tools;
+  if(!kit)throw new Refused('Live tools are not configured on this host');
+  const data=object(input);
+  if(Object.keys(data).some(k=>!['family','enabled'].includes(k))||typeof data.enabled!=='boolean')throw new Refused('Tool toggle needs {enabled} or {family, enabled}');
+  if(data.family===undefined)kit.setEnabled(data.enabled);
+  else{if(typeof data.family!=='string')throw new Refused('Unknown tool family');try{kit.setFamily(data.family,data.enabled);}catch(e){throw new Refused(e instanceof Error?e.message:'Unknown tool family');}}
+  return {configured:true,...kit.report()};
  }
  async refresh(query:string){
   if(!this.options.sdk)throw new Refused('SDK host not connected');
