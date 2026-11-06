@@ -9,6 +9,7 @@ import {DEFAULT_MODELS, MODEL_IDS, ModelRouter, type ModelId} from '../src/code/
 import type {Runner, RunResult} from '../src/code/providers.js';
 import {ENHANCE_MAX_INPUT, ENHANCE_MODES, ENHANCE_SYSTEM, EnhanceError, PromptEnhancer,
   derivedAdditions, parseEnhancement, type EnhanceMode} from '../src/prime/enhance.js';
+import {redactBuild} from '../src/prime/build.js';
 import {PrimeHub} from '../src/prime/hub.js';
 import {startPrimeServer} from '../src/prime/server.js';
 
@@ -99,6 +100,7 @@ async function expectEnhanceError(promise: Promise<unknown>, status: number, mes
 const phrases: Record<EnhanceMode, string> = {
   chat: 'about to send to an AI assistant', image: 'text-to-image prompt', video: 'text-to-video prompt',
   music: 'music generation prompt', sfx: 'sound-effect prompt', voice: 'text-to-speech request',
+  build: 'build brief for a coding agent',
 };
 
 describe('PromptEnhancer modes and provider routing', () => {
@@ -260,6 +262,144 @@ describe('PromptEnhancer redaction and provider failures', () => {
   });
 });
 
+describe('PromptEnhancer build mode (Echo Build brief)', () => {
+  const brief = {text: 'Purpose: a counter web app.\nPlatform and stack: Suggested: Vite and React.\nCore features: increment, decrement, reset.\nAcceptance checks: the page loads and + raises the count.', added: ['Acceptance checks', 'Suggested: Vite and React'], warnings: [] as string[]};
+  const briefAnswer = final(JSON.stringify(brief));
+  const build = {mode: 'build', text: 'a counter web app with plus, minus and reset buttons', provider: 'claude'};
+  // Synthetic credential-shaped fixtures, none of them real.
+  const key = 'sk-abcdefghijklmnopqrstuvwxyz0123';
+  const token = 'ghp_' + 'b'.repeat(36);
+  const bearer = 'Bearer abcdef0123456789abcdef';
+
+  it('is a listed mode with its own system prompt', () => {
+    expect(ENHANCE_MODES).toContain('build');
+    expect(ENHANCE_SYSTEM.build).toContain(phrases.build);
+    expect(ENHANCE_SYSTEM.build).not.toBe(ENHANCE_SYSTEM.chat);
+    expect(ENHANCE_SYSTEM.build).toContain('there is no workspace and no tools');
+  });
+
+  it('asks for a structured brief that keeps every stated requirement and adds no feature', () => {
+    const system = ENHANCE_SYSTEM.build;
+    for (const part of ['Purpose', 'Platform and stack', 'Core features', 'Inputs and outputs', 'Acceptance checks', 'Constraints']) expect(system).toContain(part);
+    expect(system).toMatch(/keep every requirement the user stated/i);
+    expect(system).toMatch(/add no feature they did not ask for/i);
+    expect(system).toMatch(/named none, one sensible default marked "Suggested:"/);
+    expect(system).toMatch(/browser/i);
+    expect(system).toMatch(/user's language/i);
+    expect(system).toMatch(/under \d+ words/);
+  });
+
+  it('forbids inventing credentials, private URLs or personal data and tells the model to warn instead of repeating a credential', () => {
+    const system = ENHANCE_SYSTEM.build;
+    expect(system).toMatch(/Never invent credentials, API keys, tokens, passwords/);
+    expect(system).toMatch(/URLs of private or internal services/);
+    expect(system).toMatch(/personal data/);
+    expect(system).toContain('[REDACTED]');
+    expect(system).toMatch(/never repeat/i);
+    expect(system).toMatch(/"warnings"/);
+    expect(system).toMatch(/remove the credential from the draft/i);
+  });
+
+  it('sends the build system prompt and the warnings output contract to exactly the chosen provider', async () => {
+    const s = await setup(briefAnswer);
+    const result = await s.enhancer.enhance(build, 'session-a');
+    expect(s.calls.map(call => call.cmd)).toEqual(['claude']);
+    expect(s.calls[0].prompt).toContain(ENHANCE_SYSTEM.build);
+    expect(s.calls[0].prompt).toContain('"warnings"');
+    expect(s.calls[0].prompt).toContain('PROMPT TO ENHANCE:\na counter web app with plus, minus and reset buttons');
+    expect(result).toMatchObject({mode: 'build', text: brief.text, added: brief.added, addedSource: 'model', provider: 'claude'});
+    expect(result).not.toHaveProperty('warnings');
+    expect(s.fake.chats).toHaveLength(0);
+  });
+
+  it('keeps the other modes on the original output contract (no warnings field asked for)', async () => {
+    const s = await setup();
+    await s.enhancer.enhance({...request, mode: 'image'}, 'session-a');
+    expect(s.calls[0].prompt).not.toContain('"warnings"');
+  });
+
+  it('uses the pinned provider and never the Build engine CLI: gpt reaches only codex', async () => {
+    const s = await setup(briefAnswer);
+    const result = await s.enhancer.enhance({...build, provider: 'gpt'}, 'session-a');
+    expect(result).toMatchObject({mode: 'build', provider: 'gpt'});
+    expect(s.calls.map(call => call.cmd)).toEqual(['codex']);
+  });
+
+  it('removes a credential from the draft before the provider sees it and warns the user to remove it', async () => {
+    const s = await setup(briefAnswer);
+    const result = await s.enhancer.enhance({...build, text: `a weather app that calls the forecast API with api_key=${key} and token: ${token}`}, 'session-a');
+    expect(s.calls).toHaveLength(1);
+    expect(s.calls[0].prompt).not.toContain(key);
+    expect(s.calls[0].prompt).not.toContain(token);
+    expect(s.calls[0].prompt).toContain('api_key=[REDACTED]');
+    expect(result.warnings).toEqual([expect.stringMatching(/looks like a credential.*not sent to the model.*remove it from your draft/i)]);
+    expect(JSON.stringify(result)).not.toContain(key);
+    expect(JSON.stringify(result)).not.toContain(token);
+  });
+
+  it('also removes the bearer and URL-login forms that the plain redactor misses', async () => {
+    const s = await setup(briefAnswer);
+    const result = await s.enhancer.enhance({...build, text: `sync with https://admin:hunter2pass@internal.example/api using Authorization: ${bearer}`}, 'session-a');
+    expect(s.calls[0].prompt).not.toContain('hunter2pass');
+    expect(s.calls[0].prompt).not.toContain('abcdef0123456789abcdef');
+    expect(result.warnings?.length).toBe(1);
+  });
+
+  it('does not warn about an ordinary draft, including the words key and token', async () => {
+    const s = await setup(briefAnswer);
+    const result = await s.enhancer.enhance({...build, text: 'a keyboard trainer; each token of the lesson is a word; the key row is highlighted'}, 'session-a');
+    expect(result).not.toHaveProperty('warnings');
+  });
+
+  it('redacts a credential the model itself writes into the brief and says so', async () => {
+    // The provider layer redacts the raw reply before parsing it, so a secret must not be the last thing in a string here.
+    const leaked = final(JSON.stringify({text: `Call the API with ${token} and Authorization: ${bearer} from api_key=${key} afterwards`, added: [`uses ${token} here`]}));
+    const s = await setup(leaked);
+    const result = await s.enhancer.enhance(build, 'session-a');
+    const wire = JSON.stringify(result);
+    for (const secret of [token, key, 'abcdef0123456789abcdef']) expect(wire).not.toContain(secret);
+    expect(result.text).toContain('[REDACTED');
+    expect(result.warnings).toEqual([expect.stringMatching(/brief contained text that looks like a credential.*replaced/i)]);
+  });
+
+  it('returns a brief that Echo Build create would accept: redaction is idempotent', async () => {
+    const leaked = final(JSON.stringify({text: `Use Authorization: ${bearer}, password: hunter2pass and https://admin:hunter2pass@internal.example/x`, added: []}));
+    const s = await setup(leaked);
+    const result = await s.enhancer.enhance(build, 'session-a');
+    expect(redactBuild(result.text)).toBe(result.text);
+    expect(result.text).not.toContain('hunter2pass');
+  });
+
+  it('carries the model\'s own warnings after the server\'s, redacted and capped at five', async () => {
+    const many = final(JSON.stringify({...brief, warnings: ['one', 'two', `three ${token}`, 'four', 'five', 'six', '  ', 7]}));
+    const s = await setup(many);
+    const result = await s.enhancer.enhance({...build, text: `use api_key=${key}`}, 'session-a');
+    expect(result.warnings).toHaveLength(5);
+    expect(result.warnings![0]).toMatch(/looks like a credential/i);
+    expect(result.warnings!.slice(1)).toEqual(['one', 'two', 'three [REDACTED]', 'four']);
+  });
+
+  it('keeps the existing 6,000 character output cap', async () => {
+    const edge = await setup(final(JSON.stringify({text: 'x'.repeat(6000), added: []})));
+    await expect(edge.enhancer.enhance(build, 'session-a')).resolves.toMatchObject({mode: 'build', outputChars: 6000});
+    const over = await setup(final(JSON.stringify({text: 'x'.repeat(6001), added: []})));
+    await expectEnhanceError(over.enhancer.enhance(build, 'session-a'), 502, /6001 characters, over the 6000 limit/);
+  });
+
+  it('never classifies an automatic request into build', async () => {
+    const s = await setup();
+    const result = await s.enhancer.enhance({...request, mode: 'auto', text: 'build me a todo app with a login page and a database'}, 'session-a');
+    expect(result.mode).not.toBe('build');
+  });
+
+  it('names an unavailable provider and does not fall back, as for every other mode', async () => {
+    const s = await setup(briefAnswer, 'claude');
+    await expectEnhanceError(s.enhancer.enhance(build, 'session-a'), 503, /Claude.*no fallback/);
+    expect(s.calls.map(call => call.cmd)).toEqual(['claude']);
+    expect(s.fake.chats).toHaveLength(0);
+  });
+});
+
 describe('PromptEnhancer validation and automatic classification', () => {
   it('rejects text longer than ENHANCE_MAX_INPUT before invoking a provider', async () => {
     const s = await setup();
@@ -271,7 +411,7 @@ describe('PromptEnhancer validation and automatic classification', () => {
   it('rejects an unknown mode and lists all allowed modes', async () => {
     const s = await setup();
     const promise = s.enhancer.enhance({...request, mode: 'bogus'}, 'session-a');
-    await expectEnhanceError(promise, 400, /chat, image, video, music, sfx, voice or auto/);
+    await expectEnhanceError(promise, 400, /chat, image, video, music, sfx, voice, build or auto/);
     expect(s.runner).not.toHaveBeenCalled();
     expect(s.fake.chats).toHaveLength(0);
   });
@@ -365,6 +505,25 @@ describe('POST /api/prime/enhance', () => {
       model: {id: 'claude', model: 'claude-sonnet-5-5', reported: true}});
     expect(s.calls.map(call => call.cmd)).toEqual(['claude']);
     expect(s.fake.chats).toHaveLength(0);
+  });
+
+  it('accepts mode build over HTTP, warns about a credential in the draft and never sends it to the provider', async () => {
+    const key = 'sk-abcdefghijklmnopqrstuvwxyz0123'; // Synthetic redaction fixture.
+    const s = await setup(final(JSON.stringify({text: 'Purpose: a notes app', added: ['Purpose'], warnings: []}))), http = await fixture(new PrimeHub({capabilities: [], models: s.router}));
+    const response = await http.post({mode: 'build', text: `a notes app, api_key=${key}`, provider: 'claude'});
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(body).toMatchObject({mode: 'build', text: 'Purpose: a notes app', provider: 'claude', warnings: [expect.stringMatching(/credential/i)]});
+    expect(JSON.stringify(body)).not.toContain(key);
+    expect(s.calls[0].prompt).not.toContain(key);
+  });
+
+  it('lists build among the modes in the 400 for an unknown mode', async () => {
+    const s = await setup(), http = await fixture(new PrimeHub({capabilities: [], models: s.router}));
+    const response = await http.post({...request, mode: 'deploy'});
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({error: expect.stringMatching(/voice, build or auto/)});
+    expect(s.runner).not.toHaveBeenCalled();
   });
 
   it('preserves the 503 status and Grok error without falling back', async () => {

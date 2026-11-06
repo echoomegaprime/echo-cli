@@ -56,7 +56,7 @@
   text=text.replace(/\s+/g,' ');
   return sentence(text.length>240?text.slice(0,239).trimEnd()+'…':text)||'No detail was reported.';
  }
- const ARTICLE={chat:'a chat',image:'an image',video:'a video',music:'a music',sfx:'a sound-effect',voice:'a voice'};
+ const ARTICLE={chat:'a chat',image:'an image',video:'a video',music:'a music',sfx:'a sound-effect',voice:'a voice',build:'a build'};
  const describe=model=>{
   if(!model||typeof model!=='object')return 'model not reported';
   if(typeof model.model==='string'&&model.model)return model.model;
@@ -105,8 +105,11 @@
 
  // ---- Enhance control --------------------------------------------------------------------------------------------
  const enhancers=[];
+ // A surface may name its own control (options.ariaLabel) and say what "done" means for it (options.doneNote); the defaults are the chat composer's.
+ const DONE_NOTE='Nothing was sent; review and press Send yourself.';
+ const resetNote=state=>{state.note.className='enhance-note';};
  function mountEnhance(options){
-  const label=el('span',{class:'enhance-label'},'Enhance'),button=el('button',{type:'button',class:'quiet-button enhance-button','data-enhance':options.name,'aria-label':'Enhance prompt'},spark(),label);
+  const label=el('span',{class:'enhance-label'},'Enhance'),button=el('button',{type:'button',class:'quiet-button enhance-button','data-enhance':options.name,'aria-label':options.ariaLabel||'Enhance prompt'},spark(),label);
   const select=el('select',{class:'enhance-provider','data-enhance-provider':options.name,'aria-label':'Enhance with'});
   const undo=el('button',{type:'button',class:'enhance-undo','data-enhance-undo':options.name},'Undo enhance');undo.hidden=true;
   const note=el('small',{class:'enhance-note',role:'status','aria-live':'polite','data-enhance-note':options.name});note.hidden=true;
@@ -120,10 +123,10 @@
    if(state.previous===null)return;
    const area=options.textarea();if(!area)return;
    area.value=state.previous;state.previous=null;area.dispatchEvent(new Event('input'));
-   undo.hidden=true;added.hidden=true;added.replaceChildren();note.hidden=false;note.textContent='Restored your original prompt.';
+   undo.hidden=true;added.hidden=true;added.replaceChildren();resetNote(state);note.hidden=false;note.textContent='Restored your original prompt.';
    debug('enhance','prime_enhance_undo',{surface:options.name});
   });
-  enhancers.push(state);return state;
+  enhancers.push(state);debug('enhance','prime_enhance_mounted',{surface:options.name});return state;
  }
  function renderEnhance(){
   const gate=enhanceGate(),list=providers();
@@ -145,7 +148,7 @@
   if(!text){state.note.hidden=false;state.note.textContent='Type a prompt first.';return;}
   if(text.length>4000){state.note.hidden=false;state.note.textContent='Enhance takes up to 4,000 characters; shorten the prompt first.';return;}
   const mode=state.options.mode(),chosen=provider,current=generation;
-  busy=true;state.busy=true;renderEnhance();state.note.hidden=false;state.note.textContent='Asking '+(LABELS[chosen]||chosen)+' to enhance this '+(mode==='auto'?'prompt':(ARTICLE[mode]||'a').replace(/^an? /,'')+' prompt')+'…';
+  busy=true;state.busy=true;renderEnhance();resetNote(state);state.note.hidden=false;state.note.textContent='Asking '+(LABELS[chosen]||chosen)+' to enhance this '+(mode==='auto'?'prompt':(ARTICLE[mode]||'a').replace(/^an? /,'')+' prompt')+'…';
   try{
    const result=await api('prime/enhance',{mode,text,provider:chosen},125000);
    if(current!==generation)return;
@@ -157,8 +160,11 @@
    const list=Array.isArray(result.added)?result.added.filter(a=>typeof a==='string'&&a.trim()).slice(0,20):[];
    state.added.replaceChildren(...list.map(a=>el('li',{},a)));state.added.hidden=!list.length;
    delete sessionFailures[chosen];
-   state.note.textContent='Enhanced by '+(result.providerLabel||LABELS[result.provider]||result.provider)+' · '+describe(result.model)+(result.mode?' · as '+(ARTICLE[result.mode]||'a '+result.mode)+' prompt':'')+(list.length?' · added '+list.length+(list.length===1?' thing':' things')+' (listed below)':' · no additions reported')+'. Nothing was sent; review and press Send yourself.';
-   debug('enhance','prime_enhance_applied',{surface:state.options.name,mode:result.mode,provider:result.provider,model:result.model&&result.model.model,added:list.length});
+   // Build mode only: the server removed a credential from the draft or the brief and says so. Shown in the note, never hidden.
+   const warnings=Array.isArray(result.warnings)?result.warnings.filter(w=>typeof w==='string'&&w.trim()).slice(0,5):[];
+   if(warnings.length)state.note.className='enhance-note enhance-warn';
+   state.note.textContent='Enhanced by '+(result.providerLabel||LABELS[result.provider]||result.provider)+' · '+describe(result.model)+(result.mode?' · as '+(ARTICLE[result.mode]||'a '+result.mode)+' prompt':'')+(list.length?' · added '+list.length+(list.length===1?' thing':' things')+' (listed below)':' · no additions reported')+'.'+(warnings.length?' Warning: '+warnings.map(sentence).join(' '):'')+' '+(state.options.doneNote||DONE_NOTE);
+   debug('enhance','prime_enhance_applied',{surface:state.options.name,mode:result.mode,provider:result.provider,model:result.model&&result.model.model,added:list.length,warnings:warnings.length});
   }catch(error){
    if(current!==generation)return;
    const message=error instanceof Error?error.message:'Enhance failed';
@@ -355,7 +361,7 @@
   mountEnhance({name:'studio',textarea:()=>$('#creative-prompt'),mode:()=>{const cat=category?category.value:'auto';if(cat==='auto'||cat==='all'){const k=lastRoute&&lastRoute.classification&&lastRoute.classification.kind;return k&&k!=='chat'&&k!=='image-edit'?k:k==='image-edit'?'image':'auto';}return CATEGORY_MODE[cat]||'auto';},
    mount(wrap,note,added){const row=$('.creative-actions');if(row)row.append(wrap);else brief.after(wrap);(row||brief).after(note,added);}});
  }
- window.addEventListener('echo-account-changed',()=>{generation++;if(autoTimer){clearTimeout(autoTimer);autoTimer=null;}busy=false;routing=false;lastRoute=null;setAuto(false);notice('');panel.hidden=true;status.textContent='';pickBox.replaceChildren();alternatives.replaceChildren();excludedBox.replaceChildren();failure.replaceChildren();for(const k of Object.keys(sessionFailures))delete sessionFailures[k];for(const s of enhancers){s.previous=null;s.undo.hidden=true;s.added.replaceChildren();s.added.hidden=true;s.note.hidden=true;s.busy=false;}report=null;reportState='loading';renderEnhance();void loadModels();});
+ window.addEventListener('echo-account-changed',()=>{generation++;if(autoTimer){clearTimeout(autoTimer);autoTimer=null;}busy=false;routing=false;lastRoute=null;setAuto(false);notice('');panel.hidden=true;status.textContent='';pickBox.replaceChildren();alternatives.replaceChildren();excludedBox.replaceChildren();failure.replaceChildren();for(const k of Object.keys(sessionFailures))delete sessionFailures[k];for(const s of enhancers){s.previous=null;s.undo.hidden=true;s.added.replaceChildren();s.added.hidden=true;s.note.hidden=true;resetNote(s);s.busy=false;}report=null;reportState='loading';renderEnhance();void loadModels();});
  renderEnhance();
  const ready=loadModels();
  window.addEventListener('echo-model-outcome',()=>{void loadModels();});// chat.js: a failed turn may have signed a provider out, so Enhance re-reads before offering it

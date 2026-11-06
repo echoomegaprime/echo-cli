@@ -398,8 +398,9 @@ Request:
 {"mode": "image", "text": "a fox in a forest", "provider": "claude"}
 ```
 
-`mode` is `"chat" | "image" | "video" | "music" | "sfx" | "voice" | "auto"` (`"auto"` runs the rules classifier
-on the text and maps `image-edit` to `image`). `provider` is one of `"claude" | "gpt" | "grok" | "argon" |
+`mode` is `"chat" | "image" | "video" | "music" | "sfx" | "voice" | "build" | "auto"` (`"auto"` runs the rules classifier
+on the text and maps `image-edit` to `image`; it never picks `build`). `"build"` is the Echo Build description
+(section 6). `provider` is one of `"claude" | "gpt" | "grok" | "argon" |
 "qwen"`; omitted, it uses the configured `ModelRouter` default.
 
 Response:
@@ -420,7 +421,8 @@ Response:
 ```
 
 `classified` is present only when `mode: "auto"` was requested: `{kind, confidence}` from the rules
-classifier. Error statuses:
+classifier. `warnings` (an array of at most five sentences) is present only for `mode: "build"` and only when there is
+something to say: a credential-like string was removed from the draft or from the brief, or the model added a note. Error statuses:
 
 | Status | Meaning |
 |---|---|
@@ -436,8 +438,8 @@ other provider was used; nothing retries automatically on a different model.
 
 ## 6. Enhance rules
 
-`ENHANCE_SYSTEM` has one system prompt per mode (`chat`, `image`, `video`, `music`, `sfx`, `voice`), each
-layered on the shared `PRESERVE` rule: keep the user's subject, constraints, names, numbers and references
+`ENHANCE_SYSTEM` has one system prompt per mode (`chat`, `image`, `video`, `music`, `sfx`, `voice`, `build`), each
+layered on the shared `PRESERVE` rule (`build` on `PRESERVE_BUILD`, below): keep the user's subject, constraints, names, numbers and references
 exactly; **never add facts, names, brands, places, dates, statistics, quotes or claims the user did not
 supply** — only craft and specificity about how the result should look, sound or read; never invent a
 duration, length, count or size the user did not give (say "default length" instead); state assumptions
@@ -452,6 +454,23 @@ production and vocals/instrumental, under 120 words; `sfx` covers source, textur
 layering and looping, under 60 words; `voice` keeps the spoken words unchanged (typo fixes only) and adds
 bracketed delivery notes (pace, emotion, emphasis, pauses, pronunciation) without changing meaning or adding
 lines.
+
+**Build mode** (the Echo Build "What should it do?" field, `PRIME_BUILD.md`) turns a rough software description into a concise
+build brief for a coding agent: headings Purpose, Platform and stack (what the user named; otherwise one sensible default marked
+"Suggested:"), Core features, Inputs and outputs, Acceptance checks (what a browser run of the preview can test) and Constraints,
+under 400 words and never over 5,000 characters. `PRESERVE_BUILD` replaces `PRESERVE`: keep every stated requirement, name,
+number and technology; add no feature, screen, integration or technology that was not asked for; state assumptions explicitly
+("Suggested:", "Assumption:"); never invent counts, sizes, limits or deadlines; write in the user's language; do not write code.
+It must never invent credentials, API keys, tokens, passwords, URLs of private or internal services, account names or personal
+data. Credentials are handled by the server as well as the prompt: in this mode the draft and the model's answer go through
+`redactBuild` (build.ts: `redact()` plus authorization/cookie headers, bearer tokens, `*token|secret|password|api_key` pairs and
+`https://user:pass@` URLs, repeated until stable so Echo Build `create` accepts the brief unchanged) instead of plain `redact()`;
+the model is told that `[REDACTED]` marks a removed credential, to leave it out or keep the marker, and to add a `warnings` entry
+telling the user to remove it from the draft. Its output contract adds that optional `warnings` list; the answer is parsed before
+it is redacted (the header rule runs to the end of a line and would swallow the JSON). The result's `warnings` are, in order, the
+server's draft warning, the server's brief warning (the brief itself needed redaction), then the model's own notes (redacted,
+at most 200 characters each), deduplicated and capped at five. Other modes are unchanged and never carry `warnings`. A
+`prime_enhance_credentials_redacted` debug event records only which of the two happened.
 
 Input is capped at 4,000 characters (`ENHANCE_MAX_INPUT`) and output at 6,000 (`ENHANCE_MAX_OUTPUT`). The
 model answers under a fixed JSON `OUTPUT_CONTRACT`: `{"text": "<improved prompt>", "added": ["<short phrase>",
@@ -504,7 +523,13 @@ clears the "what I added" list.
 
 **Provider chip**: a `<select>` next to each Enhance button lists the providers the reviewed `models` section
 has configured (`claude`, `gpt`, `grok`, `argon` as "Gemini (Argon)", `qwen`), disabling unavailable ones;
-the chosen provider persists across both the composer and Studio Enhance controls for the session.
+the chosen provider persists across the composer, Studio and Echo Build Enhance controls for the session.
+
+**Echo Build** mounts the same control (surface `build`, `mode: () => 'build'`) beside its "Build it" button through
+`mountEnhance`. Two optional mount options exist for surfaces that are not the composer: `ariaLabel` (the button's accessible
+name, default "Enhance prompt") and `doneNote` (the closing sentence of the status note, default "Nothing was sent; review and
+press Send yourself."). A result's `warnings` are appended to the note as "Warning: ..." and the note gets the `enhance-warn`
+class. Details: `PRIME_BUILD.md`, "Enhance the description".
 
 **Never auto-send**: Enhance only replaces the prompt textarea's text and dispatches an `input` event; it never
 calls `form.requestSubmit()` or any execute path. Auto routing only prepares a request for review; the Studio's
@@ -546,7 +571,8 @@ existing "Review request" → "Run this exact request" buttons are still the onl
 the shipped `ui/echo-prime/catalog.json` with its real registry descriptions — no `RANKING`-listed generator may
 vanish, the owner-disabled video and retired voice tools land in `excluded`, the on-prem router wins an anime
 prompt once live health is green — the real `sdkBroker` with bridge-shaped rows, owner-only routes),
-`tests/prime-enhance.test.ts` (modes, providers, rate limit, redaction, failures, route),
+`tests/prime-enhance.test.ts` (modes, providers, rate limit, redaction, failures, route, build mode and its credential handling),
+`tests/prime-build-enhance-ui.test.ts` (the Echo Build Enhance button: placement, request, Undo, failures, warnings, provider vs Engine, owner gate, keyboard, debug events),
 `tests/prime-media-ui.test.ts` (Auto tab, Studio panel, one-tap overrides, excluded list, failure offers, catalog
 badges, Studio `merge`, the composer Enhance mounted by `composer.js`, Enhance controls, Undo, gates, 403 handling,
 Enhance default skipping a failed sign-in, copy, demoted badges, template + length on apply),
@@ -560,7 +586,8 @@ cleared results, 403, tool artifacts, client/server request parity).
 
 `debuglog('echo-prime')` (`NODE_DEBUG=echo-prime`) events: `prime_media_routed`, `prime_media_catalog`, `prime_media_classifier_failed`,
 `prime_media_probe_failed`, `prime_media_outcome`, `prime_media_job_finished`, `prime_media_outcomes_write_failed`,
-`prime_upload_ingest_refused`, `prime_enhance_started`, `prime_enhance_finished`, `prime_enhance_refused`. None of
+`prime_upload_ingest_refused`, `prime_enhance_started`, `prime_enhance_finished`, `prime_enhance_refused`,
+`prime_enhance_credentials_redacted`. None of
 these log the prompt text itself.
 
 ## 11. Runnable picks, request shapes and results (2026-11-06)

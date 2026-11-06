@@ -20,6 +20,7 @@ The responsive shell follows the user-provided emerald desktop, ECHO Prime deskt
 - In Chat, Enter saves the current draft. In creative modes it opens the matching studio request. Shift+Enter inserts a newline; Ctrl/Cmd+K starts a fresh composer.
 - Chat remains a draft until the shared runtime is admitted. Creative requests use the attached authenticated host, exact request review and single-use submission IDs. Offline requests are refused truthfully.
 - Connection and voice controls show the actual connection prerequisite. There is no API-key field and no credential storage in this frontend.
+- Echo Build (owner-only, `build.js`) has the same sparkle **Enhance** button as the composer and Studio, beside **Build it**: it rewrites "What should it do?" into a structured build brief with the provider chosen in its own chip (never the Engine select), shows which model did it, and offers **Undo enhance**. It never starts a build, names a failed or signed-out provider and leaves the text alone, and warns when the draft held something credential-like. See `docs/echo-code/PRIME_BUILD.md`.
 
 The production integration must provide a separately admitted authenticated host and the existing bounded `runSharedTurn` adapter. Do not add credentials to static files or assume that this interface grants `continuity.write` or `coding.invoke`.
 

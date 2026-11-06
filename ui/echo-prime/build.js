@@ -3,9 +3,11 @@
  const $=s=>document.querySelector(s),panel=$('#build-dialog'),opener=$('#open-build');
  if(!panel||!opener)return;
  const status=$('#build-status'),list=$('#build-list'),form=$('#build-form'),engine=$('#build-engine'),title=$('#build-title'),prompt=$('#build-prompt'),submit=$('#build-submit');
+ const enhanceHolder=$('#build-enhance'),enhanceFeedback=$('#build-enhance-feedback');
  const view=$('#build-view'),heading=$('#build-heading'),meta=$('#build-meta'),log=$('#build-log'),frame=$('#build-preview'),turn=$('#build-turn'),turnPrompt=$('#build-turn-prompt'),turnSubmit=$('#build-turn-submit'),deploy=$('#build-deploy-review'),receipt=$('#build-receipt'),repo=$('#build-repo');
  let generation=0,controller=null,timer=null,current=null,health=null,providers=[],cursor=0,lines=[],busy=false,previewAt=0,previewVersion='',failures=0,checking=false;
  const debug=(event,detail={})=>console.debug('[echo.build]',{event:'prime_build_'+event,...detail});
+ const enhanceEvent=(event,detail={})=>console.debug('[echo.enhance]',{schema_version:1,event,surface:'build',...detail});
  const el=(tag,text,cls)=>{const e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(cls)e.className=cls;return e;};
  const ws=()=>window.EchoPrimeWorkspace;
  const admitted=()=>!ws()?.enabled||ws()?.session?.authenticated===true&&ws()?.session?.ownerAccess===true;
@@ -19,7 +21,10 @@
   if(!response.ok){if([401,403].includes(response.status)&&ws()?.session?.ownerAccess)ws().invalidate();throw new Error(data.error||'Echo Build request failed (HTTP '+response.status+')');}
   return data;
  }
+ // The Enhance control and its notes are owner-only like the rest of this view; nothing of it shows (or can be pressed) otherwise.
+ function syncEnhance(){const on=admitted();if(enhanceHolder)enhanceHolder.hidden=!on;if(enhanceFeedback)enhanceFeedback.hidden=!on;}
  function controls(){
+  syncEnhance();
   submit.disabled=busy||!health?.available||!providers.some(p=>p.available&&p.engine===engine.value);
   turnSubmit.disabled=busy||!current||active(current);
   for(const action of ['hibernate','revive','stop','deploy']){
@@ -83,6 +88,7 @@
  async function load(){
   const mine=++generation;controller?.abort();controller=new AbortController();checking=false;clearTimeout(timer);failures=0;health=null;providers=[];controls();
   await Promise.resolve(ws()?.ready).catch(()=>{});if(mine!==generation)return;
+  syncEnhance();
   if(!admitted()){status.textContent=ws()?.session?.authenticated?'Echo Build is available to the primary owner only.':'Sign in as the primary owner to use Echo Build.';return;}
   try{
    health=await api('build/health');if(mine!==generation)return;
@@ -138,6 +144,17 @@
  panel.addEventListener('close',clear);
  document.addEventListener('visibilitychange',()=>{clearTimeout(timer);timer=null;if(!document.hidden&&panel.open)refresh();});
  window.addEventListener('echo-account-changed',()=>{clear();current=null;health=null;providers=[];cursor=0;lines=[];list.replaceChildren();log.textContent='';receipt.textContent='';deploy.replaceChildren();title.value='';prompt.value='';turnPrompt.value='';view.hidden=true;controls();if(panel.open)panel.close();});
+ // Enhance (sparkle): the shared control from media-router.js (a classic script that runs before this one), mounted beside Build it.
+ // It rewrites the description into a build brief with the provider chosen in its own chip (never the Build engine) and never submits or starts a build.
+ function mountEnhance(){
+  const router=window.EchoPrimeMediaRouter;
+  if(typeof router?.mountEnhance!=='function'){enhanceEvent('prime_enhance_mount_skipped',{reason:'media_router_absent'});return;}
+  if(!enhanceHolder||!enhanceFeedback){enhanceEvent('prime_enhance_mount_skipped',{reason:'markup_absent'});return;}
+  router.mountEnhance({name:'build',textarea:()=>prompt,mode:()=>'build',ariaLabel:'Enhance build description',
+   doneNote:'Nothing was sent and no build was started; review the text, then press Build it yourself.',
+   mount(wrap,note,added){enhanceHolder.append(wrap);enhanceFeedback.append(note,added);}});
+ }
+ try{mountEnhance();}catch(error){enhanceEvent('prime_enhance_mount_failed',{reason:error instanceof Error?error.message:'failed'});}
  window.EchoPrimeBuild={open,select,active:()=>current?.build_id??null};
  controls();
 })();
