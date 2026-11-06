@@ -7,16 +7,21 @@
  *      overlays that restore the winning mode. 'idle' from a source clears only that source's claim. 'speaking' and
  *      'listening' without a source are attributed to 'voice'; everything else without a source is 'app'. The listening
  *      ripple and the speaking amplitude overlay whatever mode wins.
+ *      `intensity` (0..1) deepens the winning mode: thinking leans toward the deep vortex, deep spins faster and brighter.
  *  - document CustomEvent 'echo-orb-pulse'  detail {strength?}  (token arrival) == window.EchoOrb.pulse(strength)
- *  - document CustomEvent 'echo-orb-satellites'  detail {source?, satellites:[{id, kind:'agent'|'bot'|'swarm', name, status, busy, group?}]}
+ *  - document (or window) CustomEvent 'echo-orb-satellites'
+ *      list form  {source?, satellites:[{id, kind:'agent'|'bot'|'swarm', name, status, busy, group?}]}
  *      status: paused | idle | running | error (default idle). Lists merge per source: with `source` the list replaces that
  *      source's entries; without it the list replaces the kinds it contains, and an empty list without a source clears all.
- *      Capped at 24 (busy first, then bots, swarm, agents). Anonymous users are sent nothing, so nothing orbits.
- *  - document CustomEvent 'echo-orb-open'  detail {id, kind}  dispatched here when a moon is clicked or tapped.
+ *      An id published by two sources orbits once. Capped at 24 (busy first, then bots, swarm, agents).
+ *      delta form {action, botId, status?, name?}  (autoagents.js and bots.js tell the orb a bot was created, resumed,
+ *      paused or deleted, on window): upserts or removes the moon 'bot:'+botId inside the 'bots' source, so the next full
+ *      list from bots.js (source 'bots') replaces it. Owner-only publishers: anonymous users are sent nothing, so nothing
+ *      orbits; 'echo-account-changed' on window clears every moon.
+ *  - document CustomEvent 'echo-orb-open'  detail {id, kind}  dispatched here when a moon is clicked (mouse), or tapped a
+ *      second time while its name is showing (touch: the first tap shows the name).
  *  window.EchoOrb (installed by mount): setState, getState, pulse, setSatellites, satellites, arcs, links, destroy.
- *  bots.js (sibling slice) publishes on every list refresh, for example:
- *    document.dispatchEvent(new CustomEvent('echo-orb-satellites',{detail:{source:'bots',satellites:bots.map(b=>({id:'bot:'+b.bot_id,
- *      kind:'bot',name:b.name,status:b.status,busy:b.status==='running'||inLiveGroup(b),group:inLiveGroup(b)?group.groupId:undefined}))}}));
+ *  Publishers: agents.js (source 'agents'), bots.js (source 'bots'), swarm.js (source 'swarm'), autoagents.js (deltas).
  */
 (() => {
   'use strict';
@@ -186,7 +191,7 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
     success:  {energy:.8, swirl:.1, flow:1.3, rim:1,  shimmer:.9, filaments:0,  hue:0},
   };
   const KINDS={agent:{size:4.6,radius:1.1,speed:.3,weight:1},bot:{size:7,radius:1.32,speed:.19,weight:3},swarm:{size:9,radius:1.58,speed:.12,weight:2}};
-  const STATUSES=['paused','idle','running','error'];
+  const STATUSES=['paused','idle','running','error'],BOT_ID=/^[0-9a-f]{32}$/;
   const MAX_SATS=24,MAX_ARCS=12,SEGMENTS=16,TRAIL=10,MAX_LIGHTS=4,ERROR_MS=900,SUCCESS_MS=720,TIP_MS=1600,TAU=Math.PI*2;
   // A moon centre is hidden by the sphere once its depth drops below the limb, z < R*R/d (camera at d=3.3, sphere R=.83).
   const LIMB_Z=.83*.83/3.3;
@@ -201,6 +206,8 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
   /** Shared state, satellites and arcs for both renderers. Everything is preallocated; the frame loop allocates nothing. */
   function createScene(){
     const claims={};let transient=null,transientTimer=0,flashAt=-Infinity,errorAt=-Infinity;
+    // `version` changes whenever something a static frame shows changes (mode, intensity, the listening layer, the roster).
+    let version=0,lastMode='idle',lastIntensity=0,lastRipple=0;
     const state={mode:'idle',intensity:0,amplitude:0,source:'app'};
     const look={energy:.15,swirl:0,flow:1,rim:0,shimmer:.35,filaments:0,hue:0,pulse:0,ripple:0,red:0,flash:0,flashR:0,ampl:0,scale:1,intensity:0};
     const goal={energy:.15,swirl:0,flow:1,rim:0,shimmer:.35,filaments:0,hue:0,ripple:0,ampl:0,intensity:0};
@@ -215,7 +222,7 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
     const base=[new Float32Array(3),new Float32Array(3),new Float32Array(3)];
     const self={
       state,look,sats,arcs,lights,bolt,palette,base,
-      get satCount(){return satCount;},get clock(){return clock;},get fclock(){return fclock;},get hover(){return hover;},
+      get satCount(){return satCount;},get clock(){return clock;},get fclock(){return fclock;},get hover(){return hover;},get version(){return version;},
       setBase(colors){for(let i=0;i<3;i++){base[i][0]=colors[i][0];base[i][1]=colors[i][1];base[i][2]=colors[i][2];}},
       setState(detail){
         if(!detail||typeof detail!=='object')return false;
@@ -234,20 +241,34 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
       expire(){if(transient&&now()>=transient.until){transient=null;self.recompute(state.source);return true;}return false;},
       recompute(source){
         let best='idle',bestSource=source||'app',rank=0,amplitude=0,intensity=0,ripple=0;
-        for(const key in claims){const c=claims[key];const r=PRIORITY[c.mode]||0;if(r>rank){rank=r;best=c.mode;bestSource=key;}if(c.mode==='speaking')amplitude=Math.max(amplitude,c.amplitude);if(c.mode==='listening')ripple=1;intensity=Math.max(intensity,c.intensity);}
+        // The winning claim's intensity shapes the look; a quieter source's intensity never leaks into it.
+        for(const key in claims){const c=claims[key];const r=PRIORITY[c.mode]||0;if(r>rank){rank=r;best=c.mode;bestSource=key;intensity=c.intensity;}if(c.mode==='speaking')amplitude=Math.max(amplitude,c.amplitude);if(c.mode==='listening')ripple=1;}
         const effective=transient?transient.mode:best;
+        if(transient)intensity=0;
         state.mode=effective;state.source=transient?(source||bestSource):bestSource;state.amplitude=amplitude;state.intensity=intensity;
-        const L=LOOK[effective];goal.energy=L.energy;goal.swirl=L.swirl;goal.flow=L.flow;goal.rim=L.rim;goal.shimmer=L.shimmer;goal.filaments=L.filaments;goal.hue=L.hue;
-        goal.ripple=ripple;goal.ampl=amplitude;goal.intensity=intensity;
+        self.aim(effective,intensity);goal.ripple=ripple;goal.ampl=amplitude;goal.intensity=intensity;
+        // Amplitude alone never bumps the version: a static (reduced-motion) frame shows speaking at rest, so the ~20 Hz
+        // amplitude stream from speech.js does not redraw it.
+        if(effective!==lastMode||intensity!==lastIntensity||ripple!==lastRipple){lastMode=effective;lastIntensity=intensity;lastRipple=ripple;version++;}
         self.onMode?.(effective);return true;
+      },
+      /** Goal look for a mode; intensity leans thinking (and, gently, replying) toward the deep vortex and drives deep harder. */
+      aim(mode,k){
+        const L=LOOK[mode];goal.energy=L.energy;goal.swirl=L.swirl;goal.flow=L.flow;goal.rim=L.rim;goal.shimmer=L.shimmer;goal.filaments=L.filaments;goal.hue=L.hue;
+        if(!(k>0))return;
+        if(mode==='thinking'||mode==='replying'){const D=LOOK.deep,m=k*(mode==='thinking'?.85:.4);goal.energy+=(D.energy-goal.energy)*m;goal.swirl+=(D.swirl-goal.swirl)*m;goal.flow+=(D.flow-goal.flow)*m;goal.filaments+=(D.filaments-goal.filaments)*m;goal.hue+=(D.hue-goal.hue)*m;}
+        else if(mode==='deep'){goal.flow=L.flow*(1+.4*k);goal.hue=L.hue+.35*k;goal.filaments=L.filaments+.5*k;goal.shimmer=Math.min(1,L.shimmer+.2*k);goal.rim=L.rim+.3*k;}
       },
       pulse(strength){const s=typeof strength==='number'&&Number.isFinite(strength)?Math.min(2,Math.max(0,strength)):1;look.pulse=Math.min(1.4,look.pulse+s*.6);return look.pulse;},
       /** Smooths the look toward the goal and advances satellites, arcs and lights by dt seconds. */
       step(dt,motion){
         if(transient&&now()>=transient.until)self.expire();
         clock+=dt;fclock+=dt*look.flow;
+        // Animated frames ease toward the goal; a static frame (reduced motion, Animation off, hidden tab) has dt=0, so it
+        // snaps straight to the state's colours instead, and shows speaking at rest (amplitude pulsation is motion).
         const t=now(),ease=Math.min(1,dt*4.5);
-        for(const key in goal){look[key]+=(goal[key]-look[key])*(key==='ampl'?Math.min(1,dt*14):key==='ripple'?Math.min(1,dt*6):ease);}
+        if(motion)for(const key in goal){look[key]+=(goal[key]-look[key])*(key==='ampl'?Math.min(1,dt*14):key==='ripple'?Math.min(1,dt*6):ease);}
+        else{for(const key in goal)look[key]=goal[key];look.ampl=0;}
         look.pulse=motion?look.pulse*Math.exp(-dt*6):0; // static redraws never animate, so a pulse must not accumulate there
         const et=(t-errorAt)/ERROR_MS;look.red=et<1?Math.max(0,1-et*et)*(transient&&transient.mode==='error'?1:.4):0;
         const ft=(t-flashAt)/SUCCESS_MS;look.flash=ft<1?1-ft:0;look.flashR=ft<1?ft:0;
@@ -284,7 +305,7 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
       /** Replaces one source's satellites (or the kinds present when no source is named) and rebuilds the capped roster. */
       setSatellites(detail){
         if(!detail||typeof detail!=='object')return false;
-        const list=Array.isArray(detail.satellites)?detail.satellites:Array.isArray(detail)?detail:null;if(!list)return false;
+        const list=Array.isArray(detail.satellites)?detail.satellites:Array.isArray(detail)?detail:null;if(!list)return self.delta(detail);
         const clean=[];const seen=new Set();
         for(const raw of list){
           if(!raw||typeof raw!=='object')continue;
@@ -300,8 +321,27 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
         else{const kinds=new Set(clean.map(s=>s.kind));for(const [key,items] of sources)sources.set(key,items.filter(s=>!kinds.has(s.kind)));sources.set('*',[...(sources.get('*')||[]).filter(s=>!kinds.has(s.kind)),...clean]);}
         self.rebuild();return true;
       },
+      /** One bot changed (autoagents.js / bots.js deltas): upsert or remove 'bot:'+botId inside the 'bots' source, so the next
+       *  full list bots.js publishes replaces it. Unknown actions and malformed ids are ignored. */
+      delta(detail){
+        const botId=typeof detail.botId==='string'?detail.botId:'',action=typeof detail.action==='string'?detail.action:'';
+        if(!BOT_ID.test(botId)||!action)return false;
+        const id='bot:'+botId,items=(sources.get('bots')||[]).slice(),at=items.findIndex(s=>s.id===id),prev=at>=0?items[at]:null;
+        if(action==='delete'||action==='deleted'){if(!prev)return false;items.splice(at,1);}
+        else{
+          const status=STATUSES.includes(detail.status)?detail.status:prev?prev.status:'idle';
+          const name=typeof detail.name==='string'&&detail.name.trim()?detail.name.trim().slice(0,80):prev?prev.name:'bot '+botId.slice(0,8);
+          const group=prev?prev.group:'',entry={id,kind:'bot',name,status,busy:status==='running'||!!group,group};
+          if(prev)items[at]=entry;else items.push(entry);
+        }
+        sources.set('bots',items);self.rebuild();return true;
+      },
+      /** Drops every moon (account change); returns whether anything was orbiting. */
+      clearSatellites(){const had=satCount>0;sources.clear();self.rebuild();return had;},
       rebuild(){
-        const all=[];for(const items of sources.values())all.push(...items);
+        // An id published by two sources (a bot delta and the bots list, say) orbits once; a busy copy wins.
+        const byId=new Map();for(const items of sources.values())for(const s of items){const prev=byId.get(s.id);if(!prev||(!prev.busy&&s.busy))byId.set(s.id,s);}
+        const all=[...byId.values()];version++;
         all.sort((a,b)=>(b.busy-a.busy)||(KINDS[b.kind].weight-KINDS[a.kind].weight)||(a.id<b.id?-1:a.id>b.id?1:0));
         const n=Math.min(MAX_SATS,all.length);
         for(let i=0;i<n;i++){
@@ -362,7 +402,7 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
       },
       arcList(){const list=[];for(const a of arcs)if(a.active)list.push({from:a.a<0?'core':sats[a.a].id,to:sats[a.b].id,alpha:a.alpha,kind:a.a<0?'core':'group'});return list;},
       linkList(){const list=[];for(let i=0;i<satCount;i++)if(sats[i].busy)list.push({to:sats[i].id,steady:true});return list;},
-      getState(){return {mode:state.mode,source:state.source,intensity:state.intensity,amplitude:state.amplitude,transient:transient?transient.mode:null,pulse:look.pulse,ripple:look.ripple,red:look.red,flash:look.flash,energy:look.energy,swirl:look.swirl,hover:hover>=0?{id:sats[hover].id,name:sats[hover].name,kind:sats[hover].kind}:null,satellites:satCount,arcs:self.activeArcs(),claims:Object.keys(claims)};},
+      getState(){return {mode:state.mode,source:state.source,intensity:state.intensity,amplitude:state.amplitude,transient:transient?transient.mode:null,pulse:look.pulse,ripple:look.ripple,red:look.red,flash:look.flash,energy:look.energy,swirl:look.swirl,flow:look.flow,filaments:look.filaments,hue:look.hue,ampl:look.ampl,hover:hover>=0?{id:sats[hover].id,name:sats[hover].name,kind:sats[hover].kind}:null,satellites:satCount,arcs:self.activeArcs(),claims:Object.keys(claims)};},
       destroy(){if(transientTimer)clearTimeout(transientTimer);transientTimer=0;},
     };
     return self;
@@ -372,21 +412,26 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
     const onState=e=>{if(scene.setState(e&&e.detail))hooks.changed();};
     const onSatellites=e=>{if(scene.setSatellites(e&&e.detail))hooks.changed();};
     const onPulse=e=>{scene.pulse(e&&e.detail&&e.detail.strength);hooks.changed();};
+    const onAccount=()=>{if(scene.clearSatellites())hooks.changed();};
     const listen=typeof document.addEventListener==='function';
+    // autoagents.js and bots.js send bot deltas on window; an account change on window clears every moon.
+    const winListen=typeof window.addEventListener==='function'&&typeof window.removeEventListener==='function';
     if(listen){document.addEventListener('echo-orb-state',onState);document.addEventListener('echo-orb-satellites',onSatellites);document.addEventListener('echo-orb-pulse',onPulse);}
+    if(winListen){window.addEventListener('echo-orb-satellites',onSatellites);window.addEventListener('echo-account-changed',onAccount);}
     const api={
       setState(detail){const ok=scene.setState(detail);if(ok)hooks.changed();return ok;},
       getState(){return scene.getState();},
       pulse(strength){const v=scene.pulse(strength);hooks.changed();return v;},
       setSatellites(detail){const ok=scene.setSatellites(Array.isArray(detail)?{satellites:detail}:detail);if(ok)hooks.changed();return ok;},
       satellites(){return scene.snapshot();},arcs(){return scene.arcList();},links(){return scene.linkList();},
-      destroy(){if(listen){document.removeEventListener('echo-orb-state',onState);document.removeEventListener('echo-orb-satellites',onSatellites);document.removeEventListener('echo-orb-pulse',onPulse);}if(window.EchoOrb===api)window.EchoOrb=undefined;},
+      destroy(){if(listen){document.removeEventListener('echo-orb-state',onState);document.removeEventListener('echo-orb-satellites',onSatellites);document.removeEventListener('echo-orb-pulse',onPulse);}if(winListen){window.removeEventListener('echo-orb-satellites',onSatellites);window.removeEventListener('echo-account-changed',onAccount);}if(window.EchoOrb===api)window.EchoOrb=undefined;},
     };
     window.EchoOrb=api;return api;
   }
-  /** Hover tooltip and open-on-click for the moons; shared by both renderers. */
+  /** Hover tooltip and open-on-click for the moons; shared by both renderers. Touch has no hover, so the first tap on a moon
+   *  shows its name (for TIP_MS) and a second tap while the name shows opens it. */
   function pointerBridge(canvas,scene,redraw){
-    let tip=null;
+    let tip=null,pointerType='mouse',tipTimer=0;
     function ensureTip(){if(tip||!canvas.parentNode||typeof document.createElement!=='function')return;try{tip=document.createElement('div');tip.className='orb-tip';tip.hidden=true;tip.setAttribute('role','tooltip');canvas.parentNode.insertBefore(tip,canvas.nextSibling);}catch{tip=null;}}
     function show(){
       ensureTip();const i=scene.hover;
@@ -398,13 +443,20 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
       tip.style.left=s.sx+'px';tip.style.top=(s.sy-s.size*s.k*.7)+'px';tip.hidden=false;
     }
     function locate(event){const r=canvas.getBoundingClientRect();return [event.clientX-r.left,event.clientY-r.top];}
-    function move(event){const [x,y]=locate(event);const hit=scene.hit(x,y,14);if(hit!==scene.hover){scene.setHover(hit,now());show();redraw();}}
-    function leave(){if(scene.hover>=0){scene.setHover(-1,now());show();redraw();}}
-    function click(event){const [x,y]=locate(event);const hit=scene.hit(x,y,18);if(hit<0)return;scene.setHover(hit,now());show();const s=scene.sats[hit];dispatch('echo-orb-open',{id:s.id,kind:s.kind});}
-    canvas.addEventListener('pointermove',move);canvas.addEventListener('pointerleave',leave);canvas.addEventListener('click',click);
-    return {refresh(){if(scene.hover>=0)show();},destroy(){canvas.removeEventListener('pointermove',move);canvas.removeEventListener('pointerleave',leave);canvas.removeEventListener('click',click);if(tip&&tip.parentNode)tip.parentNode.removeChild(tip);tip=null;}};
+    function hide(){tipTimer=0;if(scene.hover>=0){scene.setHover(-1,now());show();redraw();}}
+    function down(event){pointerType=event&&typeof event.pointerType==='string'&&event.pointerType?event.pointerType:'mouse';}
+    function move(event){if(event&&event.pointerType){if(event.pointerType==='touch')return;pointerType=event.pointerType;}const [x,y]=locate(event);const hit=scene.hit(x,y,14);if(hit!==scene.hover){scene.setHover(hit,now());show();redraw();}}
+    function leave(event){if(((event&&event.pointerType)||pointerType)==='touch')return;if(tipTimer){clearTimeout(tipTimer);tipTimer=0;}hide();}
+    function click(event){
+      const touch=pointerType==='touch',[x,y]=locate(event),hit=scene.hit(x,y,touch?26:18);
+      if(hit<0){if(touch&&scene.hover>=0){if(tipTimer)clearTimeout(tipTimer);hide();}return;}
+      if(touch&&(scene.hover!==hit||now()>scene.tipUntil)){scene.setHover(hit,now());show();redraw();if(tipTimer)clearTimeout(tipTimer);tipTimer=setTimeout(hide,TIP_MS);return;}
+      scene.setHover(hit,now());show();const s=scene.sats[hit];dispatch('echo-orb-open',{id:s.id,kind:s.kind});
+    }
+    canvas.addEventListener('pointerdown',down);canvas.addEventListener('pointermove',move);canvas.addEventListener('pointerleave',leave);canvas.addEventListener('click',click);
+    return {refresh(){if(scene.hover>=0)show();},destroy(){if(tipTimer)clearTimeout(tipTimer);tipTimer=0;canvas.removeEventListener('pointerdown',down);canvas.removeEventListener('pointermove',move);canvas.removeEventListener('pointerleave',leave);canvas.removeEventListener('click',click);if(tip&&tip.parentNode)tip.parentNode.removeChild(tip);tip=null;}};
   }
-  function stageMode(canvas,mode){try{if(canvas.dataset)canvas.dataset.orbMode=mode;const stage=canvas.parentNode;if(stage&&stage.dataset)stage.dataset.orbMode=mode;}catch{}}
+  function stageMode(canvas,mode){try{if(canvas.dataset&&canvas.dataset.orbMode!==mode)canvas.dataset.orbMode=mode;const stage=canvas.parentNode;if(stage&&stage.dataset&&stage.dataset.orbMode!==mode)stage.dataset.orbMode=mode;}catch{}}
 
   // A full projected-particle renderer also serves browsers without WebGL.
   function mountCanvas(canvas,options){
@@ -506,8 +558,10 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
     function move(e){const r=canvas.getBoundingClientRect();target[0]=(e.clientX-r.left)/r.width*2-1;target[1]=1-(e.clientY-r.top)/r.height*2;if(!motion){pointer[0]=target[0];pointer[1]=target[1];draw();}}
     function leave(){target[0]=0;target[1]=0;}
     function reduced(){motion=!mq.matches;options.onMotionChange?.(motion);schedule();}
-    const changed=()=>{if(dead)return;stageMode(canvas,scene.state.mode);if(!motion){scene.step(0,false);draw();}};
-    scene.onMode=mode=>stageMode(canvas,mode);scene.onStatic=()=>{if(!motion&&!dead){scene.step(0,false);draw();}};
+    // Static frames redraw only when something they show changed (scene.version), never for an amplitude tick or a pulse.
+    let drawnVersion=-1;
+    const changed=()=>{if(dead)return;stageMode(canvas,scene.state.mode);if(!motion){scene.look.pulse=0;if(scene.version!==drawnVersion){drawnVersion=scene.version;scene.step(0,false);draw();}}};
+    scene.onMode=mode=>stageMode(canvas,mode);scene.onStatic=()=>{if(!motion&&!dead){drawnVersion=scene.version;scene.step(0,false);draw();}};
     const bridge=pointerBridge(canvas,scene,()=>{if(!motion&&!dead)draw();});
     const api=expose(scene,{changed});
     stageMode(canvas,'idle');
@@ -606,8 +660,10 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
     function reduce(){motion=!motionQuery.matches;options.onMotionChange?.(motion);schedule();}
     function contextLost(event){event.preventDefault();lost=true;if(frame)cancelAnimationFrame(frame);frame=0;}
     function contextRestored(){lost=false;resources.length=0;cloud=null;try{init();schedule();}catch{options.onFallback?.();}}
-    const changed=()=>{if(dead||lost)return;stageMode(canvas,scene.state.mode);if(!motion){scene.step(0,false);draw();}};
-    scene.onMode=mode=>stageMode(canvas,mode);scene.onStatic=()=>{if(!motion&&!dead&&!lost){scene.step(0,false);draw();}};
+    // Static frames redraw only when something they show changed (scene.version), never for an amplitude tick or a pulse.
+    let drawnVersion=-1;
+    const changed=()=>{if(dead||lost)return;stageMode(canvas,scene.state.mode);if(!motion){scene.look.pulse=0;if(scene.version!==drawnVersion){drawnVersion=scene.version;scene.step(0,false);draw();}}};
+    scene.onMode=mode=>stageMode(canvas,mode);scene.onStatic=()=>{if(!motion&&!dead&&!lost){drawnVersion=scene.version;scene.step(0,false);draw();}};
     const bridge=pointerBridge(canvas,scene,()=>{if(!motion&&!dead&&!lost)draw();});
     let api=null,observer;
     try{init();api=expose(scene,{changed});stageMode(canvas,'idle');observer=new ResizeObserver(resize);observer.observe(canvas);canvas.addEventListener('pointermove',move);canvas.addEventListener('pointerleave',leave);canvas.addEventListener('webglcontextlost',contextLost);canvas.addEventListener('webglcontextrestored',contextRestored);document.addEventListener('visibilitychange',schedule);motionQuery.addEventListener('change',reduce);schedule();}

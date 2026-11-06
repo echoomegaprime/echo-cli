@@ -52,8 +52,11 @@ interface Opts { health?: unknown; healthStatus?: number; bots?: Record<string, 
 function boot(opts: Opts = {}) {
   const created: Node[] = [], nav = new Node('nav'), sidebar = new Node('aside'), body = new Node('body');
   const documentEvents: Record<string, ((e: any) => unknown)[]> = {}, windowEvents: Record<string, ((e: any) => unknown)[]> = {};
+  const dispatched: { type: string; detail: any }[] = [];
+  class CustomEvent { type: string; detail: any; constructor(type: string, init: { detail: any }) { this.type = type; this.detail = init.detail; } }
   const document: any = { hidden: false, body, querySelector: (s: string) => s === 'nav[aria-label="Workspace"]' ? nav : s === '#sidebar' ? sidebar : null,
-    createElement: (tag: string) => { const n = new Node(tag); created.push(n); return n; }, addEventListener: (name: string, fn: (e: any) => unknown) => (documentEvents[name] ??= []).push(fn) };
+    createElement: (tag: string) => { const n = new Node(tag); created.push(n); return n; }, addEventListener: (name: string, fn: (e: any) => unknown) => (documentEvents[name] ??= []).push(fn),
+    dispatchEvent: (event: CustomEvent) => { dispatched.push({ type: event.type, detail: event.detail }); for (const fn of documentEvents[event.type] ?? []) void fn(event); return true; } };
   const calls: { url: string; method: string; body?: unknown }[] = [];
   let bots = (opts.bots ?? [bot(), bot({ bot_id: BOT2, name: 'Docs bot', agent: 'docs', mode: 'personal', status: 'idle', schedule: null, plugins: [], spent_today_usd: 0, daily_cost_cap_usd: 0.5, inbox_depth: 0, last_run_at: undefined, last_error: null })]).map(b => ({ ...b }));
   let messagePolls = 0, groupPolls = 0;
@@ -84,19 +87,21 @@ function boot(opts: Opts = {}) {
   const storage: Record<string, string> = opts.stored ? { 'echo-prime-bot-v1': opts.stored } : {};
   const localStorage = { getItem: vi.fn((k: string) => storage[k] ?? null), setItem: vi.fn((k: string, v: string) => { storage[k] = v; }), removeItem: vi.fn((k: string) => { delete storage[k]; }) };
   const window: Record<string, unknown> = { addEventListener: (name: string, fn: (e: any) => unknown) => (windowEvents[name] ??= []).push(fn), ...(opts.workspace ? { EchoPrimeWorkspace: opts.workspace } : {}), ...(opts.agentsView ? { EchoPrimeAgents: opts.agentsView } : {}) };
-  const context = { window, document, fetch, localStorage, setTimeout, clearTimeout, Date, AbortController, Error, Map, Set, Number, Math, String, Array, Object, Promise, JSON, encodeURIComponent, console: { debug: vi.fn(), log: console.log } };
+  const context = { window, document, CustomEvent, fetch, localStorage, setTimeout, clearTimeout, Date, AbortController, Error, Map, Set, Number, Math, String, Array, Object, Promise, JSON, encodeURIComponent, console: { debug: vi.fn(), log: console.log } };
   runInNewContext(source, context);
   const api = window.EchoPrimeBots as { ready: Promise<any>; refresh(): Promise<any>; open(): Promise<void>; close(): void; admission(): string; state(): any };
   const navButton = nav.children[0] ?? sidebar.children[0];
   const dialog = () => created.find(n => n.attributes.id === 'bots-dialog')!;
   const count = (url: string) => calls.filter(c => c.url === url).length;
   const fire = (name: string) => { for (const fn of windowEvents[name] ?? []) fn({ type: name }); };
+  const documentFire = async (name: string, detail: any) => { for (const fn of documentEvents[name] ?? []) await fn({ type: name, detail }); };
+  const orbEvents = () => dispatched.filter(e => e.type === 'echo-orb-satellites').map(e => e.detail);
   const visibility = () => { for (const fn of documentEvents.visibilitychange ?? []) fn({}); };
   const status = () => created.find(n => n.attributes.id === 'bots-status')!.textContent;
   const noteLine = () => created.find(n => n.attributes.id === 'bots-note')!.textContent;
   const cards = () => all(dialog()).filter(n => n.className.startsWith('bots-card ') || n.className === 'bots-card');
   const pane = () => created.find(n => n.attributes.id === 'bots-pane')!;
-  return { api, navButton, dialog, calls, count, fire, visibility, status, noteLine, cards, pane, document, localStorage, ws: opts.workspace, messagePolls: () => messagePolls, groupPolls: () => groupPolls, created };
+  return { api, navButton, dialog, calls, count, fire, documentFire, orbEvents, visibility, status, noteLine, cards, pane, document, localStorage, ws: opts.workspace, messagePolls: () => messagePolls, groupPolls: () => groupPolls, created };
 }
 const settle = async () => { for (let i = 0; i < 6; i++) await vi.advanceTimersByTimeAsync(0); };
 async function opened(opts: Opts = {}) { const s = boot(opts); await s.api.ready; await s.api.open(); await settle(); return s; }
@@ -319,5 +324,56 @@ describe('group chat', () => {
     await vi.advanceTimersByTimeAsync(10000); expect(s.groupPolls()).toBe(1);
     const shown = text(s.pane());
     expect(shown).toContain('no longer watched (it may still be running)'); expect(shown).toContain('Polling stopped by you; the runs may continue up to their caps.');
+  });
+});
+
+describe('living orb satellites', () => {
+  it('publishes owner bots with their identity, display fields and status after loading the list', async () => {
+    const s = await opened();
+    expect(s.orbEvents().at(-1)).toEqual({ source: 'bots', satellites: [
+      { id: `bot:${BOT}`, kind: 'bot', name: 'Release scout', status: 'paused', busy: false, group: undefined },
+      { id: `bot:${BOT2}`, kind: 'bot', name: 'Docs bot', status: 'idle', busy: false, group: undefined },
+    ] });
+  });
+  it('marks running bots busy while paused bots remain quiet', async () => {
+    const s = await opened({ bots: [bot({ status: 'running' }), bot({ bot_id: BOT2, name: 'Paused bot', status: 'paused' })] });
+    expect(s.orbEvents().at(-1).satellites.map((moon: any) => ({ id: moon.id, busy: moon.busy }))).toEqual([
+      { id: `bot:${BOT}`, busy: true }, { id: `bot:${BOT2}`, busy: false },
+    ]);
+  });
+  it('groups live participants as busy and removes their group when the group finishes', async () => {
+    const s = await opened({ group: n => n === 1 ? { group_id: GROUP, status: 'running', messages: [] } : { group_id: GROUP, status: 'done', messages: [], summary: 'done' } });
+    await find(s.dialog(), 'Group chat')!.fire('click'); await settle();
+    for (const box of inputs(s.pane()).filter(n => n.attributes.type === 'checkbox')) box.checked = true;
+    byPlaceholder(s.pane(), 'Group name').value = 'Orb group'; byPlaceholder(s.pane(), 'Prompt for the group').value = 'Work together';
+    await find(s.pane(), 'Start group chat')!.fire('click'); await settle();
+    expect(s.orbEvents().at(-1).satellites.every((moon: any) => moon.busy && moon.group === GROUP)).toBe(true);
+    await vi.advanceTimersByTimeAsync(3100);
+    expect(s.orbEvents().at(-1).satellites.every((moon: any) => moon.group === undefined)).toBe(true);
+  });
+  it('republishes pause, resume and delete results, removing the deleted moon', async () => {
+    const s = await opened(); const before = s.orbEvents().length;
+    await find(s.cards()[1], 'Pause')!.fire('click'); await settle();
+    expect(s.orbEvents().at(-1).satellites.find((moon: any) => moon.id === `bot:${BOT2}`).status).toBe('paused');
+    await find(s.cards()[1], 'Resume')!.fire('click'); await settle();
+    expect(s.orbEvents().at(-1).satellites.find((moon: any) => moon.id === `bot:${BOT2}`).status).toBe('idle');
+    await find(s.cards()[0], 'Delete')!.fire('click'); await find(s.cards()[0], 'Confirm delete')!.fire('click'); await settle();
+    expect(s.orbEvents().length).toBe(before + 3); expect(s.orbEvents().at(-1).satellites.map((moon: any) => moon.id)).toEqual([`bot:${BOT2}`]);
+  });
+  it('clears bot satellites on account changes', async () => {
+    const s = await opened(); s.fire('echo-account-changed'); await settle();
+    expect(s.orbEvents().at(-1)).toEqual({ source: 'bots', satellites: [] });
+  });
+  it.each([['signed out', anonymous()], ['member', member()]])('%s sessions fetch nothing and only publish empty lists', async (_label, session) => {
+    const s = boot({ workspace: workspaceStub(session) }); await s.api.ready; s.fire('echo-account-changed'); await settle();
+    expect(s.calls).toHaveLength(0); expect(s.orbEvents().length).toBeGreaterThan(0); expect(s.orbEvents().every((event: any) => event.source === 'bots' && event.satellites.length === 0)).toBe(true);
+  });
+  it('opens and selects a valid bot moon while ignoring other kinds and malformed ids', async () => {
+    const s = boot({ workspace: workspaceStub(owner()) }); await s.api.ready;
+    await s.documentFire('echo-orb-open', { id: `bot:${BOT2}`, kind: 'agent' });
+    await s.documentFire('echo-orb-open', { id: 'bot:not-an-id', kind: 'bot' });
+    expect(s.dialog()).toBeUndefined();
+    await s.documentFire('echo-orb-open', { id: `bot:${BOT2}`, kind: 'bot' }); await settle();
+    expect(s.dialog().open).toBe(true); expect(s.api.state()).toMatchObject({ selected: BOT2, pane: 'chat' });
   });
 });
