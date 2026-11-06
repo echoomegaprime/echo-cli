@@ -106,7 +106,8 @@ function sidebarSpec(extra:{inboxExtra?:Spec[];loose?:Spec[]}={}):Spec{
   ['div',{id:'workspace-navigation',hidden:''},
    ['button',{class:'nav-item','data-workspace-view':'projects'},'Projects'],['button',{class:'nav-item','data-workspace-view':'library'},'Library'],['button',{class:'nav-item',id:'workspace-open-plugins'},'Plugins & memory'],
    ['button',{class:'nav-item','data-workspace-view':'operations','data-owner-only':''},'SDK'],['button',{class:'nav-item','data-workspace-view':'operations','data-owner-only':''},'Vault'],['button',{class:'nav-item','data-workspace-view':'library'},'Code review'],
-   ['button',{class:'nav-item','data-view':'logs','data-owner-only':''},'Logs & debugging'],['button',{class:'nav-item','data-workspace-view':'voice'},'Voice & personality'],...(extra.inboxExtra||[])],
+   ['button',{class:'nav-item','data-view':'logs','data-owner-only':''},'Logs & debugging'],['button',{class:'nav-item','data-workspace-view':'voice'},'Voice & personality'],
+   ['button',{class:'nav-item','data-workspace-view':'members',id:'workspace-members','data-owner-only':'',hidden:''},'Members'],...(extra.inboxExtra||[])],
   ['button',{class:'nav-item','data-workspace-view':'account',id:'workspace-account'},'Account'],
   ['button',{class:'nav-item',id:'open-appearance','data-open':'appearance'},'Appearance'],
   ...(extra.loose||[]),
@@ -232,6 +233,23 @@ describe('gating: two owners of visibility that never overlap',()=>{
   h.doc.querySelector('.sidebar-bottom').before(journal);h.nav.sync();
   expect(h.groupOf(journal)).toBe('operate');expect(h.group('operate').items.filter((i:any)=>!i.duplicate).map((i:any)=>i.id)).toEqual(['sdk','vault','logs','journal']);
  });
+ it('places owner-only Members in the bottom Account group between Account and Appearance, gated by the Workspace and the owner sweep',()=>{
+  const h=boot();
+  const members=h.doc.querySelector('#workspace-members');
+  expect(h.groupOf(members)).toBe('bottom');
+  expect(h.group('bottom').items.map((i:any)=>i.id)).toEqual(['account','members','appearance']);
+  expect(h.group('bottom').items.find((i:any)=>i.id==='members')).toMatchObject({workspace:true,ownerOnly:true,hidden:true});
+  expect(members.children[0].tagName).toBe('SVG');expect(members.children[0].children[0].attrs.get('href')).toBe('#i-members');
+  expect(members.parentNode.hidden).toBe(true);// no Workspace connected: the slot gate hides it
+  h.inbox.hidden=false;h.nav.sync();
+  expect(members.parentNode.hidden).toBe(false);expect(members.hidden).toBe(true);// still hidden until the owner sweep shows it
+  expect(h.group('bottom').items.find((i:any)=>i.id==='members').hidden).toBe(true);
+  members.hidden=false;h.nav.sync();// workspace.js owner sweep for the primary owner
+  expect(h.group('bottom').items.find((i:any)=>i.id==='members').hidden).toBe(false);
+  for(const node of h.doc.querySelectorAll('[data-owner-only]'))node.hidden=true;h.nav.sync();// the member sweep
+  expect(h.group('bottom').items.find((i:any)=>i.id==='members').hidden).toBe(true);
+  expect(h.group('bottom').items.find((i:any)=>i.id==='account').hidden).toBe(false);
+ });
  it('applies the current owner rule once to a late-registered owner-only button',()=>{
   const member=boot({workspace:{ready:Promise.resolve(true),enabled:true,session:{ownerAccess:false}}});
   expect(member.nav.register({id:'open-fleet',label:'Fleet nodes',ownerOnly:true}).hidden).toBe(true);
@@ -345,7 +363,11 @@ describe('collapse, keyboard and aria',()=>{
 describe('shipped markup and delivery',()=>{
  it('index.html keeps every hook nav.js adopts and loads nav.js after the other sidebar modules',()=>{
   const html=readFileSync(new URL('../ui/echo-prime/index.html',import.meta.url),'utf8');
-  for(const hook of ['id="prime-nav"','id="workspace-navigation"','id="open-steward"','id="workspace-open-esh"','id="workspace-account"','id="open-appearance"','id="workspace-open-plugins"','data-view="conversation"','data-view="studio"','data-view="systems"','data-prime-view="projects"','data-prime-view="library"','data-prime-view="sdk"','data-workspace-view="voice"','data-workspace-view="account"','class="sidebar-bottom"','id="scrim"'])expect(html).toContain(hook);
+  for(const hook of ['id="prime-nav"','id="workspace-navigation"','id="open-steward"','id="workspace-open-esh"','id="workspace-account"','id="open-appearance"','id="workspace-open-plugins"','data-view="conversation"','data-view="studio"','data-view="systems"','data-prime-view="projects"','data-prime-view="library"','data-prime-view="sdk"','data-workspace-view="voice"','data-workspace-view="account"','data-workspace-view="members"','id="workspace-members"','class="sidebar-bottom"','id="scrim"'])expect(html).toContain(hook);
+  // Members lives inside the Workspace inbox (hidden until a Workspace connects), owner-only and hidden until the owner sweep.
+  const inbox=/<div id="workspace-navigation" hidden>(.*?)<\/div>/.exec(html)?.[1]??'';
+  expect(inbox).toMatch(/<button class="nav-item" data-workspace-view="members" id="workspace-members" data-owner-only hidden>(?:<svg>.*?<\/svg>)?Members<\/button>/);
+  expect(html).toContain('id="i-members"');
   expect(html).toContain('href="nav.css"');expect(html).toContain('<script src="nav.js"></script>');
   expect(html.indexOf('src="logs.js"')).toBeLessThan(html.indexOf('src="nav.js"'));
   expect(html).toContain('id="i-echo-mark"');expect(html).toContain('class="wordmark-text" data-text="ECHO PRIME"');

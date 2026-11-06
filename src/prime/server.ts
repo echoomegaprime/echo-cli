@@ -260,6 +260,12 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     // Media auto-router (spends nothing) and Enhance prompt (rate-limited per Prime session: the cookie hash, never the cookie).
     else if(path==='/api/prime/media/route')send(200,await hub.mediaRoute(data,abort.signal));
     else if(path==='/api/prime/enhance')send(200,await hub.enhance(data,createHash('sha256').update(supplied).digest('hex'),abort.signal));
+    // Members view (owner-only, below requireOwner): one account's upload count and bytes, from its metadata only.
+    else if(path==='/api/prime/members/uploads'){
+     const keys=Object.keys(data);
+     if(keys.length!==1||keys[0]!=='uid'||typeof data.uid!=='string'||!/^[A-Za-z0-9_.:@+-]{1,200}$/.test(data.uid))throw new WorkspaceHttpError(400,'Member uploads take exactly one account uid');
+     send(200,uploadStore?await uploadStore.usage(data.uid):{configured:false,count:0,bytes:0});
+    }
     else send(404,{error:'Unknown route'});
    }catch(e){if(res.headersSent)res.destroy();else send(e instanceof WorkspaceHttpError?e.status:400,{error:redact(e instanceof Error?e.message:'Request failed').slice(0,600)});}
    finally{res.removeListener('close',disconnected);if(mediaFileGet)mediaActive--;else active--;}

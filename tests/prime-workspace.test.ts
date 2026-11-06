@@ -215,6 +215,8 @@ async function ownerFixture(authEnabled=true){
   if(url.pathname==='/api/auth/logout'){revoked.add(account);res.setHeader('set-cookie','echo_workspace_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0');json(200,{ok:true});return;}
   if(url.pathname==='/api/auth/accounts'){json(200,{accounts:[{uid:'owner',role:'owner',status:'approved'}]});return;}
   if(url.pathname==='/api/auth/decide'){json(200,{ok:true});return;}
+  if(url.pathname==='/api/auth/invites'){json(200,{invites:[]});return;}
+  if(['/api/auth/usage','/api/auth/invite','/api/auth/invite/revoke'].includes(url.pathname)){for await(const _chunk of req){/* drain */}json(200,{ok:true});return;}
   if(url.pathname==='/api/state'){if(behavior.delayMs)await new Promise(resolve=>setTimeout(resolve,behavior.delayMs));json(200,{auth_enabled:true,tenant_isolation:account!==behavior.legacyOwnerUid,user:{uid:behavior.stateUid||account},csrf:behavior.stateCsrf||`csrf-${account}`,chats:[{id:`chat-${account}`,title:`Private ${account}`}],projects:[],library:[]});return;}
   if(['/api/action','/api/sync','/api/plugins'].includes(url.pathname)){if(behavior.actionDelayMs)await new Promise(resolve=>setTimeout(resolve,behavior.actionDelayMs));json(200,{ok:true});return;}
   if(['/api/voice/start','/api/voice/next','/api/voice/transcribe','/api/review','/api/compact'].includes(url.pathname)){
@@ -442,6 +444,20 @@ describe('canonical Workspace boundary in the existing Prime host',()=>{
   expect((await fetch(owner.url+'/api/workspace/auth/decide',{method:'POST',headers:headers(owner),body:JSON.stringify({uid:'member',decision:'approve'})})).status).toBe(200);
   expect(upstream.calls.filter(c=>c.path==='/api/auth/accounts')).toHaveLength(1);
   expect(upstream.calls.filter(c=>c.path==='/api/auth/decide')).toHaveLength(1);
+ });
+ it('restricts the member-management routes (usage, invites, invite, revoke) to the currently approved primary owner',async()=>{
+  const upstream=await ownerFixture(),root=await prime(upstream.baseUrl);
+  const owner=await login(root,'owner'),member=await login(root,'member'),admin=await login(root,'admin');
+  const routes:Array<[string,string,unknown]>=[['GET','invites',undefined],['POST','usage',{uid:'member'}],['POST','invite',{email:'new@example.test'}],['POST','invite/revoke',{id:'invite-id'}]];
+  const call=(p:typeof owner,[method,path,body]:[string,string,unknown])=>fetch(p.url+'/api/workspace/auth/'+path,{method,headers:headers(p),...(body===undefined?{}:{body:JSON.stringify(body)})});
+  for(const p of [member,admin])for(const route of routes)expect((await call(p,route)).status,route[1]).toBe(403);
+  for(const path of ['/api/auth/invites','/api/auth/usage','/api/auth/invite','/api/auth/invite/revoke'])expect(upstream.calls.filter(c=>c.path===path)).toHaveLength(0);
+  for(const route of routes)expect((await call(owner,route)).status,route[1]).toBe(200);
+  for(const path of ['/api/auth/invites','/api/auth/usage','/api/auth/invite','/api/auth/invite/revoke'])expect(upstream.calls.filter(c=>c.path===path),path).toHaveLength(1);
+  // Owner writes still need the current session CSRF, and the invite list takes no query.
+  expect((await fetch(owner.url+'/api/workspace/auth/usage',{method:'POST',headers:headers(owner,'csrf-member'),body:JSON.stringify({uid:'member'})})).status).toBe(403);
+  expect((await fetch(owner.url+'/api/workspace/auth/invites?x=1',{headers:headers(owner)})).status).toBe(400);
+  expect(upstream.calls.filter(c=>['/api/auth/usage','/api/auth/invites'].includes(c.path))).toHaveLength(2);
  });
  it('rejects invalid UTF-8 request bytes before any upstream write',async()=>{
   const upstream=await ownerFixture(),p=await login(await prime(upstream.baseUrl),'owner');

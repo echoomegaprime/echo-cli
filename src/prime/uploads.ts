@@ -1336,6 +1336,26 @@ export class UploadStore {
   return metas.slice(0,500);
  }
 
+ /** Owner Members view: how many uploads one account holds and their total bytes. Reads only each upload's own
+  * meta.json through the same account-folder derivation as every other read, never creates the folder, and returns
+  * no names, ids, tags or contents. Artifacts and in-flight temp folders are not uploads. */
+ async usage(owner:string):Promise<{count:number;bytes:number}>{
+  const acctDir=this.accountRoot(owner);
+  let entries:string[];
+  try{entries=await readdir(acctDir);}
+  catch{return {count:0,bytes:0};}
+  let count=0,bytes=0;
+  for(const entry of entries){
+   if(!UPLOAD_ID_RE.test(entry))continue;
+   try{
+    const meta=await this.readMeta(owner,entry);
+    count++;
+    if(Number.isSafeInteger(meta.bytes)&&meta.bytes>0)bytes+=meta.bytes;
+   }catch{/* skip removed/in-flight */}
+  }
+  return {count,bytes};
+ }
+
  async update(owner:string,id:string,patch:unknown):Promise<UploadMeta>{
   if(!patch||typeof patch!=='object'||Array.isArray(patch))throw new UploadError(400,'Invalid upload update');
   const data=patch as Record<string,unknown>;
