@@ -1,6 +1,6 @@
 # Prime voice route: Echo's own voice on every reply path
 
-Status: built and gated on ANVIL, 2026-11-06, branch `voiceroute` (merged with `parity` 44b8a89, the PR #8 head).
+Status: built and gated on ANVIL, 2026-11-05, branch `voiceroute` (merged with `parity` 44b8a89, the PR #8 head).
 Not deployed. Production Prime needs the `voice` section below before the route turns on.
 
 Commander, 2026-11-05: **"It should speak them when spoken replies is selected."**
