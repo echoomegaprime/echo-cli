@@ -8,7 +8,12 @@ import {randomUUID} from 'node:crypto';
 // Workspace transport and the Prime uploads fetch are synthetic, so every request the view makes is recorded and every
 // body is exact. Members and anonymous visitors must never reach a members route at all.
 class Node {
- textContent='';value='';className='';hidden=false;disabled=false;checked=false;open=false;isConnected=true;
+ textContent='';className='';hidden=false;disabled=false;checked=false;open=false;isConnected=true;
+ // A <select> reports a value only when one of its options carries it, as a browser does (a select whose chosen option
+ // is missing shows blank and reads ''). Every other node keeps what was set.
+ #value='';
+ get value():string{return this.tagName!=='SELECT'||this.children.some(c=>c.tagName==='OPTION'&&c.value===this.#value)?this.#value:'';}
+ set value(next:string){this.#value=String(next);}
  tagName:string;dataset:Record<string,string>={};attributes:Record<string,string>={};children:Node[]=[];parent:Node|null=null;
  events:Record<string,((event:any)=>unknown)[]>={};selected=0;
  classList={add:vi.fn(),remove:vi.fn(),toggle:vi.fn(),contains:()=>false};
@@ -190,6 +195,49 @@ describe('Members view (primary owner)',()=>{
   h.change(ownerSession);await h.ws.open('members');await flush();
   expect(h.picker().value).toBe('');expect(h.text()).toContain('Choose a member above');expect(h.calls('/auth/usage')).toHaveLength(1);
  });
+ it('keeps the acted-on member selected and in the drop-down when the status filter no longer matches them',async()=>{
+  let banned=false;
+  const h=membersHarness({request:(path,body)=>{
+   if(path==='/auth/decide'){banned=body.decision==='ban';return undefined;}
+   if(path==='/auth/accounts'&&banned){const value=accounts();return {...value,accounts:value.accounts.map(item=>item.uid==='m-approved'?{...item,status:'banned',banned_at:1730000800}:item)};}
+   return undefined;
+  }});
+  await h.open();await h.find('Approved')!.fire('click');
+  expect(h.choices()).toEqual(['','m-approved']);
+  await h.choose('m-approved');await h.find('Ban')!.fire('click');await h.find('Confirm')!.fire('click');await flush();
+  expect(h.calls('/auth/decide').map(c=>c[1])).toEqual([{uid:'m-approved',decision:'ban'}]);expect(h.calls('/auth/accounts')).toHaveLength(2);
+  expect(h.find('Approved')!.attributes['aria-pressed']).toBe('true');// the filter is kept, and no longer matches the member
+  expect(h.choices()).toEqual(['','m-approved']);expect(h.picker().value).toBe('m-approved');
+  expect(text(h.picker())).toContain('approved@example.test · Banned');
+  expect(h.find('Unban')).toBeDefined();expect(h.text()).toContain('Banned approved@example.test. Signed out 2 sessions.');
+ });
+ it('discards a late usage response for a member who is no longer selected: it never renders or replaces the current usage',async()=>{
+  const late=deferred();
+  const h=membersHarness({request:(path,body)=>path==='/auth/usage'&&body.uid==='m-pending'?late.promise:undefined});
+  await h.open();await h.choose('m-pending');
+  await vi.waitFor(()=>expect(h.calls('/auth/usage')).toHaveLength(1));
+  await h.choose('m-approved');await vi.waitFor(()=>expect(h.text()).toContain('Chats 3'));
+  const stale=usage('m-pending');late.resolve({...stale,workspace:{...stale.workspace,chats:777,messages_sent:778}});await flush();
+  expect(h.text()).not.toContain('Chats 777');expect(h.text()).toContain('Chats 3');
+  // Cancel re-renders the selected member from the usage already read for them: no second read, nothing from the late one.
+  await h.find('Ban')!.fire('click');await h.find('Cancel')!.fire('click');await flush();
+  expect(h.text()).toContain('Chats 3');expect(h.text()).not.toContain('Chats 777');expect(h.text()).not.toContain('Messages sent 778');
+  expect(h.calls('/auth/usage').map(c=>c[1])).toEqual([{uid:'m-pending'},{uid:'m-approved'}]);
+ });
+ it('forgets an action\'s reselection when the account changes before the reloaded list reads it',async()=>{
+  // A session readback naming another account lands in the same microtask turn as the Ban receipt: after the receipt is
+  // read and before the reloaded Members view takes over the selection and result line the action left for it.
+  let h!:ReturnType<typeof membersHarness>,changed=false;
+  const receipt={user:row('m-approved','banned'),get revoked(){if(!changed){changed=true;queueMicrotask(()=>h.change());}return 2;}};
+  h=membersHarness({request:path=>path==='/auth/decide'?receipt:undefined});
+  await h.open();await h.choose('m-approved');await flush();
+  await h.find('Ban')!.fire('click');await h.find('Confirm')!.fire('click');await flush();
+  expect(changed).toBe(true);expect(h.status.textContent).toBe('Primary owner admission required.');
+  const reads=h.calls('/auth/usage').length;
+  h.change(ownerSession);await h.ws.open('members');await flush();
+  expect(h.picker().value).toBe('');expect(h.text()).toContain('Choose a member above');
+  expect(h.text()).not.toContain('Banned approved@example.test');expect(h.calls('/auth/usage')).toHaveLength(reads);
+ });
 });
 
 describe('Members is owner-only end to end',()=>{
@@ -242,6 +290,24 @@ describe('Account view',()=>{
   await h.open('account');await h.find('Manage members')!.fire('click');await flush();
   expect(h.get('#workspace-panel-title').textContent).toBe('Members');expect(h.picker()).toBeDefined();
  });
+ it('keeps Approve and Deny on every account that is not banned, so a mistaken Deny is undone here with the exact body',async()=>{
+  const h=membersHarness();await h.open('account');
+  const sectionFor=(email:string)=>h.content.children.find(n=>n.tagName==='ARTICLE'&&n.children[0]?.tagName==='H3'&&text(n.children[0])===email);
+  for(const email of ['pending@example.test','approved@example.test','denied@example.test'])expect(sectionFor(email),email).toBeDefined();
+  expect(sectionFor('banned@example.test')).toBeUndefined();
+  const decide=async(email:string,label:string)=>{
+   const node=descendants(sectionFor(email)!).find(n=>n.tagName==='BUTTON'&&text(n)===label);expect(node,`${label} for ${email}`).toBeDefined();
+   await node!.fire('click');await h.find('Confirm this account decision')!.fire('click');await flush();
+  };
+  await decide('denied@example.test','Approve account');
+  await decide('approved@example.test','Deny account');
+  expect(h.calls('/auth/decide').map(c=>c[1])).toEqual([{uid:'m-denied',decision:'approve'},{uid:'m-approved',decision:'deny'}]);
+ });
+ it('drops banned accounts before the 200-account limit, so an older pending account is still offered',async()=>{
+  const many={accounts:[...Array.from({length:200},(_,i)=>row(`m-banned${i}`,'banned')),row('m-pending','pending')],counts:{pending:1,approved:0,denied:0,banned:200},truncated:false};
+  const h=membersHarness({request:path=>path==='/auth/accounts'?many:undefined});await h.open('account');
+  expect(h.text()).toContain('pending@example.test');expect(h.find('Approve account')).toBeDefined();expect(h.text()).not.toContain('banned0@example.test');
+ });
 });
 
 describe('Invites',()=>{
@@ -270,17 +336,42 @@ describe('Invites',()=>{
   expect(h.text()).toContain('An active invite for old@example.test already exists');
   expect(h.all().find(n=>n.attributes['aria-label']==='Invite link')!.value).toBe('https://echoomegaprime.com/#invite');
  });
- it('offers Open member for an email that already has an account, and opens it',async()=>{
-  const h=membersHarness({request:path=>path==='/auth/invite'?Promise.reject(new Error('That email already has an account (approved).')):undefined});await h.open();
-  const email=h.all().find(n=>n.tagName==='INPUT'&&n.attributes.type==='email')!;email.value='Approved@Example.test';
-  await h.find('Create invite')!.fire('click');await flush();
+ // The Workspace transport puts the HTTP status (and a well-formed uid) on the error, exactly as workspace-client.js does.
+ const refusal=(message:string,extra:Record<string,unknown>)=>Object.assign(new Error(message),extra);
+ const inviteFor=async(h:ReturnType<typeof membersHarness>,address:string)=>{const email=h.all().find(n=>n.tagName==='INPUT'&&n.attributes.type==='email')!;email.value=address;await h.find('Create invite')!.fire('click');await flush();};
+ it('offers Open member for an email that already has an account (409 with its uid), and opens it',async()=>{
+  const h=membersHarness({request:path=>path==='/auth/invite'?Promise.reject(refusal('That email already has an account (approved).',{status:409,uid:'m-approved'})):undefined});await h.open();
+  await inviteFor(h,'Approved@Example.test');
   expect(h.text()).toContain('That email already has an account (approved).');
   await h.find('Open member')!.fire('click');await flush();
   expect(h.picker().value).toBe('m-approved');
   await vi.waitFor(()=>expect(h.calls('/auth/usage').map(c=>c[1])).toEqual([{uid:'m-approved'}]));
  });
+ it('opens the account the 409 names even when its listed email differs from the typed one',async()=>{
+  // The Workspace compares casefolded emails: "Straße" casefolds to "strasse", which toLowerCase() never produces.
+  const listed=()=>{const value=accounts();value.accounts.push(row('m-strasse','approved',{email:'strasse@example.test'}));return value;};
+  const h=membersHarness({request:path=>path==='/auth/accounts'?listed():path==='/auth/invite'?Promise.reject(refusal('That email already has an account (approved).',{status:409,uid:'m-strasse'})):undefined});await h.open();
+  await inviteFor(h,'Straße@example.test');
+  expect(h.find('Open member')).toBeDefined();
+  await h.find('Open member')!.fire('click');await flush();
+  expect(h.picker().value).toBe('m-strasse');expect(h.text()).toContain('strasse@example.test');
+ });
+ it.each([
+  ['a 502',()=>refusal('Workspace unavailable.',{status:502})],
+  ['a transport failure',()=>new TypeError('Failed to fetch')],
+ ] as const)('offers no Open member after %s, even for an email that has an account',async(_name,failure)=>{
+  const h=membersHarness({request:path=>path==='/auth/invite'?Promise.reject(failure()):undefined});await h.open();
+  await inviteFor(h,'approved@example.test');
+  expect(h.status.textContent).toBe(failure().message);expect(h.text()).toContain(failure().message);expect(h.find('Open member')).toBeUndefined();
+ });
+ it('falls back to the listed email for a 409 without a uid: a banned email opens the banned member',async()=>{
+  const h=membersHarness({request:path=>path==='/auth/invite'?Promise.reject(refusal('That email is banned. Unban the account first.',{status:409})):undefined});await h.open();
+  await inviteFor(h,'BANNED@example.test');
+  await h.find('Open member')!.fire('click');await flush();
+  expect(h.picker().value).toBe('m-banned');expect(h.find('Unban')).toBeDefined();
+ });
  it('refuses an invalid email locally and shows a banned-email refusal without an Open member button',async()=>{
-  const h=membersHarness({request:path=>path==='/auth/invite'?Promise.reject(new Error('That email is banned. Unban the account first.')):undefined});await h.open();
+  const h=membersHarness({request:path=>path==='/auth/invite'?Promise.reject(refusal('That email is banned. Unban the account first.',{status:409})):undefined});await h.open();
   const email=h.all().find(n=>n.tagName==='INPUT'&&n.attributes.type==='email')!;email.value='not-an-email';
   await h.find('Create invite')!.fire('click');
   expect(h.calls('/auth/invite')).toHaveLength(0);expect(h.status.textContent).toBe('Enter a valid email address.');
@@ -294,6 +385,33 @@ describe('Invites',()=>{
   await h.find('Confirm')!.fire('click');await flush();
   expect(h.calls('/auth/invite/revoke').map(c=>c[1])).toEqual([{id:'inv-1'}]);
   expect(h.text()).toContain('Invite for old@example.test revoked.');expect(h.calls('/auth/accounts')).toHaveLength(2);
+ });
+});
+
+describe('Workspace transport refusals (the shipped workspace-client.js)',()=>{
+ // The real transport against a synthetic Prime: an approved owner session, then one refused POST /auth/invite.
+ async function refused(status:number,payload:Record<string,unknown>){
+  const json=(value:unknown,code=200)=>new Response(JSON.stringify(value),{status:code,headers:{'content-type':'application/json'}});
+  const fetch=vi.fn(async(url:string)=>url==='/api/session'?json(ownerSession()):json(payload,status));
+  const window:any={};
+  runInNewContext(source('workspace-client.js'),{window,TextDecoder,TextEncoder,AbortController,Uint8Array});
+  const client=new window.EchoPrimeWorkspaceTransport({fetch});
+  const error=await client.request('/auth/invite',{email:'approved@example.test'}).then(()=>null,(reason:any)=>reason);
+  return {error,fetch};
+ }
+ it('puts the HTTP status and the account uid of a 409 on the error',async()=>{
+  const {error,fetch}=await refused(409,{error:'That email already has an account (approved).',uid:'m-approved'});
+  expect(fetch.mock.calls.map(c=>c[0])).toEqual(['/api/session','/api/workspace/auth/invite']);
+  expect(error?.message).toBe('That email already has an account (approved).');expect(error?.status).toBe(409);expect(error?.uid).toBe('m-approved');
+ });
+ it.each([
+  ['a malformed uid',409,{error:'That email already has an account (approved).',uid:'m approved<b>'}],
+  ['an over-long uid',409,{error:'That email already has an account (approved).',uid:'u'.repeat(201)}],
+  ['a non-string uid',409,{error:'That email already has an account (approved).',uid:42}],
+  ['no uid',502,{error:'Workspace unavailable.'}],
+ ] as const)('keeps the status and carries no uid for %s',async(_name,status,payload)=>{
+  const {error}=await refused(status,payload);
+  expect(error?.message).toBe(payload.error);expect(error?.status).toBe(status);expect('uid' in error).toBe(false);
  });
 });
 

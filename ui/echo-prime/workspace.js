@@ -696,8 +696,10 @@
    let receipt;
    try{receipt=await api('/auth/invite',{email:address});}
    catch(error){
-    // An existing account (409) is offered as "Open member" when it is in the list read above.
-    if(live()){const lower=address.toLowerCase(),match=view.rows.find(row=>String(row.email||'').toLowerCase()===lower);view.invite=null;view.inviteNotice='';view.inviteError={message:error instanceof Error?error.message:'The invite was not created.',uid:match?.uid||''};inviteOutput();}
+    // Only a 409 means the email already has an account; it is offered as "Open member" when it is in the list read
+    // above. The uid the 409 names wins (the Workspace matches casefolded emails); the listed email is the fallback for
+    // a 409 without one (a banned email). Any other refusal or a transport failure offers nothing to open.
+    if(live()){const lower=address.toLowerCase(),match=error?.status!==409?null:view.rows.find(row=>typeof error.uid==='string'&&row.uid===error.uid)||view.rows.find(row=>String(row.email||'').toLowerCase()===lower);view.invite=null;view.inviteNotice='';view.inviteError={message:error instanceof Error?error.message:'The invite was not created.',uid:match?.uid||''};inviteOutput();}
     throw error;
    }
    const invite=receipt?.invite&&typeof receipt.invite==='object'?receipt.invite:{};
@@ -797,8 +799,10 @@
    const identity=element('div',{class:'signin-identity'},element('span',{class:'signin-avatar','aria-hidden':'true'},initialsOf(session)),element('div',{},element('h3',{},name,element('span',{class:'signin-role-badge'},roleOf(session))),user.email&&user.email!==name?element('p',{class:'signin-email'},String(user.email)):null));
    const card=element('article',{class:'signin-card signed-in'},signinBrand(),identity,element('p',{class:'signin-lead'},user.status==='approved'?'Your private Workspace is available.':'Account status: '+user.status),user.status==='pending'?element('p',{class:'signin-fine'},'The primary owner approves new accounts. Your private Workspace opens once approved.'):null,button('Sign out',signOut));
    content.append(card);
-   // Owner: Members manages every account (select, usage, kick, ban, invites); this view keeps the pending approvals.
-   if(session.ownerAccess){section('Members',element('p',{},'Select a member to see their usage, sign them out, ban or unban them, and invite new members.'),button('Manage members',()=>open('members')));const value=await api('/auth/accounts');for(const member of (value.accounts||[]).slice(0,200)){if(member.role==='owner'||member.status!=='pending')continue;section(member.email||'Member account',element('p',{},'Status: '+member.status),button('Approve account',()=>decision(member,'approve')),button('Deny account',()=>decision(member,'deny')));}}
+   // Owner: Members manages every account (select, usage, kick, ban, invites); this view keeps the approvals exactly as
+   // before: Approve and Deny on every account, so a mistaken Deny is undone here. Only a banned account is left out
+   // (it must be unbanned in Members first); it is dropped before the 200 limit so it never hides an older account.
+   if(session.ownerAccess){section('Members',element('p',{},'Select a member to see their usage, sign them out, ban or unban them, and invite new members.'),button('Manage members',()=>open('members')));const value=await api('/auth/accounts');for(const member of (value.accounts||[]).filter(member=>member&&member.role!=='owner'&&member.status!=='banned').slice(0,200)){section(member.email||'Member account',element('p',{},'Status: '+member.status),button('Approve account',()=>decision(member,'approve')),button('Deny account',()=>decision(member,'deny')));}}
    return;
   }
   // Anonymous: one centred card. Google Identity Services renders its own button (an iframe) into `slot`; Prime only

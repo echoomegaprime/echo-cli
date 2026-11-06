@@ -75,7 +75,11 @@
    if(generation!==this.generation){await response.body?.cancel().catch(()=>{});throw new Error('Account session changed; response discarded.');}
    if(!response.ok){
     let value;try{value=await readJson(response);}finally{if(logout||response.status===401||response.status===403&&!auth)this.clear();}
-    throw new Error(typeof value.error==='string'?value.error.slice(0,600):'Workspace request failed. No automatic retry was made.');
+    // The status rides on the error, and so does the account uid a 409 names (an invite for an email that already has an
+    // account), checked as Prime's own member routes check a uid, so a view can act on a conflict without parsing text.
+    const error=new Error(typeof value.error==='string'?value.error.slice(0,600):'Workspace request failed. No automatic retry was made.');error.status=response.status;
+    if(typeof value.uid==='string'&&/^[A-Za-z0-9_.:@+-]{1,200}$/.test(value.uid))error.uid=value.uid;
+    throw error;
    }
    this.responses.set(response,generation);return response;
   }
