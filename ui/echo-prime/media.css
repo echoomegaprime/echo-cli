@@ -68,3 +68,14 @@
 .creative-duration-hint{font-size:11px;color:#91a99e;line-height:1.5}
 /* An alternative whose last run (or its provider's) failed is still offered, visibly marked. */
 .media-alternative.media-demoted{opacity:.78;border-style:dashed}
+/* Adult mode: its own switch under the brief; the panel (copy, attestation, style) shows only while it is on. */
+.adult-controls{display:grid;gap:8px;margin:8px 0}
+.adult-mode{font-weight:600}
+.adult-panel{display:grid;gap:8px;border:1px solid #6b4a2b;background:#1a130c;border-radius:10px;padding:10px}
+.adult-panel[hidden]{display:none}
+.adult-line{margin:0;color:#f1d5b0;font-size:13px;line-height:1.5}
+.adult-attest,.adult-style{display:flex;gap:8px;align-items:center;font-size:13px}
+.adult-style select{background:#0b1916;color:#dfefea;border:1px solid #29433a;border-radius:8px;padding:6px;font:inherit}
+/* The model that really ran and where, under a finished result. */
+.creative-used{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:6px 0;font-size:12px;color:#b4cec5}
+#prepare-creative:disabled{opacity:.55;cursor:not-allowed}

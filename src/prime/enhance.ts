@@ -3,6 +3,7 @@ import {redact} from '../code/workspace.js';
 import {isModelId,MODEL_IDS,modelLabel,type AnswerInfo,type ModelId,type ModelRouter} from '../code/model-factory.js';
 import {ProviderUnavailableError} from '../code/providers.js';
 import {classifyPrompt,type MediaKind} from './media.js';
+import {classifyAdult} from './adult.js';
 import {WorkspaceHttpError} from './workspace.js';
 /**
  * "Enhance prompt": one turn on exactly the provider the user chose (claude | gpt | grok | argon | qwen), through the
@@ -43,7 +44,9 @@ export interface EnhanceResult {
  classified?:{kind:MediaKind;confidence:number};
  inputChars:number;outputChars:number;durationMs:number;
 }
-export interface EnhancerOptions {limit?:number;windowMs?:number;timeoutMs?:number;now?:()=>number}
+export interface EnhancerOptions {limit?:number;windowMs?:number;timeoutMs?:number;now?:()=>number;
+ /** Test-only seam: literal strings the adult classifier counts as an adult brief. Production supplies none. */
+ adultMarkers?:readonly string[]}
 function extractJson(text:string):string{
  const fenced=/```(?:json)?\s*([\s\S]*?)```/i.exec(text),body=fenced?fenced[1]:text;
  const start=body.indexOf('{'),end=body.lastIndexOf('}');
@@ -80,13 +83,13 @@ const AUTH_FAILURE=/failed to authenticate|oauth|not signed in|not logged in|log
 export interface EnhanceFailure {category:'auth'|'unavailable'|'timeout'|'error';reason:string;at:string}
 export class PromptEnhancer {
  private hits=new Map<string,number[]>();
- private limit:number;private windowMs:number;private timeoutMs:number;private now:()=>number;
+ private limit:number;private windowMs:number;private timeoutMs:number;private now:()=>number;private adultMarkers?:readonly string[];
  /** The last failure per provider until that provider answers again: the Enhance chip skips an `auth` or `unavailable`
   * provider when it picks the default, so an expired CLI sign-in is not every owner's first click. */
  private failed=new Map<ModelId,EnhanceFailure>();
  failures():Partial<Record<ModelId,EnhanceFailure>>{return Object.fromEntries(this.failed) as Partial<Record<ModelId,EnhanceFailure>>;}
  constructor(private router:ModelRouter,options:EnhancerOptions={}){
-  this.limit=options.limit??10;this.windowMs=options.windowMs??60000;this.timeoutMs=options.timeoutMs??120000;this.now=options.now??Date.now;
+  this.limit=options.limit??10;this.windowMs=options.windowMs??60000;this.timeoutMs=options.timeoutMs??120000;this.now=options.now??Date.now;this.adultMarkers=options.adultMarkers;
  }
  /** Sliding window per session key (the Prime session cookie hash). Refused requests count nothing. */
  private admit(key:string){
@@ -104,6 +107,10 @@ export class PromptEnhancer {
   if(data.mode!=='auto'&&!ENHANCE_MODES.includes(data.mode as EnhanceMode))throw new EnhanceError(400,'Invalid enhance mode; use chat, image, video, music, sfx, voice or auto');
   if(data.provider!==undefined&&!isModelId(data.provider))throw new EnhanceError(400,'Unknown provider; use one of '+MODEL_IDS.join(', '));
   if(typeof sessionKey!=='string'||!sessionKey)throw new EnhanceError(400,'Invalid enhance session');
+  // Enhance sends the text to a cloud model (Claude, GPT, Gemini, Grok). An adult picture or video brief must never go there,
+  // so it is refused before the rate limiter or any model turn. A chat prompt and a voice, music or sound script are not pictures.
+  if((data.mode==='image'||data.mode==='video'||data.mode==='auto')&&classifyAdult(data.text,{markers:this.adultMarkers}).adult)
+   throw new EnhanceError(400,'Enhance sends the text to a cloud model, so it is off for adult briefs. Nothing was sent; write the brief yourself.');
   this.admit(sessionKey);
   const text=redact(data.text).trim(),provider=(data.provider as ModelId|undefined)??this.router.defaultId;
   let mode:EnhanceMode,classified:EnhanceResult['classified'];

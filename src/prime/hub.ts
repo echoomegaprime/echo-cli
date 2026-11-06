@@ -11,6 +11,7 @@ import {VoiceError,type VoiceClient} from './voice.js';
 import {ADK_MAX_STEPS_CEILING,AdkError,type AdkClient} from './agents.js';
 import {VideoAgentError,discoverVideoCatalog,offlineCatalog,parseVideoRequest,parseVideoRun,planVideo,resolveVideoInputs,videoAgentDefinition,videoRunPrompt,type VideoCatalog} from './videoagent.js';
 import {MediaRouter,callKindOf,describeCandidate} from './media.js';
+import {ADULT_NODE,adultFlagsOf,adultPolicy,isRouterCap,promptOfArguments} from './adult.js';
 import {MediaCollector,defaultMediaConfig,mediaSaveDir,type InvokeKind,type MediaConfig} from './media-collect.js';
 import {MediaJobs,type JobDescribe} from './media-jobs.js';
 import {MediaOutcomes} from './media-outcomes.js';
@@ -58,6 +59,8 @@ export interface PrimeOptions {
  mediaConfig?:MediaConfig;
  /** Recent real executions, used by the media router to stop offering tools that cannot run. */
  outcomes?:MediaOutcomes;
+ /** Test-only seam: literal strings the adult classifier counts as an adult brief (fixtures never carry explicit text). Production supplies none. */
+ adultMarkers?:readonly string[];
  /** Seams for tests: the HTTP client media files are fetched with, and the clock/sleep job polling uses. */
  mediaFetch?:typeof fetch;mediaClock?:{now:()=>number;sleep:(ms:number)=>Promise<void>};
  /** Always-on live tools for model turns (web, Wolfram, Echo knowledge/memory, skills, MCP); owner toggles per family. */
@@ -406,13 +409,13 @@ export class PrimeHub {
   this.media??=this.options.media??new MediaRouter({catalog:()=>this.capabilities(),read:sdk?id=>bounded(()=>sdk.read(id),8000).then(unwrap):undefined,
    search:sdk?query=>sdk.search(query):undefined,
    onDiscovered:rows=>{for(const c of rows){if(!/^echo\.[A-Za-z0-9_.-]+$/.test(c.id))continue;const old=this.catalog.get(c.id);this.catalog.set(c.id,old?{...old,registered:c.registered,health:c.health==='unknown'&&old.health?old.health:c.health}:{...c});}},
-   outcomes:this.outcomes(),callKinds:this.mediaConfig().gateCallKinds,denyCallKinds:this.mediaConfig().denyCallKinds,models:this.options.models});
+   outcomes:this.outcomes(),callKinds:this.mediaConfig().gateCallKinds,denyCallKinds:this.mediaConfig().denyCallKinds,models:this.options.models,adultMarkers:this.options.adultMarkers});
   return this.media.route(input,signal);
  }
  /** Enhance prompt on exactly the chosen provider through the reviewed model router. No router = the feature is off (503). */
  async enhance(input:unknown,sessionKey:string,signal?:AbortSignal){
   if(!this.options.models&&!this.options.enhancer)throw new WorkspaceHttpError(503,'Prompt enhancement is off: the reviewed Prime configuration has no models section, so no provider can be asked');
-  this.enhancer??=this.options.enhancer??new PromptEnhancer(this.options.models!);
+  this.enhancer??=this.options.enhancer??new PromptEnhancer(this.options.models!,{adultMarkers:this.options.adultMarkers});
   return this.enhancer.enhance(input,sessionKey,signal);
  }
  private mediaConfig(){return this.options.mediaConfig??defaultMediaConfig();}
@@ -494,6 +497,21 @@ export class PrimeHub {
   const ms=Number(args.music_length_ms);
   if(!Number.isFinite(ms)||ms>INLINE_MUSIC_MAX_MS)throw new Refused('This Prime has no media.localRoots directory for ElevenLabs to save the track into, so the audio would come back inline, and a track '+(Number.isFinite(ms)?'of '+Math.round(ms/1000)+' s':'whose length the model picks')+' can exceed the 1 MiB SDK bridge bound (only '+INLINE_MUSIC_MAX_MS/1000+' s fit). Set a length of '+INLINE_MUSIC_MAX_MS/1000+' s or less, or add media.localRoots to the Prime config.');
  }
+ /** The server-side gate for adult briefs, whichever way the request was made (Auto pick, a manual pick, edited JSON): an adult
+  * brief or an explicit adult flag is refused before any call unless it is bound for the on-prem media router, attested as
+  * fictional adults, and pinned to TEMPER. The keyword classifier decides only for pictures and video; an explicit flag decides
+  * for every tool. Refusals name what to change and say nothing was sent. */
+ private adultGate(request:PrimeRequest){
+  const args=request.arguments,{flagged,fictional}=adultFlagsOf(args),kind=this.describeCapability(request.name).kind;
+  if(!flagged&&kind==='other')return;
+  const policy=adultPolicy({text:promptOfArguments(args),flagged,fictional,kind,capability:request.name,markers:this.options.adultMarkers});
+  if(policy.refusal)throw new Refused(policy.refusal.message);
+  if(!policy.adult||!isRouterCap(request.name))return;
+  if(args.inputs!==undefined&&!(Array.isArray(args.inputs)&&args.inputs.length===0))throw new Refused('Adult mode does not take reference uploads, because an uploaded picture can show a real person. Remove them and send again; nothing was sent.');
+  const node=typeof args.node==='string'?args.node.trim().toLowerCase():'';
+  if(args.node!==undefined&&node!==ADULT_NODE&&node!=='')throw new Refused('Adult requests run on TEMPER only (node must be '+ADULT_NODE+'); nothing was sent.');
+  args.node=ADULT_NODE;
+ }
  async prepare(input:PrimeRequest){return this.prepareTicket(input,false);}
  private async prepareTicket(input:PrimeRequest,autonomyReview:boolean){
   limited(input);const request=JSON.parse(JSON.stringify(input)) as PrimeRequest,requestId=randomUUID();
@@ -504,6 +522,7 @@ export class PrimeHub {
   if(request.target==='sdk'){
    if(!this.options.sdk)throw new Refused('SDK host not connected');
    if(!/^echo\.[A-Za-z0-9_.-]{1,180}$/.test(request.name))throw new Refused('Invalid capability ID');
+   this.adultGate(request);
    if(request.arguments.inputs!==undefined){
     let inputs;
     try{inputs=validateStudioInputs(request.arguments.inputs);}

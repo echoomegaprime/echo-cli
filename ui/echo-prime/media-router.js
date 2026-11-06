@@ -48,6 +48,12 @@
   return value;
  }
  function sentence(text){const t=String(text||'').trim();return !t||/[.!?…)]$/.test(t)?t:t+'.';}
+ // Adult mode lives in the Studio (integrations.js). The route request carries it; Prime's server decides, the page only asks.
+ const adultState=()=>{const s=window.EchoPrimeStudio;return s&&typeof s.adult==='function'?s.adult():null;};
+ const adultOn=()=>{const a=adultState();return !!(a&&a.on);};
+ const adultBody=()=>{const a=adultState();return a&&a.on?{adult:true,fictional:a.fictional===true,style:a.style==='anime'?'anime':'photoreal'}:{};};
+ const ADULT_ENHANCE='Enhance sends the text to a cloud model, so it is off in adult mode.';
+ const surfaceGate=state=>state.options.name==='studio'&&adultOn()?ADULT_ENHANCE:'';
  // Provider failure bodies arrive as JSON text; the owner reads the message, cut to a sentence or two, not the raw body.
  function failureText(detail){
   let text=String(detail||'').trim();
@@ -126,8 +132,9 @@
   enhancers.push(state);return state;
  }
  function renderEnhance(){
-  const gate=enhanceGate(),list=providers();
+  const base=enhanceGate(),list=providers();
   for(const s of enhancers){
+   const gate=base||surfaceGate(s);
    s.select.replaceChildren(...list.map(p=>{const option=el('option',{value:p.id},p.label+(p.available?'':' (unavailable'+(p.reason?': '+p.reason:'')+')'));option.disabled=!p.available;return option;}));
    if(provider)s.select.value=provider;
    s.select.hidden=!list.length;s.select.disabled=!!gate||busy;
@@ -140,7 +147,7 @@
  }
  async function run(state){
   if(busy)return;
-  const gate=enhanceGate();if(gate){state.note.hidden=false;state.note.textContent=gate;state.gated=true;return;}state.gated=false;
+  const gate=enhanceGate()||surfaceGate(state);if(gate){state.note.hidden=false;state.note.textContent=gate;state.gated=true;return;}state.gated=false;
   const area=state.options.textarea(),text=area?area.value.trim():'';
   if(!text){state.note.hidden=false;state.note.textContent='Type a prompt first.';return;}
   if(text.length>4000){state.note.hidden=false;state.note.textContent='Enhance takes up to 4,000 characters; shorten the prompt first.';return;}
@@ -200,9 +207,15 @@
   const current=generation;
   if(routing)return;routing=true;notice('Choosing the best tool for this prompt…');
   try{
-   const r=await api('prime/media/route',{text,mode:'auto',fallback:'chat'},45000);
+   const r=await api('prime/media/route',{text,mode:'auto',fallback:'chat',...adultBody()},45000);
    if(current!==generation)return;
    debug('media','media_route',{surface:'composer',kind:r.classification&&r.classification.kind,confidence:r.classification&&r.classification.confidence,picked:r.picked?r.picked.id:null,alternatives:(r.alternatives||[]).length});
+   // An adult brief is never handed to the chat model: say what to switch on (and open the Studio to do it), or why it is refused.
+   if(r.adult&&r.adult.refusal&&!r.picked){
+    notice(r.reason||'Adult mode is needed for this brief. Nothing was sent.');
+    if(r.adult.refusal==='needs_adult_mode'||r.adult.refusal==='not_fictional'){r.text=text;r.mode='auto';if(window.EchoPrimeStudio&&typeof window.EchoPrimeStudio.open==='function')window.EchoPrimeStudio.open('auto',text,null,r);}
+    return;
+   }
    if(r.classification&&r.classification.kind==='chat'){
     notice('Treated as a chat message ('+Math.round((r.classification.confidence||0)*100)+'% sure). Pick Image, Video, Music, Sound FX or Voice to create something instead.');
     passthrough=true;try{form.requestSubmit();}finally{passthrough=false;}
@@ -270,8 +283,8 @@
    const p=r.picked;
    pickBox.hidden=false;
    pickBox.append(el('strong',{},p.label+' · '+p.provider),el('p',{class:'media-reason'},p.reason),
-    el('div',{class:'media-badges'},badge(kind+' · '+sure+'% sure'+(c.styles&&c.styles.length?' · '+c.styles.join(', '):'')),badge('health '+p.health+(p.healthSource==='probe'?' (probed)':p.healthSource==='catalog'?' (live catalog)':p.healthSource==='snapshot'?' (snapshot)':''),'health-'+p.health),badge(p.costNote),badge('quality '+p.quality+'/10 · speed '+p.speed+'/10'),catalogBadge(r.catalog,p),...(p.demoted?[badge(demotedLabel(p.demoted),'health-amber')]:[]),...(p.argumentShape==='unmodeled'?[badge('review request details','health-unknown')]:[])));
-   status.textContent='Echo picked a tool for this '+kind+' brief. Review the request below, then submit it yourself; nothing runs until you do.'+catalogNote;
+    el('div',{class:'media-badges'},badge(kind+' · '+sure+'% sure'+(c.styles&&c.styles.length?' · '+c.styles.join(', '):'')),badge('health '+p.health+(p.healthSource==='probe'?' (probed)':p.healthSource==='catalog'?' (live catalog)':p.healthSource==='snapshot'?' (snapshot)':''),'health-'+p.health),badge(p.costNote),badge('quality '+p.quality+'/10 · speed '+p.speed+'/10'),catalogBadge(r.catalog,p),...(p.demoted?[badge(demotedLabel(p.demoted),'health-amber')]:[]),...(p.argumentShape==='unmodeled'?[badge('review request details','health-unknown')]:[]),...(r.adult&&r.adult.active?[badge('adult mode · on-prem only','health-amber')]:[])));
+   status.textContent='Echo picked a tool for this '+kind+' brief. Review the request below, then submit it yourself; nothing runs until you do.'+(r.adult&&r.adult.active?' Adult mode: only the on-prem media router was considered; nothing goes to a cloud provider.':'')+catalogNote;
    if(!applyPick(p,'auto'))status.textContent+=' (The tool is not in this catalog view; search the live registry.)';
   }else{
    pickBox.hidden=true;
@@ -296,7 +309,7 @@
   if(route){lastRoute=route;renderPick(route);return;}
   const mode=hint||'auto';routing=true;status.textContent='Choosing the best '+(hint?hint+' ':'')+'tool…';
   try{
-   const r=await api('prime/media/route',{text,mode,fallback:'image'},45000);
+   const r=await api('prime/media/route',{text,mode,fallback:'image',...adultBody()},45000);
    if(current!==generation)return;
    r.text=text;r.mode=mode;lastRoute=r;renderPick(r);
    debug('media','media_route',{surface:'studio',kind:r.classification&&r.classification.kind,picked:r.picked?r.picked.id:null,alternatives:(r.alternatives||[]).length,probed:r.probe?r.probe.probed.length:0});
@@ -339,6 +352,13 @@
   lastRoute.failed=[...(lastRoute.failed||[]),d.name];
   const next=(lastRoute.alternatives||[]).find(a=>a.id!==lastRoute.picked.id&&!lastRoute.failed.includes(a.id));
   failure.hidden=false;failure.replaceChildren(el('p',{},lastRoute.picked.label+' did not complete ('+d.state+'): '+failureText(d.detail)+' Nothing was retried.'));
+  // An adult request never moves to another tool, provider or style on its own, and none is offered: the user changes it on purpose.
+  if(lastRoute.adult&&lastRoute.adult.active){
+   if(d.state==='uncertain')failure.append(el('p',{class:'media-uncertain'},'The outcome is unknown: check the original request (ID '+(d.requestId||'not reported')+') before sending it again.'));
+   failure.append(el('p',{},'Adult mode: nothing was sent to any other provider or style.'));
+   debug('media','media_pick_failed',{id:d.name,state:d.state,next:null,adult:true});
+   return;
+  }
   if(d.state==='uncertain')failure.append(el('p',{class:'media-uncertain'},'The outcome is unknown: check the original request (ID '+(d.requestId||'not reported')+') before spending on another tool.'));
   if(next){
    const use=el('button',{type:'button',class:'quiet-button','data-media-next':next.id},'Use '+next.label+' instead');
@@ -355,6 +375,13 @@
   mountEnhance({name:'studio',textarea:()=>$('#creative-prompt'),mode:()=>{const cat=category?category.value:'auto';if(cat==='auto'||cat==='all'){const k=lastRoute&&lastRoute.classification&&lastRoute.classification.kind;return k&&k!=='chat'&&k!=='image-edit'?k:k==='image-edit'?'image':'auto';}return CATEGORY_MODE[cat]||'auto';},
    mount(wrap,note,added){const row=$('.creative-actions');if(row)row.append(wrap);else brief.after(wrap);(row||brief).after(note,added);}});
  }
+ // Adult mode switched on or off in the Studio: the pick made under the other setting is dropped and the brief is routed again, so a
+ // cloud pick can never survive switching it on (and the Enhance control follows the setting).
+ window.addEventListener('echo-adult-changed',()=>{
+  lastRoute=null;renderEnhance();
+  const text=brief?brief.value.trim():'';
+  if(!panel.hidden&&text)void routeInStudio(text,null,HINT_OF_CATEGORY[category?category.value:'auto']);
+ });
  window.addEventListener('echo-account-changed',()=>{generation++;if(autoTimer){clearTimeout(autoTimer);autoTimer=null;}busy=false;routing=false;lastRoute=null;setAuto(false);notice('');panel.hidden=true;status.textContent='';pickBox.replaceChildren();alternatives.replaceChildren();excludedBox.replaceChildren();failure.replaceChildren();for(const k of Object.keys(sessionFailures))delete sessionFailures[k];for(const s of enhancers){s.previous=null;s.undo.hidden=true;s.added.replaceChildren();s.added.hidden=true;s.note.hidden=true;s.busy=false;}report=null;reportState='loading';renderEnhance();void loadModels();});
  renderEnhance();
  const ready=loadModels();

@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- purpose-built browser DOM stand-in */
-import {expect,it,vi} from 'vitest';
+import {describe,expect,it,vi} from 'vitest';
 import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
 
@@ -48,7 +48,7 @@ async function harness(options:any={}){
  const composer=make('form',{id:'composer'}),prompt=make('textarea',{id:'prompt'}),sendActions=make('div',{class:'send-actions'}),send=make('button',{class:'send'},'Send'),caption=make('p',{class:'composer-caption'});sendActions.append(send);composer.append(prompt,sendActions,caption);
  const tools=make('div',{id:'creative-tools'}),category=make('select',{id:'creative-category'});category.value='auto';const brief=make('textarea',{id:'creative-prompt'}),creativeActions=make('div',{class:'creative-actions'}),args=make('textarea',{id:'creative-arguments'});root.append(tabs,composer,tools,category,brief,creativeActions,args);
  const ownSubmit=vi.fn();composer.addEventListener('submit',ownSubmit);
- const studio={open:vi.fn(),apply:vi.fn(()=>true),merge:vi.fn(()=>0),select:vi.fn(()=>true),catalog:()=>[],selected:vi.fn(()=>({id:'echo.llm.together.google-flash-image-2.5',category:'image'}))},originalOpen=studio.open;
+ const studio={open:vi.fn(),apply:vi.fn(()=>true),merge:vi.fn(()=>0),select:vi.fn(()=>true),catalog:()=>[],...(options.adult?{adult:()=>options.adult}:{}),selected:vi.fn(()=>({id:'echo.llm.together.google-flash-image-2.5',category:'image'}))},originalOpen=studio.open;
  const workspace={enabled:true,ready:Promise.resolve(true),session:{authenticated:true,ownerAccess:true},ownerHeaders:async()=>({}),invalidate:vi.fn(),...options.workspace};
  const window:any={EchoPrimeWorkspace:workspace,EchoPrimeStudio:studio,addEventListener:(n:string,f:(e:any)=>unknown)=>(windowEvents[n]??=[]).push(f),dispatchEvent:(e:any)=>{for(const f of windowEvents[e.type]||[])f(e);}};
  const calls:any[]=[];let enhanceResolver:any;
@@ -191,4 +191,67 @@ it('applies the pick with its template and the length the route read from the br
  const w=await harness({route:()=>({...mediaResult(),classification:{kind:'video',confidence:1,styles:[],durationSeconds:5},picked:{...defaultPick,template}})});
  w.studio.open('video','a boat, 5 seconds');await tick();
  expect(w.studio.apply).toHaveBeenLastCalledWith({id:defaultPick.id,arguments:defaultPick.request.arguments,template,durationSeconds:5});
+});
+
+describe('adult mode in the router UI',()=>{
+ const needs={classification:{kind:'image',confidence:.5,styles:[]},picked:null,alternatives:[],excluded:[],probe:{probed:[],source:'none'},catalog:{source:'none',queries:[],listed:0,failed:[],cached:false},records:[],
+  reason:'Adult mode must be switched on and "All subjects are fictional adults" ticked before this brief can be sent anywhere. Nothing was sent.',adult:{active:false,detected:true,refusal:'needs_adult_mode'}};
+ const body=(w:any)=>w.calls.filter((c:any)=>c.url==='/api/prime/media/route').at(-1).body;
+ it('adds the adult fields to the Studio route request only while adult mode is on',async()=>{
+  const adult={on:true,fictional:true,style:'anime'};
+  const w=await harness({adult});w.studio.open('image','a lady');await tick();
+  expect(body(w)).toEqual({text:'a lady',mode:'image',fallback:'image',adult:true,fictional:true,style:'anime'});
+  const off=await harness({adult:{on:false,fictional:false,style:'photoreal'}});off.studio.open('image','a lady');await tick();
+  expect(body(off)).toEqual({text:'a lady',mode:'image',fallback:'image'});
+ });
+ it('adds them to the composer Auto route request too',async()=>{
+  const w=await harness({adult:{on:true,fictional:false,style:'photoreal'}});w.tabs.children[0].click();w.prompt.value='a lady';w.composer.requestSubmit();await tick();
+  expect(body(w)).toEqual({text:'a lady',mode:'auto',fallback:'chat',adult:true,fictional:false,style:'photoreal'});
+ });
+ it('does not hand an adult brief to the chat model when adult mode is off: it says what to switch on and opens the Studio',async()=>{
+  const w=await harness({route:()=>needs});w.tabs.children[0].click();w.prompt.value='ADULT_BRIEF_MARKER a lady';w.composer.requestSubmit();await tick();
+  expect(w.ownSubmit).not.toHaveBeenCalled();
+  expect(w.find('id','enhance-composer-notice')!.textContent).toContain('Adult mode must be switched on');
+  expect(w.originalOpen).toHaveBeenCalledWith('auto','ADULT_BRIEF_MARKER a lady',null);
+ });
+ it('shows a local refusal in the composer without opening the Studio or sending the text anywhere',async()=>{
+  const refused={...needs,reason:'Refused: this brief mentions someone under 18. Adult mode only covers fictional adults.',adult:{active:true,detected:true,refusal:'minor'}};
+  const w=await harness({route:()=>refused});w.tabs.children[0].click();w.prompt.value='ADULT_BRIEF_MARKER a child';w.composer.requestSubmit();await tick();
+  expect(w.ownSubmit).not.toHaveBeenCalled();expect(w.originalOpen).not.toHaveBeenCalled();
+  expect(w.find('id','enhance-composer-notice')!.textContent).toContain('under 18');
+ });
+ it('badges an adult pick as on-prem only and explains an empty adult result in the Studio',async()=>{
+  const adult={active:true,style:'photoreal',restrictedTo:['echo.media.image_generate','echo.media.video_generate']};
+  const w=await harness({route:()=>({...mediaResult(),alternatives:[],adult})});w.studio.open('auto','fox');await tick();
+  expect(w.find('data-media-auto')!.textContent).toContain('adult mode · on-prem only');
+  const none=await harness({route:()=>({...mediaResult(),picked:null,alternatives:[],reason:'Adult mode runs only on the on-prem media router (TEMPER); nothing usable is listed. Nothing was sent.',adult})});none.studio.open('auto','fox');await tick();
+  expect(none.find('data-media-auto')!.textContent).toContain('Adult mode runs only on the on-prem media router');
+ });
+ it('says nothing was sent to another provider when an adult pick fails, and offers no other tool',async()=>{
+  const adult={active:true,style:'photoreal',restrictedTo:['echo.media.image_generate']};
+  const w=await harness({route:()=>({...mediaResult(),alternatives:[],adult})});w.studio.open('auto','fox');await tick();
+  w.window.dispatchEvent(new TestEvent('echo-studio-executed',{detail:{state:'blocked',name:defaultPick.id,detail:'On-prem image did not complete: busy, try again in ~30s: creative lease held'}}));
+  const text=w.find('data-media-failure')!.textContent;
+  expect(text).toContain('busy, try again in ~30s: creative lease held');expect(text).toContain('Adult mode: nothing was sent to any other provider or style.');
+  expect(w.find('data-media-next')).toBeUndefined();
+ });
+ it('switches Enhance off for the Studio brief in adult mode, because Enhance sends the text to a cloud model',async()=>{
+  const adult={on:false,fictional:false,style:'photoreal'};
+  const w=await harness({adult});
+  expect((w.find('data-enhance','studio') as any).disabled).toBe(false);
+  adult.on=true;w.window.dispatchEvent(new TestEvent('echo-adult-changed',{detail:{...adult}}));await tick();
+  expect((w.find('data-enhance','studio') as any).disabled).toBe(true);
+  expect(w.find('data-enhance-note','studio')!.textContent).toContain('cloud');
+  expect((w.find('data-enhance','composer') as any).disabled).toBe(false);
+  adult.on=false;w.window.dispatchEvent(new TestEvent('echo-adult-changed',{detail:{...adult}}));await tick();
+  expect((w.find('data-enhance','studio') as any).disabled).toBe(false);
+ });
+ it('routes the brief again when adult mode changes, so a cloud pick never survives switching it on',async()=>{
+  const adult={on:false,fictional:true,style:'photoreal'};
+  const w=await harness({adult});w.studio.open('auto','a lady');w.brief.value='a lady';await tick();
+  const before=w.calls.filter(c=>c.url==='/api/prime/media/route').length;
+  adult.on=true;w.window.dispatchEvent(new TestEvent('echo-adult-changed',{detail:{...adult}}));await tick();
+  const routes=w.calls.filter(c=>c.url==='/api/prime/media/route');
+  expect(routes.length).toBe(before+1);expect(routes.at(-1).body).toMatchObject({adult:true,fictional:true,style:'photoreal'});
+ });
 });

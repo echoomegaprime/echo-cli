@@ -6,6 +6,11 @@
  // Requests still running after the owner moved on (another tool, medium or submission): Prime keeps following each one by
  // its request id, and its state shows in #creative-background, never in #creative-result, which belongs to the request on screen.
  const followers=new Map();
+ // Adult mode: its own switch, off by default and off again after every account change. While it is on only the on-prem media
+ // router tools are listed, the request carries nsfw + subjects_fictional + the chosen style + node temper, and Review stays
+ // disabled until "All subjects are fictional adults" is ticked. Prime's server refuses anything else again (hub.prepare).
+ const ROUTER_CAP=/^echo\.media\.(?:image|video)_generate$/,ADULT_LINE='Adult mode: fictional adult characters only. Real people and anyone under 18 are refused.';
+ const adult={on:false,fictional:false,style:'photoreal'};let adultUi=null;
  const ROLES=['reference','init','mask','audio','script'];
  const status=$('#catalog-state'), result=$('#creative-result');
  // Per-call client waits. Execute answers within Prime's inline window (20 s) and long runs continue server-side, so no
@@ -39,7 +44,7 @@
   background.textContent=lines.join(' ');background.hidden=!lines.length;
  }
  function clearResult(){for(const [id,f] of followers)if(f.done)followers.delete(id);view++;result.textContent='';if(output)output.replaceChildren();noteBackground();}
- function invalidate(){generation++;revision++;controller.abort();controller=new AbortController();ticket=null;selected=null;template=null;host=false;submitting=false;catalog=snapshot.capabilities;studioInputs=[];pickerOpen=false;
+ function invalidate(){adult.on=false;adult.fictional=false;adult.style='photoreal';syncAdult();generation++;revision++;controller.abort();controller=new AbortController();ticket=null;selected=null;template=null;host=false;submitting=false;catalog=snapshot.capabilities;studioInputs=[];pickerOpen=false;
   for(const id of ['creative-prompt','creative-arguments','creative-search'])$('#'+id).value='';
   for(const id of ['creative-result','request-review','request-cost','connection-result','tool-details','selected-tool'])$('#'+id).textContent='';
   if(output)output.replaceChildren();followers.clear();view++;if(background){background.textContent='';background.hidden=true;}if(durationInput)durationInput.value='';syncDuration();
@@ -53,8 +58,8 @@
  }
  function render(){
   const query=$('#creative-search').value.toLowerCase(),category=$('#creative-category').value,target=$('#creative-tools');target.replaceChildren();
-  const rows=catalog.filter(c=>(category==='all'||category==='auto'||c.category===category)&&(c.id+' '+c.description).toLowerCase().includes(query));
-  status.textContent=rows.length+' of '+catalog.length+' creative capabilities · '+(host?'Host connected; availability checked per request':'Registry snapshot · live availability unverified');
+  const rows=catalog.filter(c=>(!adult.on||ROUTER_CAP.test(c.id))&&(category==='all'||category==='auto'||c.category===category)&&(c.id+' '+c.description).toLowerCase().includes(query));
+  status.textContent=rows.length+' of '+catalog.length+' creative capabilities · '+(host?'Host connected; availability checked per request':'Registry snapshot · live availability unverified')+(adult.on?' · Adult mode: on-prem media router tools only':'');
   for(const c of rows){const b=document.createElement('button');b.className='creative-tool';b.setAttribute('aria-pressed',String(selected?.id===c.id));const title=document.createElement('strong'),small=document.createElement('small'),state=document.createElement('span');title.textContent=c.id.replace(/^echo\./,'');small.textContent=c.description;state.textContent=c.health+' · '+(c.scope||'scope unknown');b.append(title,state,small);b.addEventListener('click',()=>choose(c));target.append(b);}
  }
  // ---- request shapes ------------------------------------------------------------------------------------------------
@@ -88,7 +93,57 @@
  function payload(){
   const text=$('#creative-prompt').value.trim(),t=template||(selected?templateFor(selected.id,selected.category):null);
   if(!t)return {};
-  return {...materialize(t,text,seconds()),...(studioInputs.length?{inputs:studioInputs.map(i=>({upload_id:i.upload_id,role:i.role}))}:{})};
+  return {...materialize(t,text,seconds()),...(selected?adultFields(selected.id):{}),...(studioInputs.length?{inputs:studioInputs.map(i=>({upload_id:i.upload_id,role:i.role}))}:{})};
+ }
+ // ---- adult mode -------------------------------------------------------------------------------------------------------
+ // The fields an adult request to the router carries (the same ones src/prime/adult.ts adultFields builds on the server).
+ function adultFields(id){return adult.on&&ROUTER_CAP.test(id)?{nsfw:true,subjects_fictional:true,...(id==='echo.media.image_generate'?{style:adult.style}:{}),node:'temper'}:{};}
+ // Why Review cannot go ahead while Adult mode is on, or nothing.
+ function adultBlocked(){
+  if(!adult.on)return '';
+  if(!adult.fictional)return 'Tick "All subjects are fictional adults" before an adult request can be sent. Nothing was sent.';
+  if(studioInputs.length)return 'Adult mode does not take reference uploads, because an uploaded picture can show a real person. Remove them first. Nothing was sent.';
+  if(selected&&!ROUTER_CAP.test(selected.id))return 'Adult mode is on: only the on-prem media router (echo.media.image_generate or echo.media.video_generate) can run an adult request, not '+selected.id+'. Nothing was sent.';
+  return '';
+ }
+ function syncAdult(){
+  if(adultUi){adultUi.mode.checked=adult.on;adultUi.fiction.checked=adult.fictional;adultUi.style.value=adult.style;adultUi.panel.hidden=!adult.on;}
+  const prepare=$('#prepare-creative');if(prepare)prepare.disabled=adult.on&&!adult.fictional;
+ }
+ // Adult mode selects an on-prem router tool of the medium in view; switching it off drops the adult fields a routed template carried.
+ function ensureRouterTool(){
+  if(selected&&ROUTER_CAP.test(selected.id))return;
+  const video=$('#creative-category').value==='video'||selected?.category==='video';
+  const c=catalog.find(x=>x.id===(video?'echo.media.video_generate':'echo.media.image_generate'))||catalog.find(x=>ROUTER_CAP.test(x.id));
+  if(c)choose(c);
+ }
+ function dropAdultTemplate(){
+  const fixed=template&&template.fixed;
+  if(fixed&&(fixed.nsfw||fixed.subjects_fictional||fixed.node)){template=selected?templateFor(selected.id,selected.category):null;syncDuration();}
+ }
+ function setAdult(patch){
+  const before=JSON.stringify(adult);
+  Object.assign(adult,patch);
+  // Switching it off clears the attestation: it is given again, on purpose, every time Adult mode is switched on.
+  if(!adult.on)adult.fictional=false;
+  if(JSON.stringify(adult)===before)return;
+  if(adult.on)ensureRouterTool();else dropAdultTemplate();
+  syncAdult();syncArguments();render();
+  try{window.dispatchEvent(new CustomEvent('echo-adult-changed',{detail:{...adult}}));}catch{/* the page keeps working without listeners */}
+ }
+ function mountAdult(){
+  if(adultUi)return;
+  const brief=$('#creative-prompt'),label=brief&&brief.parentNode;if(!label||typeof label.after!=='function')return;
+  const mode=el('input',{type:'checkbox',id:'adult-mode'}),fiction=el('input',{type:'checkbox',id:'adult-fictional'});
+  const style=el('select',{id:'adult-style','aria-label':'Adult style'},el('option',{value:'photoreal'},'Photoreal'),el('option',{value:'anime'},'Anime'));
+  const panel=el('div',{id:'adult-panel',class:'adult-panel','data-adult-panel':''},el('p',{id:'adult-line',class:'adult-line'},ADULT_LINE),
+   el('label',{class:'adult-attest'},fiction,' All subjects are fictional adults'),el('label',{class:'adult-style'},'Style ',style));
+  panel.hidden=true;
+  label.after(el('div',{class:'adult-controls','data-adult-controls':''},el('label',{class:'adult-mode'},mode,' Adult mode (on-prem only)'),panel));
+  adultUi={mode,fiction,style,panel};
+  mode.addEventListener('change',()=>setAdult({on:mode.checked}));
+  fiction.addEventListener('change',()=>setAdult({fictional:fiction.checked}));
+  style.addEventListener('change',()=>setAdult({style:style.value==='anime'?'anime':'photoreal'}));
  }
  // ---- length control (video, music, sound effects) -------------------------------------------------------------------
  function mountDuration(){
@@ -184,6 +239,7 @@
  $('#refresh-connections').addEventListener('click',connections);
  $('#refresh-catalog').addEventListener('click',async()=>{const current=generation;try{const query=$('#creative-search').value.trim()||$('#creative-category').value;const r=await api('search',{query:query==='all'?'image':query});if(current!==generation)return;const merged=new Map(catalog.map(c=>[c.id,c]));for(const c of r.capabilities)merged.set(c.id,c);catalog=[...merged.values()];render();result.textContent='Live registry returned '+r.capabilities.length+' entries for '+query+'.';}catch(e){if(current===generation)fail(e);}});
  $('#prepare-creative').addEventListener('click',async()=>{
+  const held=adultBlocked();if(held){result.textContent=held;return;}
   if(!selected){result.textContent='Select a capability first.';return;}
   const current=generation,version=revision;
   const preparing=selected.id;
@@ -219,6 +275,11 @@
    const open=el('button',{type:'button',class:'quiet-button','data-open-artifact':r.media.artifactId||''},'Open in Library');
    open.addEventListener('click',()=>{if(typeof window.EchoPrimeLibrary?.open==='function')void window.EchoPrimeLibrary.open('artifacts');});
    nodes.push(el('div',{class:'creative-output-actions'},el('a',{class:'quiet-button',href:r.media.url+'?download=1',download:r.media.name},'Download'),open));
+  }
+  // The model that really ran and where, as the on-prem router named them (never inferred): "on-prem (TEMPER)", or the node it reported.
+  if(r.used&&typeof r.used==='object'&&(r.used.model||r.used.node)){
+   const node=String(r.used.node||'').toLowerCase().split('-')[0];
+   nodes.push(el('p',{class:'creative-used','data-used':''},el('span',{class:'media-badge'},node?'on-prem ('+node.toUpperCase()+')':'on-prem'),' '+(r.used.model?'Model used: '+r.used.model:'Model not reported')+(r.used.backend?' · '+r.used.backend:'')));
   }
   if(r.state==='running')nodes.push(el('progress',{class:'creative-progress','aria-label':'Generation in progress'}));
   if(r.mediaError)nodes.push(el('p',{class:'creative-media-error',role:'alert'},r.mediaError));
@@ -269,7 +330,8 @@
   if(f){if(shown)followers.delete(current.requestId);else f.done=r.state==='returned'&&r.media?f.label+' finished; saved to Library as '+r.media.name+'.':line(r);noteBackground();}
  }
  $('#execute-request').addEventListener('click',async()=>{
-  if(!ticket||submitting)return;submitting=true;$('#execute-request').disabled=true;const current=ticket,epoch=generation,tool=selected;ticket=null;
+  if(!ticket||submitting)return;
+  const held=adultBlocked();if(held){result.textContent=held;return;}submitting=true;$('#execute-request').disabled=true;const current=ticket,epoch=generation,tool=selected;ticket=null;
   $('#review-dialog').close();clearResult();const mine=view;result.textContent='Submitting the reviewed request…';
   const prompt=promptOf(current.request?.arguments||{});
   // The auto-router listens for this to offer the next-best tool after a failure; it never resubmits by itself.
@@ -293,7 +355,7 @@
   followers.set(current.requestId,{requestId:current.requestId,label:r.job?.label||current.request.name,view:mine,done:''});
   void follow(r,epoch,prompt,mine).then(last=>{if(last)settle(last,ctx);}).catch(e=>{if(epoch===generation)settle({state:'uncertain',requestId:current.requestId,detail:'This page lost track of the request ('+(e instanceof Error?e.message:'error')+'). Check request ID '+current.requestId+' in Library or the gate execution log before submitting again.'},ctx);});
  });
- window.EchoPrimeStudio={open,addInput:addStudioInput,inputs:()=>studioInputs.map(i=>({...i})),templateFor,materialize,
+ window.EchoPrimeStudio={open,adult(){return {...adult};},addInput:addStudioInput,inputs:()=>studioInputs.map(i=>({...i})),templateFor,materialize,
    /** Auto-router hooks: select a listed capability by id, or select it and set the exact request the router prepared
     *  (its template keeps that shape when the brief or the length changes; `durationSeconds` fills the length control). */
    select(id){const c=catalog.find(x=>x.id===id);if(c)choose(c);return !!c;},
@@ -314,5 +376,5 @@
    },
    catalog(){return catalog.slice();},
    selected(){return selected?{id:selected.id,category:selected.category}:null;},
-  };mountDuration();renderStudioInputs();models();render();
+  };mountDuration();mountAdult();renderStudioInputs();models();render();
 })();

@@ -55,7 +55,7 @@ function world(opts:{execute?:any;executes?:any[];jobs?:any[];jobFor?:(body:any)
  const get=(id:string)=>ids.get(id)!;
  const output=()=>walk(request).find(n=>n.getAttribute('id')==='creative-output');
  async function runRequest(){await get('#prepare-creative').click();await flush();await get('#execute-request').click();await flush();}
- return {window,get,calls,fetch,workspace,register,events,output,runRequest,studio:window.EchoPrimeStudio};
+ return {root,window,get,calls,fetch,workspace,register,events,output,runRequest,studio:window.EchoPrimeStudio};
 }
 
 describe('Creative Studio results',()=>{
@@ -185,5 +185,120 @@ describe('Creative Studio results',()=>{
    const client=w.studio.materialize(w.studio.templateFor(id,category),'brief',seconds),server=materialize(argumentTemplate(id,kind),'brief',seconds);
    expect(JSON.parse(JSON.stringify(client)),id+' '+seconds).toEqual(server);
   }
+ });
+});
+
+describe('Creative Studio adult mode',()=>{
+ const LINE='Adult mode: fictional adult characters only. Real people and anyone under 18 are refused.';
+ const ROUTER_CAPS=[{id:'echo.media.image_generate',category:'image',description:'on-prem',health:'green'},{id:'echo.media.video_generate',category:'video',description:'on-prem video',health:'green'}];
+ const CLOUD=[{id:'echo.llm.together.openai-sora-2',category:'video',description:'Sora',health:'green'},{id:'echo.llm.together.ByteDance-Seed-Seedream-4.0',category:'image',description:'Seedream',health:'green'},{id:'echo.cartesia.tts',category:'voice',description:'Cartesia',health:'green'}];
+ const byId=(w:any,id:string)=>walk(w.root).find(n=>n.getAttribute('id')===id)!;
+ const set=async(node:Node,checked:boolean)=>{node.checked=checked;await node.fire('change');};
+ const sent=(w:any)=>w.calls.filter((c:any)=>c.url==='/api/prepare').map((c:any)=>JSON.parse(JSON.stringify(c.body.arguments)));
+ const ID='11111111-2222-4333-8444-555555555555';
+ it('is off by default, clearly labelled, and hides the adult copy and the attestation until it is switched on',()=>{
+  const w=world();w.studio.open('image','a fox');
+  const mode=byId(w,'adult-mode'),panel=byId(w,'adult-panel');
+  expect(mode.getAttribute('type')).toBe('checkbox');expect(mode.checked).toBe(false);
+  expect(mode.parentNode!.textContent).toContain('Adult mode');expect(mode.parentNode!.textContent).toContain('on-prem');
+  expect(panel.hidden).toBe(true);expect(w.get('#prepare-creative').disabled).toBe(false);
+  expect(w.studio.adult()).toEqual({on:false,fictional:false,style:'photoreal'});
+ });
+ it('shows the adult line and the explicit attestation, and keeps Generate disabled until it is ticked',async()=>{
+  const w=world();w.studio.open('image','a fox');
+  const mode=byId(w,'adult-mode'),panel=byId(w,'adult-panel'),fiction=byId(w,'adult-fictional');
+  await set(mode,true);
+  expect(panel.hidden).toBe(false);expect(byId(w,'adult-line').textContent).toBe(LINE);
+  expect(fiction.getAttribute('type')).toBe('checkbox');expect(fiction.checked).toBe(false);expect(fiction.parentNode!.textContent).toContain('All subjects are fictional adults');
+  expect(w.get('#prepare-creative').disabled).toBe(true);
+  await set(fiction,true);expect(w.get('#prepare-creative').disabled).toBe(false);
+  await set(fiction,false);expect(w.get('#prepare-creative').disabled).toBe(true);
+  await set(fiction,true);await set(mode,false);expect(panel.hidden).toBe(true);expect(w.get('#prepare-creative').disabled).toBe(false);
+  expect(w.studio.adult()).toMatchObject({on:false});
+ });
+ it('never sends a request while the attestation is unticked, even if Review is clicked anyway',async()=>{
+  const w=world();w.studio.open('image','a fox');await set(byId(w,'adult-mode'),true);
+  await w.get('#prepare-creative').click();await flush();
+  expect(w.calls.some(c=>c.url==='/api/prepare')).toBe(false);expect(w.get('#creative-result').textContent).toContain('All subjects are fictional adults');
+ });
+ it('carries nsfw, subjects_fictional, the chosen style and TEMPER in the request, and drops them again when switched off',async()=>{
+  const w=world({catalog:[...ROUTER_CAPS,...CLOUD]});w.studio.open('image','ADULT_BRIEF_MARKER a woman at the beach');
+  const mode=byId(w,'adult-mode'),fiction=byId(w,'adult-fictional'),style=byId(w,'adult-style');
+  await set(mode,true);await set(fiction,true);
+  expect(JSON.parse(w.get('#creative-arguments').value)).toEqual({prompt:'ADULT_BRIEF_MARKER a woman at the beach',wait:false,nsfw:true,subjects_fictional:true,style:'photoreal',node:'temper'});
+  style.value='anime';await style.fire('change');
+  await w.get('#prepare-creative').click();await flush();
+  expect(sent(w)).toEqual([{prompt:'ADULT_BRIEF_MARKER a woman at the beach',wait:false,nsfw:true,subjects_fictional:true,style:'anime',node:'temper'}]);
+  await set(mode,false);
+  expect(JSON.parse(w.get('#creative-arguments').value)).toEqual({prompt:'ADULT_BRIEF_MARKER a woman at the beach',wait:false});
+ });
+ it('adds the adult fields to the video tool without a style',async()=>{
+  const w=world({catalog:[...ROUTER_CAPS,...CLOUD]});w.studio.open('video','ADULT_BRIEF_MARKER waves');
+  await set(byId(w,'adult-mode'),true);await set(byId(w,'adult-fictional'),true);
+  const args=JSON.parse(w.get('#creative-arguments').value);
+  expect(args).toMatchObject({prompt:'ADULT_BRIEF_MARKER waves',wait:false,nsfw:true,subjects_fictional:true,node:'temper'});expect(args.style).toBeUndefined();
+ });
+ it('lists only the on-prem router tools while adult mode is on, and everything again when it is off',async()=>{
+  const w=world({catalog:[...ROUTER_CAPS,...CLOUD]});w.studio.open('all','');
+  const names=()=>w.get('#creative-tools').children.map(b=>b.children[0].textContent);
+  expect(names().length).toBeGreaterThan(2);
+  await set(byId(w,'adult-mode'),true);
+  expect(names().sort()).toEqual(['media.image_generate','media.video_generate']);
+  expect(w.get('#catalog-state').textContent).toContain('on-prem');
+  await set(byId(w,'adult-mode'),false);expect(names().length).toBeGreaterThan(2);
+ });
+ it('moves the selection to the router tool when adult mode is switched on, and refuses any other tool locally',async()=>{
+  const w=world({catalog:[...ROUTER_CAPS,...CLOUD]});w.studio.open('video','ADULT_BRIEF_MARKER waves');w.studio.select('echo.llm.together.openai-sora-2');
+  expect(w.get('#selected-tool').textContent).toBe('echo.llm.together.openai-sora-2');
+  await set(byId(w,'adult-mode'),true);await set(byId(w,'adult-fictional'),true);
+  expect(w.get('#selected-tool').textContent).toBe('echo.media.video_generate');
+  w.studio.select('echo.llm.together.ByteDance-Seed-Seedream-4.0');
+  await w.get('#prepare-creative').click();await flush();
+  expect(w.calls.some(c=>c.url==='/api/prepare')).toBe(false);expect(w.get('#creative-result').textContent).toContain('on-prem media router');
+ });
+ it('holds Review while reference uploads are attached, because adult mode takes none',async()=>{
+  const w=world();w.studio.open('image','a fox');w.studio.addInput('upl_'+'a'.repeat(32));
+  await set(byId(w,'adult-mode'),true);await set(byId(w,'adult-fictional'),true);
+  await w.get('#prepare-creative').click();await flush();
+  expect(w.calls.some(c=>c.url==='/api/prepare')).toBe(false);expect(w.get('#creative-result').textContent).toContain('reference uploads');
+ });
+ it('cancels a reviewed request when the attestation is withdrawn, so it cannot be run',async()=>{
+  const w=world();w.studio.open('image','a fox');await set(byId(w,'adult-mode'),true);await set(byId(w,'adult-fictional'),true);
+  await w.get('#prepare-creative').click();await flush();expect(w.get('#execute-request').disabled).toBe(false);
+  await set(byId(w,'adult-fictional'),false);expect(w.get('#execute-request').disabled).toBe(true);
+  await w.get('#execute-request').click();await flush();expect(w.calls.some(c=>c.url==='/api/execute')).toBe(false);
+ });
+ it('tells the rest of the page when the adult state changes',async()=>{
+  const w=world();w.studio.open('image','a fox');await set(byId(w,'adult-mode'),true);await set(byId(w,'adult-fictional'),true);
+  expect(w.events.at(-1)).toEqual({on:true,fictional:true,style:'photoreal'});
+ });
+ it('shows the model that actually ran with an on-prem (TEMPER) badge, or the real node when it is not TEMPER',async()=>{
+  const used={model:'illustrious-xl-v0.1',node:'temper',backend:'comfyui'};
+  const w=world({execute:{state:'returned',requestId:ID,capability:'echo.media.image_generate',media:media('image'),used,job:{label:'On-prem media router',elapsedMs:12000}}});
+  w.studio.open('image','a fox');await w.runRequest();
+  const badge=walk(w.output()!).find(n=>n.getAttribute('data-used')!==null)!;
+  expect(badge.textContent).toContain('on-prem (TEMPER)');expect(badge.textContent).toContain('illustrious-xl-v0.1');
+  const f=world({execute:{state:'returned',requestId:ID,capability:'echo.media.image_generate',media:media('image'),used:{model:'juggernaut',node:'forge',backend:'diffusers'},job:{label:'On-prem media router'}}});
+  f.studio.open('image','a fox');await f.runRequest();
+  const fb=walk(f.output()!).find(n=>n.getAttribute('data-used')!==null)!;
+  expect(fb.textContent).toContain('on-prem (FORGE)');expect(fb.textContent).not.toContain('TEMPER');expect(fb.textContent).toContain('juggernaut');
+  const none=world({execute:{state:'returned',requestId:ID,media:media('image'),job:{label:'X'}}});
+  none.studio.open('image','a fox');await none.runRequest();
+  expect(walk(none.output()!).some(n=>n.getAttribute('data-used')!==null)).toBe(false);
+ });
+ it('shows the router refusal exactly as the router said it, and does not try another tool',async()=>{
+  const said="no live nsfw-capable on-prem image model for style 'anime'; available nsfw-capable styles: photoreal";
+  const w=world({catalog:[...ROUTER_CAPS,...CLOUD],execute:{state:'blocked',requestId:ID,capability:'echo.media.image_generate',detail:said,job:{label:'On-prem media router'}}});
+  w.studio.open('image','ADULT_BRIEF_MARKER a woman');await set(byId(w,'adult-mode'),true);await set(byId(w,'adult-fictional'),true);
+  await w.runRequest();
+  expect(w.get('#creative-result').textContent).toBe('On-prem media router did not complete: '+said+'.');
+  expect(w.calls.filter(c=>c.url==='/api/prepare')).toHaveLength(1);expect(w.calls.filter(c=>c.url==='/api/execute')).toHaveLength(1);
+  expect(w.events.at(-1)).toMatchObject({state:'blocked',detail:said});
+ });
+ it('keeps the listing toggle separate: it is labelled as a listing filter and does not switch adult mode on',()=>{
+  const html=readFileSync(new URL('../ui/echo-prime/index.html',import.meta.url),'utf8');
+  expect(html).toMatch(/id="include-adult"[^>]*> Show NSFW-capable model listings \(listing only/);
+  expect(html).not.toContain('id="adult-mode"');
+  const w=world();w.studio.open('image','a fox');expect(byId(w,'adult-mode').checked).toBe(false);
  });
 });

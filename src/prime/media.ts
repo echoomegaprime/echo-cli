@@ -5,6 +5,7 @@ import type {AnswerInfo, ModelRouter} from '../code/model-factory.js';
 import {WorkspaceHttpError} from './workspace.js';
 import type {MediaOutcomes} from './media-outcomes.js';
 import {DEFAULT_GATE_CALL_KINDS} from './media-collect.js';
+import {ADULT_STYLES,ROUTER_CAP_IDS,adultFields,adultPolicy,classifyAdult,isRouterCap,type AdultRefusalCode,type AdultStyle} from './adult.js';
 /**
  * Auto media routing: the user types a prompt, Prime classifies it (image / video / music / sfx / voice / image-edit,
  * or chat when nothing creative is asked), asks the live SDK catalog (kind-scoped searches through the SDK broker) which
@@ -393,7 +394,9 @@ export function durationFields(spec:DurationSpec,seconds:number):Json{
  if(spec.unit==='frames'){const fps=Math.max(8,Math.min(24,Math.floor(128/s)));return {fps,length:Math.min(129,Math.round(s*fps)+1)};}
  return {[spec.key]:Math.round(s*10)/10};
 }
-export function argumentTemplate(id:string,kind:MediaKind,classification?:Pick<Classification,'styles'|'aspect'>,shape?:CapShape):ArgumentTemplate{
+/** `adult`: the request is an attested adult request, so the on-prem router gets the fields it needs (nsfw, subjects_fictional,
+ * the user's chosen style on images, pinned to TEMPER). It only ever applies to the router capabilities. */
+export function argumentTemplate(id:string,kind:MediaKind,classification?:Pick<Classification,'styles'|'aspect'>,shape?:CapShape,adult?:{style:AdultStyle}):ArgumentTemplate{
  const envelope=envelopeFor(id,shape),fixed:Json={};
  if(id==='echo.media.image_generate'){
   fixed.wait=false;
@@ -401,6 +404,7 @@ export function argumentTemplate(id:string,kind:MediaKind,classification?:Pick<C
   if(classification?.aspect==='16:9'){fixed.width=1024;fixed.height=576;}else if(classification?.aspect==='9:16'){fixed.width=576;fixed.height=1024;}else if(classification?.aspect==='21:9'){fixed.width=1344;fixed.height=576;}
  }
  if(id==='echo.media.video_generate')fixed.wait=false;
+ if(adult&&isRouterCap(id))Object.assign(fixed,adultFields(id==='echo.media.image_generate'?adult.style:undefined));
  const duration=durationFor(id,kind);
  return {...envelope,verb:verbOf(id),textKey:textKeyFor(id,kind,shape),fixed,...(duration?{duration}:{})};
 }
@@ -414,8 +418,8 @@ export function materialize(template:ArgumentTemplate,text:string,seconds?:numbe
 }
 /** Builds the exact Studio request for a pick from the capability's registry shape (live record when the router read it,
  * otherwise the verified family table above). A shape the table does not know is flagged `unmodeled` for review. */
-export function buildArguments(id:string,kind:MediaKind,text:string,classification?:Pick<Classification,'styles'|'aspect'|'durationSeconds'>,shape?:CapShape):{arguments:Json;shape:'modeled'|'unmodeled';template:ArgumentTemplate}{
- const template=argumentTemplate(id,kind,classification,shape);
+export function buildArguments(id:string,kind:MediaKind,text:string,classification?:Pick<Classification,'styles'|'aspect'|'durationSeconds'>,shape?:CapShape,adult?:{style:AdultStyle}):{arguments:Json;shape:'modeled'|'unmodeled';template:ArgumentTemplate}{
+ const template=argumentTemplate(id,kind,classification,shape,adult);
  return {arguments:materialize(template,text.trim(),classification?.durationSeconds),shape:template.modeled?'modeled':'unmodeled',template};
 }
 /** Reads a capability record (snapshot or live) into a ranked candidate, or null when it is not a generator for any kind:
@@ -456,8 +460,12 @@ export interface RankOptions {text:string;styles?:StyleCue[];aspect?:Aspect;dura
  /** Call kinds never offered (Prime config `media.denyCallKinds`). */
  denyCallKinds?:readonly string[];
  /** Live registry shapes read for these ids (argument envelope and field names). */
- shapes?:ReadonlyMap<string,CapShape>}
+ shapes?:ReadonlyMap<string,CapShape>;
+ /** An attested adult brief: only the on-prem router capabilities may be candidates; every other tool is listed under
+  * `excluded` with the adult reason. `adultStyle` is the user's chosen style (photoreal by default). */
+ adult?:boolean;adultStyle?:AdultStyle}
 export interface RankResult {candidates:Candidate[];excluded:Candidate[]}
+export const ADULT_EXCLUDED='adult brief: only the on-prem media router (TEMPER) is used; cloud and other providers are never sent an adult brief';
 /** The `call_kind=` the registry description names (the LLM router dispatches on it). */
 export function callKindOf(c:{description?:string}):string|undefined{return /\bcall_kind=([a-z][a-z0-9_]{1,60})/.exec(c.description||'')?.[1];}
 /** LLM-router call kinds that return a media file (Together's images, videos and speech endpoints). Every other kind the
@@ -494,6 +502,7 @@ export function rankCandidates(kind:MediaKind,catalog:Capability[],options:RankO
    cand.catalogSource='live';
    cand.healthSource=!options.liveHealth||options.liveHealth.has(cand.id)?'catalog':cand.health==='unknown'?'none':'snapshot';
   }
+  if(options.adult&&!isRouterCap(cand.id))cand.unavailable=ADULT_EXCLUDED;
   const matched=cand.styles.filter(s=>styles.includes(s));
   cand.fit=1+Math.min(0.3,0.15*matched.length);
   if(!cand.unavailable&&cand.id==='echo.cartesia.tts'&&options.text.length>400)cand.unavailable='text longer than the 400-character Cartesia bound';
@@ -507,7 +516,7 @@ export function rankCandidates(kind:MediaKind,catalog:Capability[],options:RankO
   else{const last=options.outcomes?.last(cand.id);if(last?.category==='ok')cand.reasons.push('last run succeeded '+new Date(last.at).toISOString().slice(0,16).replace('T',' ')+' UTC');}
   if(untested){cand.demoted??={category:'untested',reason:untested};cand.reasons.push('ranked lower: '+untested);}
   if(cand.catalogSource==='snapshot')cand.reasons.push(SNAPSHOT_ONLY);
-  const built=buildArguments(cand.id,kind,options.text,{styles,aspect:options.aspect,durationSeconds:options.durationSeconds},options.shapes?.get(cand.id));cand.argumentShape=built.shape;
+  const built=buildArguments(cand.id,kind,options.text,{styles,aspect:options.aspect,durationSeconds:options.durationSeconds},options.shapes?.get(cand.id),options.adult?{style:options.adultStyle??'photoreal'}:undefined);cand.argumentShape=built.shape;
   if(cand.argumentShape==='unmodeled')cand.reasons.push('argument shape not modeled; review the request details');
   (cand.unavailable?excluded:candidates).push(cand);
  }
@@ -577,8 +586,11 @@ export interface MediaPick {id:string;
  template:ArgumentTemplate;
  /** Set when a recent real run of this tool (or a billing refusal on its provider) ranked it lower. */
  demoted?:{category:string;reason:string}}
+/** Present only for an adult brief: whether Adult mode is on, whether the classifier read the brief as adult, why nothing was
+ * sent (`refusal`), the chosen style and the only capabilities considered. */
+export interface AdultRoute {active:boolean;detected:boolean;refusal?:AdultRefusalCode;style?:AdultStyle;restrictedTo?:readonly string[]}
 export interface RouteResult {
- classification:Classification;picked:MediaPick|null;alternatives:MediaPick[];excluded:{id:string;label:string;reason:string}[];
+ classification:Classification;picked:MediaPick|null;alternatives:MediaPick[];excluded:{id:string;label:string;reason:string}[];adult?:AdultRoute;
  /** Why nothing was picked (chat, image-edit without a source, or no healthy generator for the kind). */
  reason?:string;probe:{probed:string[];source:'none'|'cached'|'live'|'mixed'};
  /** Which catalog the ranking used: the live SDK catalog, part of it, or only the shipped snapshot (and why). */
@@ -601,6 +613,8 @@ export interface MediaRouterOptions {
  callKinds?:readonly string[];
  /** Call kinds never offered (Prime config `media.denyCallKinds`). */
  denyCallKinds?:readonly string[];
+ /** Test-only seam: literal strings the adult classifier counts as an adult brief. Production supplies none. */
+ adultMarkers?:readonly string[];
  models?:ModelRouter;now?:()=>number;probeTimeoutMs?:number;probeCount?:number;classifierTimeoutMs?:number;searchTimeoutMs?:number;
 }
 const PROBE_CACHE_MS=60000;
@@ -663,41 +677,52 @@ export class MediaRouter {
   this.probes.set(id,{at:this.now(),health,shape});
   return {health,shape,source:'live'};
  }
- private toPick(c:Candidate,kind:MediaKind,text:string,classification:Classification,shape?:CapShape):MediaPick{
-  const built=buildArguments(c.id,kind,text,classification,shape);
+ private toPick(c:Candidate,kind:MediaKind,text:string,classification:Classification,shape?:CapShape,adult?:{style:AdultStyle}):MediaPick{
+  const built=buildArguments(c.id,kind,text,classification,shape,adult);
   return {id:c.id,cap:c.id,label:c.label,provider:c.provider,reason:'Picked '+c.label+' because '+c.reasons.join(' · '),health:c.health,healthSource:c.healthSource,catalogSource:c.catalogSource,cost:c.cost,costNote:c.costNote,quality:c.quality,speed:c.speed,score:c.score,argumentShape:built.shape,note:c.note,request:{target:'sdk',name:c.id,arguments:built.arguments},template:built.template,...(c.demoted?{demoted:c.demoted}:{})};
  }
  /** The one entry point. `mode` is a Studio/composer tab ('auto' or a kind); `fallback` says what an unclassifiable prompt
   * means (Studio: image, composer: chat); `durationSeconds` is the Studio's length control and wins over the brief's. */
  async route(input:unknown,signal?:AbortSignal):Promise<RouteResult>{
   const data=obj(input);
-  if(Object.keys(data).some(k=>!['text','mode','fallback','probe','classifier','durationSeconds'].includes(k)))throw new MediaError(400,'Invalid media request');
+  if(Object.keys(data).some(k=>!['text','mode','fallback','probe','classifier','durationSeconds','adult','fictional','style'].includes(k)))throw new MediaError(400,'Invalid media request');
   if(typeof data.text!=='string'||!data.text.trim())throw new MediaError(400,'Enter a prompt to route');
   if(data.text.length>MEDIA_MAX_TEXT)throw new MediaError(400,'Prompt exceeds '+MEDIA_MAX_TEXT+' characters');
   if(data.mode!==undefined&&data.mode!=='auto'&&!MEDIA_KINDS.includes(data.mode as MediaKind))throw new MediaError(400,'Invalid media mode');
   if(data.fallback!==undefined&&data.fallback!=='image'&&data.fallback!=='chat')throw new MediaError(400,'Invalid media fallback');
   if(data.probe!==undefined&&typeof data.probe!=='boolean')throw new MediaError(400,'Invalid media request');
   if(data.classifier!==undefined&&typeof data.classifier!=='boolean')throw new MediaError(400,'Invalid media request');
+  if((data.adult!==undefined&&typeof data.adult!=='boolean')||(data.fictional!==undefined&&typeof data.fictional!=='boolean'))throw new MediaError(400,'Invalid media request');
+  if(data.style!==undefined&&!ADULT_STYLES.includes(data.style as AdultStyle))throw new MediaError(400,'Invalid adult style; use '+ADULT_STYLES.join(' or '));
   if(data.durationSeconds!==undefined&&(typeof data.durationSeconds!=='number'||!Number.isFinite(data.durationSeconds)||data.durationSeconds<0.5||data.durationSeconds>600))throw new MediaError(400,'Length must be 0.5 to 600 seconds');
   const text=data.text,started=this.now();
   let classification=classifyPrompt(text,{hint:(data.mode as MediaKind|'auto'|undefined)??'auto',fallback:(data.fallback as 'image'|'chat'|undefined)??'image'});
+  // An adult brief (Adult mode on, or the classifier read the text as one) is decided before anything leaves this process:
+  // no classifier model sees the text, no catalog search runs for a refusal, and a refusal names exactly what to switch on.
+  const adultStyle=(data.style as AdultStyle|undefined)??'photoreal',adultText=data.adult===true||classifyAdult(text,{markers:this.options.adultMarkers}).adult;
   // One short Qwen call sharpens a rules result that is not already near-certain; a chosen mode tab (source 'hint') is never second-guessed.
-  if(this.options.models&&data.classifier!==false&&classification.source==='rules'&&classification.confidence<0.9){
+  if(!adultText&&this.options.models&&data.classifier!==false&&classification.source==='rules'&&classification.confidence<0.9){
    classification=await classifyWithModel(this.options.models,text,classification,{timeoutMs:this.options.classifierTimeoutMs,signal});
   }
   if(typeof data.durationSeconds==='number')classification={...classification,durationSeconds:data.durationSeconds};
+  const policy=adultPolicy({text,flagged:data.adult===true,fictional:data.fictional===true,kind:classification.kind,markers:this.options.adultMarkers});
+  const adult=policy.adult&&classification.kind!=='chat'?policy:undefined;
   const probe:RouteResult['probe']={probed:[],source:'none'};
   const kind=classification.kind;
   if(kind==='chat'){
    debug('%j',{event:'prime_media_routed',kind,picked:null,durationMs:this.now()-started});
    return {classification,picked:null,alternatives:[],excluded:[],reason:'This reads as a conversation, not a media request; it goes to chat unless you pick a creation mode.',probe,catalog:{source:'none',queries:[],listed:0,failed:[],cached:false},records:[]};
   }
+  if(adult?.refusal){
+   debug('%j',{event:'prime_media_adult_refused',code:adult.refusal.code,kind,durationMs:this.now()-started});
+   return {classification,picked:null,alternatives:[],excluded:[],reason:adult.refusal.message,probe,catalog:{source:'none',queries:[],listed:0,failed:[],cached:false},records:[],adult:{active:adult.flagged,detected:adult.detected,refusal:adult.refusal.code}};
+  }
   // Classify first, then ask the live catalog about that one kind only.
   const discovery=await this.discover(kind,signal);
   const base=mergeCatalog(this.options.catalog(),discovery.rows),listed=new Set(discovery.rows.map(c=>c.id));
   const liveHealth=new Set(discovery.rows.filter(c=>c.health!=='unknown').map(c=>c.id));
   const shapes=new Map<string,CapShape>();
-  const rankWith=(catalog:Capability[])=>rankCandidates(kind,catalog,{text,styles:classification.styles,aspect:classification.aspect,durationSeconds:classification.durationSeconds,live:listed,liveHealth,outcomes:this.options.outcomes,callKinds:this.options.callKinds,denyCallKinds:this.options.denyCallKinds,shapes});
+  const rankWith=(catalog:Capability[])=>rankCandidates(kind,catalog,{text,styles:classification.styles,aspect:classification.aspect,durationSeconds:classification.durationSeconds,live:listed,liveHealth,outcomes:this.options.outcomes,callKinds:this.options.callKinds,denyCallKinds:this.options.denyCallKinds,shapes,...(adult?{adult:true,adultStyle}:{})});
   let ranked=rankWith(base);
   if(this.options.read&&data.probe!==false&&ranked.candidates.length){
    // The pick and the alternatives the Studio shows (seven) are read live: health, registration and argument shape.
@@ -709,11 +734,17 @@ export class MediaRouter {
    ranked=rankWith(base.map(c=>{const r=live.get(c.id);return r?{...c,health:r.health}:c;}));
    for(const c of [...ranked.candidates,...ranked.excluded])if(live.has(c.id)){c.healthSource='probe';c.reasons=c.reasons.map(r=>r.startsWith('health ')?'health '+c.health+' (probed now)':r===SNAPSHOT_ONLY&&c.health!=='unknown'?SNAPSHOT_READ:r);}
   }
-  const picks=ranked.candidates.map(c=>this.toPick(c,kind,text,classification,shapes.get(c.id)));
+  const picks=ranked.candidates.map(c=>this.toPick(c,kind,text,classification,shapes.get(c.id),adult?{style:adultStyle}:undefined));
   // Every excluded generator is listed with its reason (no cap): nothing the catalog offers for this kind disappears.
   const excluded=ranked.excluded.map(c=>({id:c.id,label:c.label,reason:c.unavailable!}));
   let reason:string|undefined;
-  if(kind==='image-edit')reason='This asks to edit an existing image. Auto does not prepare edits: attach the source image in the Studio (Library → Use in Studio) and pick one of the editing-capable tools listed below yourself. Nothing was prepared.';
+  if(adult){
+   if(!picks.length){
+    const router=ranked.excluded.filter(c=>isRouterCap(c.id)&&c.kinds.includes(kind));
+    reason='Adult mode runs only on the on-prem media router (TEMPER), which makes images and video. '+(router.length?'Its '+kind+' tool is not usable right now ('+router.map(c=>c.label+': '+c.unavailable).join('; ')+').':'No '+kind+' tool of the router is listed in the catalog, so there is no on-prem '+kind+' tool for this brief.')+' Nothing was sent and no other provider was used.';
+   }
+  }
+  else if(kind==='image-edit')reason='This asks to edit an existing image. Auto does not prepare edits: attach the source image in the Studio (Library → Use in Studio) and pick one of the editing-capable tools listed below yourself. Nothing was prepared.';
   else if(!picks.length)reason='No healthy, runnable '+kind+' generator is listed in the catalog right now (see "Not used for this brief" for why each one is out); nothing was prepared and no other kind was substituted.';
   const picked=kind==='image-edit'?null:picks[0]??null;
   const alternatives=(kind==='image-edit'?picks:picks.slice(1)).slice(0,6);
@@ -721,6 +752,6 @@ export class MediaRouter {
   // The record carries the health the pick was ranked with (a probe result when one ran).
   const records=[...(picked?[picked]:[]),...alternatives].flatMap(p=>{const c=byId.get(p.id);return c?[{...catalogRecord(c),health:p.health}]:[];});
   debug('%j',{event:'prime_media_routed',kind,confidence:classification.confidence,source:classification.source,picked:picked?.id??null,alternatives:alternatives.length,excluded:excluded.length,probed:probe.probed.length,catalog:discovery.report.source,listed:discovery.report.listed,durationMs:this.now()-started});
-  return {classification,picked,alternatives,excluded,...(reason?{reason}:{}),probe,catalog:discovery.report,records};
+  return {classification,picked,alternatives,excluded,...(reason?{reason}:{}),probe,catalog:discovery.report,records,...(adult?{adult:{active:true,detected:adult.detected,style:adultStyle,restrictedTo:ROUTER_CAP_IDS}}:{})};
  }
 }
