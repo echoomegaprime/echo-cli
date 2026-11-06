@@ -32,7 +32,7 @@
   return session.ownerAccess===true?'owner':'member';
  }
  async function api(path,data,timeoutMs){
-  const current=generation,sent={'X-Prime-Request':'1',...await headers(),'Content-Type':'application/json'};
+  const current=generation,sent={'x-prime-request':'1',...await headers(),'content-type':'application/json'};
   if(current!==generation)throw new Error('Account session changed.');
   if(!/^https?:$/.test(location.protocol))throw new Error('Open ECHO Prime through its local host to connect. This file is an offline preview.');
   const response=await fetch('/api/'+path,{method:'POST',credentials:'same-origin',headers:sent,body:JSON.stringify(data),signal:AbortSignal.timeout(timeoutMs||30000)});
@@ -60,7 +60,7 @@
   const access=admission();
   if(access==='signin'||access==='member'){report=null;reportState=access;renderEnhance();return;}
   try{
-   const response=await fetch('/api/prime/models',{credentials:'same-origin',headers:{'X-Prime-Request':'1',...await headers()}});
+   const response=await fetch('/api/prime/models',{credentials:'same-origin',headers:{'x-prime-request':'1',...await headers()}});
    const data=await response.json();
    if(current!==generation)return;
    if(!response.ok||!data||!Array.isArray(data.providers))throw new Error('status');

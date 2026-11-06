@@ -120,9 +120,9 @@
    if(!s?.authenticated||s.user?.status!=='approved'){
     throw new Error('Sign in to an approved Workspace account to use Library and Artifact Center.');
    }
-   return {'X-Prime-Request':'1',...(typeof s.csrf==='string'&&s.csrf?{'x-echo-csrf':s.csrf}:{}),...extra};
+   return {'x-prime-request':'1',...(typeof s.csrf==='string'&&s.csrf?{'x-echo-csrf':s.csrf}:{}),...extra};
   }
-  return {'X-Prime-Request':'1',...extra};
+  return {'x-prime-request':'1',...extra};
  }
 
  // ---- State ------------------------------------------------------------------
@@ -156,7 +156,7 @@
  async function primeJson(path,body,signal){
   const turn=generation;
   const sig=signal?AbortSignal.any([controller.signal,signal]):AbortSignal.any([controller.signal,AbortSignal.timeout(30000)]);
-  const headers=requestHeaders(body!==undefined?{'Content-Type':'application/json'}:{});
+  const headers=requestHeaders(body!==undefined?{'content-type':'application/json'}:{});
   const response=await fetch('/api/prime/'+path,{
    method:body!==undefined?'POST':'GET',
    credentials:'same-origin',

@@ -7,7 +7,7 @@
  async function request(path,data,signal){
   const current=generation;let headers={};if(typeof window!=='undefined'&&window.EchoPrimeWorkspace)headers=await window.EchoPrimeWorkspace.ownerHeaders();
   if(current!==generation||signal?.aborted)throw new Error('Account session changed.');
-  const response=await fetch('/api/steward/'+path,{method:data?'POST':'GET',credentials:'same-origin',headers:{'X-Prime-Request':'1',...headers,...(data?{'Content-Type':'application/json'}:{})},...(data?{body:JSON.stringify(data)}:{}),signal});
+  const response=await fetch('/api/steward/'+path,{method:data?'POST':'GET',credentials:'same-origin',headers:{'x-prime-request':'1',...headers,...(data?{'content-type':'application/json'}:{})},...(data?{body:JSON.stringify(data)}:{}),signal});
   const value=await response.json();if(current!==generation||signal?.aborted)throw new Error('Account session changed.');
   if(!response.ok){if(response.status===401||response.status===403){if(typeof window!=='undefined'&&window.EchoPrimeWorkspace?.invalidate)window.EchoPrimeWorkspace.invalidate();else clearPrivate();}throw new Error(value.error||'Steward owner is unavailable.');}return value;
  }

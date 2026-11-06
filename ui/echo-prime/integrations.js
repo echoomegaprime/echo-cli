@@ -10,7 +10,7 @@
   const current=generation,headers=await window.EchoPrimeWorkspace?.ownerHeaders()||{};
   if(current!==generation)throw Error('Account session changed.');
   if(!/^https?:$/.test(location.protocol))throw Error('Open ECHO Prime through its local host to connect. This file is an offline preview.');
-  const response=await fetch('/api/'+path,{method:data?'POST':'GET',credentials:'same-origin',headers:{'X-Prime-Request':'1',...headers,...(data?{'Content-Type':'application/json'}:{})},body:data?JSON.stringify(data):undefined,signal:AbortSignal.any([controller.signal,AbortSignal.timeout(25000)])});
+  const response=await fetch('/api/'+path,{method:data?'POST':'GET',credentials:'same-origin',headers:{'x-prime-request':'1',...headers,...(data?{'content-type':'application/json'}:{})},body:data?JSON.stringify(data):undefined,signal:AbortSignal.any([controller.signal,AbortSignal.timeout(25000)])});
   if(!response.headers.get('content-type')?.includes('application/json'))throw Error('The authorized ECHO host is not connected.');
   const value=await response.json();if(current!==generation)throw Error('Account session changed.');
   if(!response.ok){if(response.status===401||response.status===403){if(window.EchoPrimeWorkspace?.invalidate)window.EchoPrimeWorkspace.invalidate();else invalidate();}throw Error(value.error||'Connection unavailable');}return value;
