@@ -42,6 +42,7 @@
 .enhance-undo[hidden]{display:none}
 .enhance-note{display:block;width:100%;font-size:11px;color:#9fbfb3;line-height:1.55;margin:8px 0 0}
 .enhance-note[hidden]{display:none}
+.enhance-note.enhance-warn{color:#f0dd9d}
 .enhance-added{margin:4px 0 0;padding-left:16px;font-size:11px;color:#b4cec5;line-height:1.5;display:grid;gap:2px}
 .enhance-added[hidden]{display:none}
 .composer .enhance-wrap{margin-right:2px}
