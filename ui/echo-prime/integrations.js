@@ -155,6 +155,18 @@
    /** Auto-router hooks: select a listed capability by id, or select it and set the exact request the router prepared. */
    select(id){const c=catalog.find(x=>x.id===id);if(c)choose(c);return !!c;},
    apply(pick){const c=pick&&catalog.find(x=>x.id===pick.id);if(!c)return false;choose(c);if(pick.arguments&&typeof pick.arguments==='object'&&!Array.isArray(pick.arguments))$('#creative-arguments').value=JSON.stringify({...pick.arguments,...(studioInputs.length?{inputs:studioInputs.map(i=>({upload_id:i.upload_id,role:i.role}))}:{})},null,2);return true;},
+   /** Auto-router hook: rows the live catalog listed for a route (public catalog fields only). A new id is added under its
+    *  medium; a listed id keeps its entry and takes the live health and registration. Returns how many ids were added. */
+   merge(rows){
+    let added=0,changed=false;
+    for(const r of Array.isArray(rows)?rows.slice(0,20):[]){
+     if(!r||typeof r.id!=='string'||!/^echo\.[A-Za-z0-9_.-]{1,180}$/.test(r.id))continue;
+     const health=typeof r.health==='string'&&r.health?r.health.slice(0,32):'unknown',registered=r.registered!==false,at=catalog.findIndex(x=>x.id===r.id);
+     if(at<0){catalog=[...catalog,{id:r.id,description:typeof r.description==='string'?r.description.slice(0,600):'',health,registered,scope:typeof r.scope==='string'?r.scope:'',category:Object.hasOwn(modes,r.category)||r.category==='tools'?r.category:'tools'}];added++;changed=true;}
+     else if(catalog[at].health!==health||catalog[at].registered!==registered){catalog=catalog.map((x,i)=>i===at?{...x,health,registered}:x);changed=true;}
+    }
+    if(changed)render();return added;
+   },
    catalog(){return catalog.slice();},
    selected(){return selected?{id:selected.id,category:selected.category}:null;},
   };renderStudioInputs();models();render();

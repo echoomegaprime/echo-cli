@@ -7,8 +7,9 @@
 
 ## 1. Purpose
 
-The Media auto-router (`src/prime/media.ts`) reads a prompt, classifies what the user wants created, ranks the
-SDK catalog's generation capabilities, and hands back one explicit pick plus ordered alternatives — so the
+The Media auto-router (`src/prime/media.ts`) reads a prompt, classifies what the user wants created, asks the
+live SDK catalog (through the SDK broker) which generators exist for that kind, ranks them, and hands back one
+explicit pick plus ordered alternatives — so the
 user only has to type a prompt, per the first Commander order above.
 
 Enhance prompt (`src/prime/enhance.ts`) is the second order: a button next to the composer (chat) and the
@@ -84,7 +85,49 @@ A candidate is moved to `excluded` (never picked, never offered as an alternativ
 `style`/`width`/`height` from the classification; music/sfx get a duration field when one was parsed; voice
 and sfx families get `{text: prompt}`; everything else modeled gets `{prompt}`); families it does not
 recognise still get a best-effort shape but are flagged `argumentShape: 'unmodeled'` so the Studio review
-shows "review request details" instead of a confident shape.
+shows "review request details" instead of a confident shape. The `command` is the id's last segment, except
+for the `echo.llm.*` model caps (Together, OpenRouter, Fireworks), whose registry schemas declare one uniform
+command, `call` (and whose ids carry version dots such as `…FLUX.2-max`, so the last segment is not a verb):
+they get `{command: "call", options: {prompt}}`, the dual shape the LLM router normalises.
+
+### Live catalog
+
+The candidates come from the **live SDK catalog**, not only from the shipped `ui/echo-prime/catalog.json`
+snapshot. After classifying, `MediaRouter.route` runs the classified kind's searches (`MEDIA_SEARCHES`) through
+the SDK broker's `sdk.search` (the same broker search `/api/search` uses), in parallel, 5 s each
+(`searchTimeoutMs`):
+
+| Kind | Searches |
+|---|---|
+| image | `image_generate`, `text-to-image`, `flux`, `imagen` |
+| image-edit | `kontext`, `imagen_edit`, `image edit` |
+| video | `video_generate`, `text-to-video`, `veo`, `sora` |
+| music | `music_generation`, `compose music` |
+| sfx | `sound_generation`, `sound effect` |
+| voice | `text to speech`, `elevenlabs tts`, `cartesia` |
+
+Tokens are distinctive on purpose: the broker refuses an answer the catalog marks truncated, and the router
+refuses any answer over 100 rows. Each row's id must match `^echo\.[A-Za-z0-9_.-]{1,180}$`. Live rows are
+overlaid on the snapshot (`mergeCatalog`): the live registration, health, description and scope win; the
+snapshot's Studio medium (`category`) is kept, and a tool only the live catalog lists is filed under the
+classified kind's medium. Ids the live catalog listed rank with `healthSource: 'catalog'` and
+`catalogSource: 'live'`; ids only the snapshot lists say "listed only in the shipped snapshot" in their reason.
+An answered kind is cached 60 s; a search that throws, times out or over-answers is named in `catalog.failed`
+and never retried silently. The hub keeps live rows in its own catalog, as `/api/search` does (the snapshot's
+medium is preserved there too), so `/api/status` shows them to the Studio.
+
+Every route result says which catalog it ranked (`catalog.source`):
+
+- `live` — every search answered;
+- `partial` — some searches failed; `catalog.reason` names them and says tools only those searches would list
+  were ranked from the snapshot;
+- `snapshot` — no live catalog: the Prime config has no `sdk` section, or every search failed (the first
+  failure is quoted). The reason says the snapshot's health may be stale; review re-reads the tool live
+  anyway before anything runs;
+- `none` — a chat classification, where nothing is ranked.
+
+`records` carries the public catalog rows (id, registration, health, category, description, scope, tier) of
+the pick and the alternatives, so the browser Studio can select a tool only the live catalog lists.
 
 `MediaRouter.route` probes the **live health of the top 3 ranked candidates** (`probeCount`, default 3)
 before finalising the order: it reads each id through the same SDK `read` that `PrimeHub.prepare` trusts, race
@@ -241,7 +284,9 @@ Echo's own fleet has previously confirmed working).
 
 Both routes live behind `workspace.requireOwner` like every other `/api/prime/*` route: a valid same-origin
 Prime session cookie plus the `X-Prime-Request: 1` header are required, or the server answers 403 "Same-origin
-Prime session required". Neither route is reachable by a member or an anonymous visitor.
+Prime session required". With an authenticated Workspace configured, an anonymous visitor gets 401 and a
+signed-in member gets 403 "Primary owner admission required" before either route reaches the router or a model
+(`tests/prime-media.test.ts`, "owner-only media routes").
 
 ### `POST /api/prime/media/route`
 
@@ -261,39 +306,42 @@ Request:
 says what an unclassifiable prompt means (`"image"` for the Studio, `"chat"` for the composer). `probe` and
 `classifier` default to `true` and let tests or callers skip the live health probe / model classification turn.
 
-Response:
+Response (shape; values from a synthetic catalog):
 
 ```json
 {
   "classification": {
     "kind": "image",
-    "confidence": 0.91,
-    "styles": ["photoreal"],
+    "confidence": 0.98,
+    "styles": ["photoreal", "portrait"],
     "aspect": "16:9",
-    "signals": ["photo-craft", "model:image"],
+    "signals": ["image-noun", "photo-craft", "model:image"],
     "source": "rules+model",
-    "model": {"id": "qwen", "label": "Qwen", "requested": null, "model": "qwen2.5", "reported": true, "answered": true}
+    "model": {"id": "qwen", "label": "Qwen", "requested": "c3po-code:echo-qwen38-abliterated-256k", "model": "c3po-code:echo-qwen38-abliterated-256k", "reported": true, "answered": true}
   },
   "picked": {
-    "id": "gemini-3.1-flash-image",
-    "cap": "gemini-3.1-flash-image",
+    "id": "echo.llm.together.google-flash-image-3.1",
+    "cap": "echo.llm.together.google-flash-image-3.1",
     "label": "Gemini 3.1 Flash Image (Nano Banana 2)",
-    "provider": "unknown",
+    "provider": "Together AI",
     "reason": "Picked Gemini 3.1 Flash Image (Nano Banana 2) because image + photoreal · health green (probed now) · provider charges apply · quality 8.5/10, speed 8/10",
     "health": "green",
     "healthSource": "probe",
+    "catalogSource": "live",
     "cost": "paid-low",
     "costNote": "provider charges apply",
     "quality": 8.5,
     "speed": 8,
-    "score": 1.173,
-    "argumentShape": "unmodeled",
+    "score": 0.759,
+    "argumentShape": "modeled",
     "note": "fast Gemini image tier",
-    "request": {"target": "sdk", "name": "gemini-3.1-flash-image", "arguments": {"command": "generate", "options": {"prompt": "a photoreal portrait of a fox at golden hour, 16:9"}}}
+    "request": {"target": "sdk", "name": "echo.llm.together.google-flash-image-3.1", "arguments": {"command": "call", "options": {"prompt": "a photoreal portrait of a fox at golden hour, 16:9"}}}
   },
-  "alternatives": [],
-  "excluded": [{"id": "echo.media.video_generate", "label": "On-prem video (Wan2.2 TI2V-5B on TEMPER)", "reason": "owner-disabled on TEMPER (RAM budget); this client never force-enables video"}],
-  "probe": {"probed": ["gemini-3.1-flash-image"], "source": "live"}
+  "alternatives": [{"id": "echo.media.image_generate", "...": "same fields as picked"}],
+  "excluded": [{"id": "echo.llm.together.black-forest-labs-FLUX.1-kontext-max", "label": "FLUX.1 Kontext [max] (Together)", "reason": "needs a source image the capability reads itself; ..."}],
+  "probe": {"probed": ["echo.llm.together.google-flash-image-3.1", "echo.media.image_generate"], "source": "live"},
+  "catalog": {"source": "live", "queries": ["image_generate", "text-to-image", "flux", "imagen"], "listed": 14, "failed": [], "cached": false},
+  "records": [{"id": "echo.llm.together.google-flash-image-3.1", "registered": true, "health": "green", "category": "image", "description": "Call Together Gemini 3.1 Flash Image ...", "scope": "llm.invoke", "tier": 1}]
 }
 ```
 
@@ -430,13 +478,20 @@ existing "Review request" → "Run this exact request" buttons are still the onl
   per route) both add latency to a route call; `probe: false` / `classifier: false` exist for callers that
   need to skip them.
 - The ranking is static: nothing here learns from which picks actually succeeded or failed over time.
+- The live catalog discovery (`MEDIA_SEARCHES`) is tested against a synthetic broker only; it has not been run
+  against the production SDK broker. The search tokens were chosen from the known capability ids, not from
+  measured live result counts, so a token the live catalog answers with more than 100 rows shows up as a named
+  failure in `catalog.failed` (and `partial`/`snapshot` in the UI) until it is narrowed.
 
 ## 9. Tests
 
-`tests/prime-media.test.ts`, `tests/prime-enhance.test.ts`, `tests/prime-media-ui.test.ts`.
+`tests/prime-media.test.ts` (classifier fixtures, ranking, arguments, router, live catalog discovery, hub wiring,
+owner-only routes), `tests/prime-enhance.test.ts` (modes, providers, rate limit, redaction, failures, route),
+`tests/prime-media-ui.test.ts` (Auto tab, Studio panel, overrides, failure offers, catalog badges, Studio
+`merge`, Enhance controls, Undo, gates).
 
 ## 10. Logging
 
-`debuglog('echo-prime')` (`NODE_DEBUG=echo-prime`) events: `prime_media_routed`, `prime_media_classifier_failed`,
+`debuglog('echo-prime')` (`NODE_DEBUG=echo-prime`) events: `prime_media_routed`, `prime_media_catalog`, `prime_media_classifier_failed`,
 `prime_media_probe_failed`, `prime_enhance_started`, `prime_enhance_finished`, `prime_enhance_refused`. None of
 these log the prompt text itself.

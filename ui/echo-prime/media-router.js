@@ -216,21 +216,33 @@
   if(ok){lastRoute.applied=pick;debug('media','media_pick_applied',{id:pick.id,how});}
   return ok;
  }
+ // Which catalog the server ranked: the live SDK catalog, part of it, or only the shipped snapshot. Never left implicit.
+ function catalogBadge(report){
+  if(!report||typeof report!=='object')return null;
+  const failed=Array.isArray(report.failed)?report.failed.length:0,total=Array.isArray(report.queries)?report.queries.length:0;
+  if(report.source==='live')return badge('live catalog'+(report.cached?' (checked within the last minute)':''),'catalog-live');
+  if(report.source==='partial')return badge('live catalog · '+failed+' of '+total+' searches failed','catalog-partial');
+  if(report.source==='snapshot')return badge('shipped snapshot · not live','catalog-snapshot');
+  return null;
+ }
  function renderPick(r){
   pickBox.replaceChildren();alternatives.replaceChildren();failure.hidden=true;failure.replaceChildren();
   const c=r.classification||{},kind=c.kind||'unknown',sure=Math.round((c.confidence||0)*100);
   repick.textContent=r.picked?'Pick again for this brief':'Pick the best tool';
   const alts=Array.isArray(r.alternatives)?r.alternatives:[],excluded=Array.isArray(r.excluded)?r.excluded:[];
+  // Tools only the live catalog lists are added to the Studio's list first, so the pick and every override can be selected.
+  if(studio&&typeof studio.merge==='function'&&Array.isArray(r.records)&&r.records.length){try{studio.merge(r.records);}catch{debug('media','media_records_refused',{count:r.records.length});}}
+  const catalogNote=r.catalog&&r.catalog.source!=='live'&&typeof r.catalog.reason==='string'?' '+r.catalog.reason:'';
   if(r.picked){
    const p=r.picked;
    pickBox.hidden=false;
    pickBox.append(el('strong',{},p.label+' · '+p.provider),el('p',{class:'media-reason'},p.reason),
-    el('div',{class:'media-badges'},badge(kind+' · '+sure+'% sure'+(c.styles&&c.styles.length?' · '+c.styles.join(', '):'')),badge('health '+p.health+(p.healthSource==='probe'?' (probed)':p.healthSource==='snapshot'?' (snapshot)':''),'health-'+p.health),badge(p.costNote),badge('quality '+p.quality+'/10 · speed '+p.speed+'/10'),...(p.argumentShape==='unmodeled'?[badge('review request details','health-unknown')]:[])));
-   status.textContent='Echo picked a tool for this '+kind+' brief. Review the request below, then submit it yourself; nothing runs until you do.';
+    el('div',{class:'media-badges'},badge(kind+' · '+sure+'% sure'+(c.styles&&c.styles.length?' · '+c.styles.join(', '):'')),badge('health '+p.health+(p.healthSource==='probe'?' (probed)':p.healthSource==='catalog'?' (live catalog)':p.healthSource==='snapshot'?' (snapshot)':''),'health-'+p.health),badge(p.costNote),badge('quality '+p.quality+'/10 · speed '+p.speed+'/10'),catalogBadge(r.catalog),...(p.argumentShape==='unmodeled'?[badge('review request details','health-unknown')]:[])));
+   status.textContent='Echo picked a tool for this '+kind+' brief. Review the request below, then submit it yourself; nothing runs until you do.'+catalogNote;
    if(!applyPick(p,'auto'))status.textContent+=' (The tool is not in this catalog view; search the live registry.)';
   }else{
    pickBox.hidden=true;
-   status.textContent=r.reason||'Nothing was picked.';
+   status.textContent=(r.reason||'Nothing was picked.')+catalogNote;
   }
   toggle.hidden=!alts.length;toggle.textContent=r.picked?'Use a different tool ('+alts.length+')':'Tools for this ('+alts.length+')';
   alternatives.hidden=!(alts.length&&!r.picked);toggle.setAttribute('aria-expanded',String(!alternatives.hidden));

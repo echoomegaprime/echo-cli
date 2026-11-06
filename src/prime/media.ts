@@ -5,8 +5,10 @@ import type {AnswerInfo, ModelRouter} from '../code/model-factory.js';
 import {WorkspaceHttpError} from './workspace.js';
 /**
  * Auto media routing: the user types a prompt, Prime classifies it (image / video / music / sfx / voice / image-edit,
- * or chat when nothing creative is asked), ranks the generation capabilities the live SDK catalog exposes by
- * capability fit x health x cost x quality, and returns one explicit pick plus the ordered alternatives.
+ * or chat when nothing creative is asked), asks the live SDK catalog (kind-scoped searches through the SDK broker) which
+ * generators exist for that kind, overlays them on the shipped snapshot, ranks them by capability fit x health x cost x
+ * quality, and returns one explicit pick plus the ordered alternatives. The result always says which catalog it ranked
+ * (`catalog.source`: live, partial or snapshot) and why, so a snapshot-only ranking is never presented as live.
  *
  * Nothing here spends anything: the pick is a prepared request shape the Creative Studio feeds into the existing
  * review-then-execute path. Nothing here switches providers either: when a pick fails the caller shows the failure and
@@ -261,7 +263,10 @@ const KIND_HINT:[MediaKind,RegExp][]=[
 ];
 export interface Candidate {
  id:string;label:string;provider:string;kinds:MediaKind[];styles:StyleCue[];quality:number;speed:number;cost:CostTier;costNote:string;
- health:string;healthSource:'snapshot'|'probe'|'none';fit:number;score:number;reasons:string[];node?:string;
+ /** Where the health came from: the shipped snapshot, the live catalog search, a live read of this one id, or nowhere. */
+ health:string;healthSource:'snapshot'|'catalog'|'probe'|'none';fit:number;score:number;reasons:string[];node?:string;
+ /** Whether the live catalog listed this id for this route ('live') or only the shipped snapshot did ('snapshot'). */
+ catalogSource:'live'|'snapshot';
  argumentShape:'modeled'|'unmodeled';rankingSource:string;note:string;
  /** A reason this candidate cannot be used right now; such candidates are listed under `excluded`, never picked. */
  unavailable?:string;
@@ -294,7 +299,10 @@ function costOf(c:Capability,ranking:Ranking|undefined):{cost:CostTier;note:stri
  if(/\b(?:max|ultra|master|pro)\b/i.test(c.id))return {cost:'paid-mid',note:'premium tier; provider charges apply'};
  return {cost:'paid-low',note:'provider charges apply'};
 }
-function verbOf(id:string):string{return id.split('.').at(-1)||'generate';}
+/** The SDK command for a capability. The `echo.llm.*` model caps share one uniform command, `call` (registry schemas:
+ * `command` "Uniform SDK command (call)"; the LLM router accepts {command:"call",options:{...}}); their ids carry model
+ * versions with dots ("…FLUX.2-max"), so the last id segment is not a verb there. Other families use the id's last segment. */
+function verbOf(id:string):string{return /^echo\.llm\./.test(id)?'call':id.split('.').at(-1)||'generate';}
 /** Builds the exact Studio request for a pick. Shapes follow the registry's own examples ({command:<verb>,options:{...}});
  * families whose extra fields are known get them, everything else is flagged `unmodeled` so the Studio review shows it. */
 export function buildArguments(id:string,kind:MediaKind,text:string,classification?:Pick<Classification,'styles'|'aspect'|'durationSeconds'>):{arguments:Json;shape:'modeled'|'unmodeled'}{
@@ -324,7 +332,7 @@ export function describeCandidate(c:Capability):Candidate|null{
  const {cost,note:costNote}=costOf(c,ranking),health=String(c.health||'unknown').toLowerCase();
  const candidate:Candidate={
   id:c.id,label:ranking?.label??c.id.replace(/^echo\./,''),provider:providerOf(c.id),kinds,styles:ranking?.styles??[],quality:ranking?.quality??5,speed:ranking?.speed??5,
-  cost,costNote,health,healthSource:c.health?'snapshot':'none',fit:0,score:0,reasons:[],node:(c as {node?:string}).node,
+  cost,costNote,health,healthSource:c.health?'snapshot':'none',fit:0,score:0,reasons:[],node:(c as {node?:string}).node,catalogSource:'snapshot',
   argumentShape:'unmodeled',rankingSource:ranking?.source??'unranked default (quality 5, speed 5)',note:ranking?.note??'',
  };
  if(c.registered===false)candidate.unavailable='not registered';
@@ -333,19 +341,23 @@ export function describeCandidate(c:Capability):Candidate|null{
  else if(/-(?:i2v|r2v)\b|I2V|kontext|imagen_edit/i.test(c.id))candidate.unavailable='needs a source image the capability reads itself; Auto never prepares it from a text-only brief (attach a reference in the Studio and pick it yourself)';
  return candidate;
 }
-export interface RankOptions {text:string;styles?:StyleCue[];aspect?:Aspect;durationSeconds?:number}
+export interface RankOptions {text:string;styles?:StyleCue[];aspect?:Aspect;durationSeconds?:number;
+ /** Ids the live catalog listed for this route: their record (health, registration) is the live one, not the snapshot's. */
+ live?:ReadonlySet<string>}
 export interface RankResult {candidates:Candidate[];excluded:Candidate[]}
 /** Deterministic ranking: fit x health x cost x quality (x a light speed factor). Ties: health, cost, quality, id. */
 export function rankCandidates(kind:MediaKind,catalog:Capability[],options:RankOptions):RankResult{
  const styles=options.styles??[],candidates:Candidate[]=[],excluded:Candidate[]=[];
  for(const c of catalog){
   const cand=describeCandidate(c);if(!cand||!cand.kinds.includes(kind))continue;
+  if(options.live?.has(cand.id)){cand.catalogSource='live';cand.healthSource='catalog';}
   const matched=cand.styles.filter(s=>styles.includes(s));
   cand.fit=1+Math.min(0.3,0.15*matched.length);
   if(cand.id==='echo.cartesia.tts'&&options.text.length>400)cand.unavailable='text longer than the 400-character Cartesia bound';
   const healthWeight=HEALTH_WEIGHT[cand.health]??0.6;
   cand.score=Math.round(cand.fit*healthWeight*COST_WEIGHT[cand.cost]*(cand.quality/10)*(0.85+0.015*cand.speed)*1000)/1000;
-  cand.reasons=[kind+(matched.length?' + '+matched.join(', '):''),'health '+cand.health+(cand.healthSource==='probe'?' (probed now)':cand.healthSource==='snapshot'?' (snapshot)':' (unknown)'),cand.costNote,'quality '+cand.quality+'/10, speed '+cand.speed+'/10'];
+  cand.reasons=[kind+(matched.length?' + '+matched.join(', '):''),'health '+cand.health+(cand.healthSource==='probe'?' (probed now)':cand.healthSource==='catalog'?' (live catalog)':cand.healthSource==='snapshot'?' (snapshot)':' (unknown)'),cand.costNote,'quality '+cand.quality+'/10, speed '+cand.speed+'/10'];
+  if(cand.catalogSource==='snapshot')cand.reasons.push('listed only in the shipped snapshot');
   const built=buildArguments(cand.id,kind,options.text,{styles,aspect:options.aspect,durationSeconds:options.durationSeconds});cand.argumentShape=built.shape;
   if(cand.argumentShape==='unmodeled')cand.reasons.push('argument shape not modeled; review the request details');
   (cand.unavailable?excluded:candidates).push(cand);
@@ -355,27 +367,121 @@ export function rankCandidates(kind:MediaKind,catalog:Capability[],options:RankO
  return {candidates,excluded};
 }
 
+// ---- live catalog ----------------------------------------------------------------------------------------------------
+export type GenerationKind=Exclude<MediaKind,'chat'>;
+/** Kind-scoped searches of the live SDK catalog (through the SDK broker). Distinctive tokens keep each answer under the
+ * broker's 100-row bound; a truncated or failed answer is reported in `catalog.failed`, never dropped silently. */
+export const MEDIA_SEARCHES:Readonly<Record<GenerationKind,readonly string[]>>={
+ image:['image_generate','text-to-image','flux','imagen'],
+ 'image-edit':['kontext','imagen_edit','image edit'],
+ video:['video_generate','text-to-video','veo','sora'],
+ music:['music_generation','compose music'],
+ sfx:['sound_generation','sound effect'],
+ voice:['text to speech','elevenlabs tts','cartesia'],
+};
+/** The Studio medium a discovered id is filed under when the snapshot does not already list it. */
+export const CATEGORY_OF_KIND:Readonly<Record<GenerationKind,string>>={image:'image','image-edit':'image',video:'video',music:'music',sfx:'sound',voice:'voice'};
+export const CAPABILITY_ID=/^echo\.[A-Za-z0-9_.-]{1,180}$/;
+const CATALOG_CACHE_MS=60000,CATALOG_MAX_ROWS=100;
+export interface CatalogReport {
+ /** live: every search answered · partial: some failed · snapshot: no live catalog (not configured or every search failed) · none: nothing was ranked (chat). */
+ source:'live'|'partial'|'snapshot'|'none';
+ queries:string[];
+ /** Distinct capability ids the live searches listed for this kind. */
+ listed:number;
+ failed:{query:string;reason:string}[];
+ /** The live answer is reused for 60 s per kind. */
+ cached:boolean;
+ reason?:string;
+}
+/** A capability row as the browser Studio needs it to select a live-only pick (no secrets: the catalog's own public fields). */
+export interface CatalogRecord {id:string;registered:boolean;health:string;category:string;description:string;scope?:string;tier?:number}
+function liveRow(row:unknown,kind:GenerationKind):Capability|null{
+ const r=obj(row);
+ if(typeof r.id!=='string'||!CAPABILITY_ID.test(r.id))return null;
+ const health=String(r.health??'unknown').toLowerCase().slice(0,32)||'unknown';
+ return {id:r.id,registered:r.registered!==false,health,category:CATEGORY_OF_KIND[kind],description:typeof r.description==='string'?r.description.slice(0,600):'',
+  ...(typeof r.scope==='string'&&r.scope?{scope:r.scope.slice(0,120)}:{}),...(typeof r.tier==='number'&&Number.isFinite(r.tier)?{tier:r.tier}:{})};
+}
+/** Overlays live rows on the snapshot: the live record's registration, health, description and scope win; the snapshot's
+ * Studio medium (category) and node are kept so the Studio filters still find the tool. */
+export function mergeCatalog(snapshot:Capability[],live:Capability[]):Capability[]{
+ const byId=new Map(snapshot.map(c=>[c.id,c] as const));
+ for(const row of live){
+  const old=byId.get(row.id);
+  byId.set(row.id,old?{...old,registered:row.registered,health:row.health,description:row.description||old.description,...(row.scope?{scope:row.scope}:{}),...(row.tier!==undefined?{tier:row.tier}:{})}:row);
+ }
+ return [...byId.values()];
+}
+const catalogRecord=(c:Capability):CatalogRecord=>({id:c.id,registered:c.registered,health:c.health,category:c.category,description:c.description,...(c.scope?{scope:c.scope}:{}),...(c.tier!==undefined?{tier:c.tier}:{})});
+
 // ---- router ----------------------------------------------------------------------------------------------------------
 export interface MediaPick {id:string;
  /** The SDK capability id (same as `id`; the contract name the UI and docs use). */
- cap:string;label:string;provider:string;reason:string;health:string;healthSource:Candidate['healthSource'];cost:CostTier;costNote:string;quality:number;speed:number;score:number;argumentShape:Candidate['argumentShape'];note:string;request:{target:'sdk';name:string;arguments:Json}}
+ cap:string;label:string;provider:string;reason:string;health:string;healthSource:Candidate['healthSource'];catalogSource:Candidate['catalogSource'];cost:CostTier;costNote:string;quality:number;speed:number;score:number;argumentShape:Candidate['argumentShape'];note:string;request:{target:'sdk';name:string;arguments:Json}}
 export interface RouteResult {
  classification:Classification;picked:MediaPick|null;alternatives:MediaPick[];excluded:{id:string;label:string;reason:string}[];
  /** Why nothing was picked (chat, image-edit without a source, or no healthy generator for the kind). */
  reason?:string;probe:{probed:string[];source:'none'|'cached'|'live'|'mixed'};
+ /** Which catalog the ranking used: the live SDK catalog, part of it, or only the shipped snapshot (and why). */
+ catalog:CatalogReport;
+ /** Catalog rows for the pick and the alternatives, so the Studio can select a tool only the live catalog lists. */
+ records:CatalogRecord[];
 }
 export interface MediaRouterOptions {
  catalog:()=>Capability[];
  /** The same read `PrimeHub.prepare` uses: the live record carries `health_status` and `registration_state`. */
  read?:(id:string)=>Promise<unknown>;
- models?:ModelRouter;now?:()=>number;probeTimeoutMs?:number;probeCount?:number;classifierTimeoutMs?:number;
+ /** The live SDK catalog search (the broker's `sdk.search`). Absent = no live catalog: the route says it ranked the snapshot. */
+ search?:(query:string)=>Promise<unknown>;
+ /** Told about live rows once a search answers (the hub keeps them in its catalog, like `/api/search`). */
+ onDiscovered?:(rows:Capability[])=>void;
+ models?:ModelRouter;now?:()=>number;probeTimeoutMs?:number;probeCount?:number;classifierTimeoutMs?:number;searchTimeoutMs?:number;
 }
 const PROBE_CACHE_MS=60000;
 const obj=(v:unknown):Record<string,unknown>=>v&&typeof v==='object'&&!Array.isArray(v)?v as Record<string,unknown>:{};
+async function within<T>(work:Promise<T>,ms:number,label:string,signal?:AbortSignal):Promise<T>{
+ let timer:ReturnType<typeof setTimeout>|undefined,onAbort:(()=>void)|undefined;
+ try{
+  return await Promise.race([work,new Promise<never>((_,reject)=>{
+   timer=setTimeout(()=>reject(new Error(label+' timed out after '+Math.round(ms/1000)+' s')),ms);
+   if(signal){onAbort=()=>reject(new Error('Interrupted'));if(signal.aborted)onAbort();else signal.addEventListener('abort',onAbort,{once:true});}
+  })]);
+ }finally{clearTimeout(timer);if(onAbort)signal?.removeEventListener('abort',onAbort);}
+}
 export class MediaRouter {
  private probes=new Map<string,{at:number;health:string}>();
+ private discovered=new Map<GenerationKind,{at:number;rows:Capability[];failed:{query:string;reason:string}[]}>();
  private now:()=>number;
  constructor(private options:MediaRouterOptions){this.now=options.now??Date.now;}
+ private report(queries:string[],rows:Capability[],failed:{query:string;reason:string}[],cached:boolean):CatalogReport{
+  const base={queries,listed:rows.length,failed,cached};
+  if(!failed.length)return {source:'live',...base};
+  if(failed.length<queries.length)return {source:'partial',...base,reason:failed.length+' of '+queries.length+' live catalog searches failed ('+failed.map(f=>'"'+f.query+'"').join(', ')+'); tools only those searches would list are ranked from the shipped snapshot.'};
+  return {source:'snapshot',...base,reason:'Every live catalog search failed (first: '+failed[0].reason+'); ranked from the shipped catalog snapshot, whose health may be stale. Review re-checks the tool live before anything runs.'};
+ }
+ /** Bounded, kind-scoped live catalog discovery: the kind's searches in parallel, each with its own timeout, cached 60 s
+  * per kind once at least one answered. Never throws for a failed search; the report names every failure. */
+ private async discover(kind:GenerationKind,signal?:AbortSignal):Promise<{rows:Capability[];report:CatalogReport}>{
+  const queries=[...MEDIA_SEARCHES[kind]];
+  if(!this.options.search)return {rows:[],report:{source:'snapshot',queries:[],listed:0,failed:[],cached:false,reason:'The live capability catalog is not connected (the Prime config has no `sdk` section); ranked from the shipped catalog snapshot, whose health may be stale.'}};
+  const hit=this.discovered.get(kind);
+  if(hit&&this.now()-hit.at<CATALOG_CACHE_MS)return {rows:hit.rows,report:this.report(queries,hit.rows,hit.failed,true)};
+  const failures=new Map<string,string>(),byId=new Map<string,Capability>();
+  await Promise.all(queries.map(async query=>{
+   try{
+    const rows=await within(this.options.search!(query),this.options.searchTimeoutMs??5000,'Catalog search',signal);
+    if(!Array.isArray(rows))throw new Error('the catalog answer was not a list');
+    if(rows.length>CATALOG_MAX_ROWS)throw new Error('the catalog answered '+rows.length+' rows, over the '+CATALOG_MAX_ROWS+'-row bound');
+    for(const row of rows){const c=liveRow(row,kind);if(c&&!byId.has(c.id))byId.set(c.id,c);}
+   }catch(error){failures.set(query,error instanceof Error?redact(error.message).slice(0,160):'search failed');}
+  }));
+  if(signal?.aborted)throw new MediaError(499,'Interrupted');
+  const rows=[...byId.values()].sort((a,b)=>a.id<b.id?-1:a.id>b.id?1:0),failed=queries.filter(q=>failures.has(q)).map(query=>({query,reason:failures.get(query)!}));
+  debug('%j',{event:'prime_media_catalog',kind,queries:queries.length,listed:rows.length,failed:failed.length});
+  if(failed.length<queries.length){this.discovered.set(kind,{at:this.now(),rows,failed});this.options.onDiscovered?.(rows);}
+  return {rows,report:this.report(queries,rows,failed,false)};
+ }
  /** Live health for one capability: the hub's read (unwrapped by the caller), cached 60 s. Never throws: an unreadable record is `unknown`. */
  private async probe(id:string,signal?:AbortSignal):Promise<{health:string;source:'cached'|'live'}>{
   const cached=this.probes.get(id);
@@ -391,7 +497,7 @@ export class MediaRouter {
  }
  private toPick(c:Candidate,kind:MediaKind,text:string,classification:Classification):MediaPick{
   const built=buildArguments(c.id,kind,text,classification);
-  return {id:c.id,cap:c.id,label:c.label,provider:c.provider,reason:'Picked '+c.label+' because '+c.reasons.join(' · '),health:c.health,healthSource:c.healthSource,cost:c.cost,costNote:c.costNote,quality:c.quality,speed:c.speed,score:c.score,argumentShape:c.argumentShape,note:c.note,request:{target:'sdk',name:c.id,arguments:built.arguments}};
+  return {id:c.id,cap:c.id,label:c.label,provider:c.provider,reason:'Picked '+c.label+' because '+c.reasons.join(' · '),health:c.health,healthSource:c.healthSource,catalogSource:c.catalogSource,cost:c.cost,costNote:c.costNote,quality:c.quality,speed:c.speed,score:c.score,argumentShape:c.argumentShape,note:c.note,request:{target:'sdk',name:c.id,arguments:built.arguments}};
  }
  /** The one entry point. `mode` is a Studio/composer tab ('auto' or a kind); `fallback` says what an unclassifiable prompt means (Studio: image, composer: chat). */
  async route(input:unknown,signal?:AbortSignal):Promise<RouteResult>{
@@ -413,16 +519,19 @@ export class MediaRouter {
   const kind=classification.kind;
   if(kind==='chat'){
    debug('%j',{event:'prime_media_routed',kind,picked:null,durationMs:this.now()-started});
-   return {classification,picked:null,alternatives:[],excluded:[],reason:'This reads as a conversation, not a media request; it goes to chat unless you pick a creation mode.',probe};
+   return {classification,picked:null,alternatives:[],excluded:[],reason:'This reads as a conversation, not a media request; it goes to chat unless you pick a creation mode.',probe,catalog:{source:'none',queries:[],listed:0,failed:[],cached:false},records:[]};
   }
-  let ranked=rankCandidates(kind,this.options.catalog(),{text,styles:classification.styles,aspect:classification.aspect,durationSeconds:classification.durationSeconds});
+  // Classify first, then ask the live catalog about that one kind only.
+  const discovery=await this.discover(kind,signal);
+  const base=mergeCatalog(this.options.catalog(),discovery.rows),listed=new Set(discovery.rows.map(c=>c.id));
+  const rankWith=(catalog:Capability[])=>rankCandidates(kind,catalog,{text,styles:classification.styles,aspect:classification.aspect,durationSeconds:classification.durationSeconds,live:listed});
+  let ranked=rankWith(base);
   if(this.options.read&&data.probe!==false&&ranked.candidates.length){
    const top=ranked.candidates.slice(0,this.options.probeCount??3),results=await Promise.all(top.map(c=>this.probe(c.id,signal)));
    const live=new Map(top.map((c,i)=>[c.id,results[i]] as const));
    probe.probed=top.map(c=>c.id);
    const sources=new Set(results.map(r=>r.source));probe.source=sources.size>1?'mixed':sources.has('live')?'live':'cached';
-   const catalog=this.options.catalog().map(c=>{const r=live.get(c.id);return r?{...c,health:r.health}:c;});
-   ranked=rankCandidates(kind,catalog,{text,styles:classification.styles,aspect:classification.aspect,durationSeconds:classification.durationSeconds});
+   ranked=rankWith(base.map(c=>{const r=live.get(c.id);return r?{...c,health:r.health}:c;}));
    for(const c of [...ranked.candidates,...ranked.excluded])if(live.has(c.id)){c.healthSource='probe';c.reasons=c.reasons.map(r=>r.startsWith('health ')?'health '+c.health+' (probed now)':r);}
   }
   const picks=ranked.candidates.map(c=>this.toPick(c,kind,text,classification));
@@ -432,7 +541,10 @@ export class MediaRouter {
   else if(!picks.length)reason='No healthy '+kind+' generator is listed in the catalog right now; nothing was prepared and no other kind was substituted.';
   const picked=kind==='image-edit'?null:picks[0]??null;
   const alternatives=(kind==='image-edit'?picks:picks.slice(1)).slice(0,6);
-  debug('%j',{event:'prime_media_routed',kind,confidence:classification.confidence,source:classification.source,picked:picked?.id??null,alternatives:alternatives.length,excluded:excluded.length,probed:probe.probed.length,durationMs:this.now()-started});
-  return {classification,picked,alternatives,excluded,...(reason?{reason}:{}),probe};
+  const byId=new Map(base.map(c=>[c.id,c] as const));
+  // The record carries the health the pick was ranked with (a probe result when one ran).
+  const records=[...(picked?[picked]:[]),...alternatives].flatMap(p=>{const c=byId.get(p.id);return c?[{...catalogRecord(c),health:p.health}]:[];});
+  debug('%j',{event:'prime_media_routed',kind,confidence:classification.confidence,source:classification.source,picked:picked?.id??null,alternatives:alternatives.length,excluded:excluded.length,probed:probe.probed.length,catalog:discovery.report.source,listed:discovery.report.listed,durationMs:this.now()-started});
+  return {classification,picked,alternatives,excluded,...(reason?{reason}:{}),probe,catalog:discovery.report,records};
  }
 }

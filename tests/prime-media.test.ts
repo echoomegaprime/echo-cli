@@ -1,15 +1,17 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- focused SDK/model stand-ins */
 import {afterEach, describe, expect, it, vi} from 'vitest';
 import {mkdtempSync, rmSync, writeFileSync} from 'node:fs';
+import {createServer, type Server} from 'node:http';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import cases from './fixtures/media-classifier-cases.json';
 import type {ModelRouter} from '../src/code/model-factory.js';
-import {PrimeHub, type Capability} from '../src/prime/hub.js';
+import type {PromptEnhancer} from '../src/prime/enhance.js';
+import {PrimeHub, type Capability, type SdkBroker} from '../src/prime/hub.js';
 import {startPrimeServer} from '../src/prime/server.js';
 import {
-  buildArguments, classifyPrompt, classifyWithModel, describeCandidate, MediaError, MediaRouter,
-  RANKING, rankCandidates,
+  buildArguments, classifyPrompt, classifyWithModel, describeCandidate, MEDIA_SEARCHES, MediaError, MediaRouter,
+  mergeCatalog, RANKING, rankCandidates,
 } from '../src/prime/media.js';
 
 const cap=(id:string,extra:Partial<Capability>={}):Capability=>({id,registered:true,health:'green',category:'image',description:'generator',...extra});
@@ -111,6 +113,11 @@ describe('candidate ranking and arguments',()=>{
     expect(buildArguments('echo.voice.speak','voice','hello').arguments).toEqual({command:'speak',options:{text:'hello'}});
     expect(buildArguments('echo.unknown.generator','image','hello').shape).toBe('unmodeled');
   });
+  it('uses the uniform "call" command for echo.llm model caps whose ids contain version dots',()=>{
+    expect(buildArguments('echo.llm.together.black-forest-labs-FLUX.2-max','image','fox')).toEqual({shape:'modeled',arguments:{command:'call',options:{prompt:'fox'}}});
+    expect(buildArguments('echo.llm.together.google-veo-3.1','video','waves').arguments).toEqual({command:'call',options:{prompt:'waves'}});
+    expect(buildArguments('echo.fal.generate','image','fox').arguments).toEqual({command:'generate',options:{prompt:'fox'}});
+  });
   it('never builds a prepare-forbidden argument key for at least 25 ranked ids',()=>{
     const forbidden=/"(?:force_video|grant|api_key|access_token|authorization|confirm|bypass_reason)"\s*:/i;
     const samples=[
@@ -153,6 +160,102 @@ describe('MediaRouter',()=>{
     const s=modelStub();await new MediaRouter({catalog:imageCatalog,models:s.router}).route({text:'zzzz qqqq',fallback:'image',classifier:false});expect(s.next).not.toHaveBeenCalled();
     await new MediaRouter({catalog:imageCatalog,models:s.router}).route({text:'zzzz qqqq',fallback:'image',probe:false});expect(s.next).toHaveBeenCalledTimes(1);
     s.next.mockClear();await new MediaRouter({catalog:imageCatalog,models:s.router}).route({text:'a fox',mode:'video',probe:false});expect(s.next).not.toHaveBeenCalled();
+  });
+});
+
+describe('live catalog discovery',()=>{
+  const FLUX='echo.llm.together.black-forest-labs-FLUX.2-max';
+  const live=(id:string,extra:Record<string,unknown>={})=>({id,description:'text-to-image generator',registered:true,health:'green',...extra});
+  it('ranks a generator only the live catalog lists, with its record for the Studio',async()=>{
+    const search=vi.fn(async(q:string)=>q==='flux'?[live(FLUX)]:[]);
+    const r=await new MediaRouter({catalog:()=>[],search}).route({text:'a photoreal fox image',classifier:false,probe:false});
+    expect(search.mock.calls.map(c=>c[0])).toEqual([...MEDIA_SEARCHES.image]);
+    expect(r.picked).toMatchObject({id:FLUX,catalogSource:'live',healthSource:'catalog',reason:expect.stringContaining('health green (live catalog)')});
+    expect(r.catalog).toMatchObject({source:'live',listed:1,failed:[],cached:false});expect(r.catalog.reason).toBeUndefined();
+    expect(r.records).toEqual([{id:FLUX,registered:true,health:'green',category:'image',description:'text-to-image generator'}]);
+  });
+  it('lets the live record replace stale snapshot health while keeping the snapshot medium',async()=>{
+    const snapshot=[cap('echo.media.image_generate',{health:'red',category:'tools'})];
+    const offline=await new MediaRouter({catalog:()=>snapshot}).route({text:'a fox image',classifier:false,probe:false});
+    expect(offline.picked).toBeNull();expect(offline.excluded[0].reason).toContain('health red');
+    const search=vi.fn(async(q:string)=>q==='image_generate'?[live('echo.media.image_generate',{description:''})]:[]);
+    const r=await new MediaRouter({catalog:()=>snapshot,search}).route({text:'a fox image',classifier:false,probe:false});
+    expect(r.picked).toMatchObject({id:'echo.media.image_generate',health:'green',catalogSource:'live'});
+    expect(r.records[0]).toMatchObject({category:'tools',description:'generator',health:'green'});
+  });
+  it('names failed and over-bound searches and marks the result partial',async()=>{
+    const search=vi.fn(async(q:string)=>{if(q==='flux')throw new Error('broker offline');if(q==='imagen')return Array.from({length:101},(_,i)=>live('echo.x.image_'+i));return q==='image_generate'?[live('echo.media.image_generate')]:[];});
+    const r=await new MediaRouter({catalog:imageCatalog,search}).route({text:'a fox image',classifier:false,probe:false});
+    expect(r.catalog.source).toBe('partial');
+    expect(r.catalog.failed).toEqual([{query:'flux',reason:'broker offline'},{query:'imagen',reason:expect.stringContaining('100-row bound')}]);
+    expect(r.catalog.reason).toContain('2 of 4 live catalog searches failed');expect(r.picked).toBeTruthy();
+  });
+  it('says the ranking is the shipped snapshot when every search fails, and retries next time',async()=>{
+    const search=vi.fn(async()=>{throw new Error('Catalog search truncated; use a narrower query');});
+    const router=new MediaRouter({catalog:imageCatalog,search});
+    const r=await router.route({text:'a fox image',classifier:false,probe:false});
+    expect(r.catalog).toMatchObject({source:'snapshot',listed:0,cached:false,reason:expect.stringMatching(/^Every live catalog search failed \(first: Catalog search truncated/)});
+    expect(r.picked!.catalogSource).toBe('snapshot');expect(r.picked!.reason).toContain('listed only in the shipped snapshot');
+    await router.route({text:'a fox image',classifier:false,probe:false});expect(search).toHaveBeenCalledTimes(8);
+  });
+  it('reports a search that does not answer in time as failed',async()=>{
+    const r=await new MediaRouter({catalog:imageCatalog,search:()=>new Promise(()=>{}),searchTimeoutMs:5}).route({text:'a fox image',classifier:false,probe:false});
+    expect(r.catalog.source).toBe('snapshot');expect(r.catalog.failed.every(f=>f.reason.includes('timed out'))).toBe(true);
+  });
+  it('caches each kind for 60 seconds and searches another kind with its own queries',async()=>{
+    let now=0;const search=vi.fn(async()=>[] as unknown[]),router=new MediaRouter({catalog:imageCatalog,search,now:()=>now});
+    await router.route({text:'a fox image',classifier:false,probe:false});expect(search).toHaveBeenCalledTimes(4);
+    now=30000;expect((await router.route({text:'a fox image',classifier:false,probe:false})).catalog.cached).toBe(true);expect(search).toHaveBeenCalledTimes(4);
+    await router.route({text:'a lofi hip hop beat',classifier:false,probe:false});expect(search.mock.calls.slice(4).map(c=>(c as unknown[])[0])).toEqual([...MEDIA_SEARCHES.music]);
+    now=61000;await router.route({text:'a fox image',classifier:false,probe:false});expect(search).toHaveBeenCalledTimes(10);
+  });
+  it('says there is no live catalog without a search, and does not search for chat',async()=>{
+    const r=await new MediaRouter({catalog:imageCatalog}).route({text:'a fox image',classifier:false,probe:false});
+    expect(r.catalog).toMatchObject({source:'snapshot',queries:[],reason:expect.stringContaining('`sdk` section')});
+    const search=vi.fn(async()=>[]),chat=await new MediaRouter({catalog:imageCatalog,search}).route({text:'What is the capital of Portugal?',classifier:false});
+    expect(chat.catalog.source).toBe('none');expect(chat.records).toEqual([]);expect(search).not.toHaveBeenCalled();
+  });
+  it('overlays live registration and health on a snapshot entry but keeps its medium and description',()=>{
+    expect(mergeCatalog([cap('echo.a.image',{category:'image',health:'red'})],[{id:'echo.a.image',registered:false,health:'green',category:'video',description:''}])).toEqual([cap('echo.a.image',{category:'image',health:'green',registered:false})]);
+  });
+  it('ignores live rows whose ids are not capability ids',async()=>{
+    const r=await new MediaRouter({catalog:()=>[],search:async()=>[{id:'not-an-echo-cap',health:'green'},{id:'echo.bad id',health:'green'},'x',null]}).route({text:'a fox image',classifier:false,probe:false});
+    expect(r.catalog.listed).toBe(0);expect(r.picked).toBeNull();
+  });
+  it('wires the hub to the SDK broker search and keeps live rows in the hub catalog',async()=>{
+    const search=vi.fn(async(q:string)=>q==='flux'?[{id:FLUX,description:'text-to-image',registered:true,health:'green',category:'discovered'} as Capability]:q==='image_generate'?[{id:'echo.fal.generate',description:'',registered:true,health:'amber',category:'discovered'} as Capability]:[]);
+    const sdk={search,read:vi.fn(),invoke:vi.fn()} as unknown as SdkBroker;
+    const hub=new PrimeHub({capabilities:[cap('echo.fal.generate',{health:'unknown'})],sdk});
+    const r=await hub.mediaRoute({text:'a photoreal fox image',classifier:false,probe:false});
+    expect(r.catalog.source).toBe('live');expect(r.picked!.id).toBe(FLUX);
+    expect(hub.capabilities()).toEqual(expect.arrayContaining([expect.objectContaining({id:FLUX,category:'image'}),expect.objectContaining({id:'echo.fal.generate',category:'image',health:'amber'})]));
+  });
+});
+
+describe('owner-only media routes',()=>{
+  const closers:Array<()=>Promise<void>>=[],dirs:string[]=[];
+  afterEach(async()=>{for(const close of closers.splice(0).reverse())await close();for(const dir of dirs.splice(0))rmSync(dir,{recursive:true,force:true});});
+  it('refuses a signed-in member and reaches neither the router nor the enhancer, then admits the owner',async()=>{
+    const backend:Server=createServer((req,res)=>{
+      const cookie=req.headers.cookie??'';res.writeHead(200,{'content-type':'application/json'});
+      if(req.url!=='/api/auth/session'||!cookie){res.end(JSON.stringify({authenticated:false,user:null,csrf:null}));return;}
+      res.end(JSON.stringify(cookie.includes('owner_tok')?{authenticated:true,user:{uid:'owner-1',role:'owner',status:'approved'},csrf:'csrf-owner-1234'}:{authenticated:true,user:{uid:'member-2',role:'member',status:'approved'},csrf:'csrf-member-5678'}));
+    });
+    await new Promise<void>(r=>backend.listen(0,'127.0.0.1',()=>r()));closers.push(()=>new Promise<void>(r=>backend.close(()=>r())));
+    const route=vi.fn(async()=>({picked:null})),enhance=vi.fn(async()=>({text:'better'}));
+    const hub=new PrimeHub({capabilities:[],media:{route} as unknown as MediaRouter,enhancer:{enhance} as unknown as PromptEnhancer});
+    const dir=mkdtempSync(join(tmpdir(),'prime-media-owner-'));dirs.push(dir);writeFileSync(join(dir,'index.html'),'Prime');
+    const server=await startPrimeServer(hub,dir,0,{workspace:{baseUrl:'http://127.0.0.1:'+(backend.address() as {port:number}).port,ownerUid:'owner-1'}});closers.push(server.close);
+    const prime=(await fetch(server.url)).headers.get('set-cookie')!.split(';')[0];
+    const post=(path:string,session:string,csrf:string)=>fetch(server.url+path,{method:'POST',headers:{cookie:prime+'; echo_workspace_session='+session,origin:server.url,'content-type':'application/json','x-prime-request':'1','x-echo-csrf':csrf},body:JSON.stringify({text:'a fox image',mode:'image'})});
+    for(const path of ['/api/prime/media/route','/api/prime/enhance']){
+      const refused=await post(path,'member_tok_'.padEnd(36,'b'),'csrf-member-5678');
+      expect(refused.status).toBe(403);expect(await refused.json()).toEqual({error:'Primary owner admission required'});
+    }
+    expect(route).not.toHaveBeenCalled();expect(enhance).not.toHaveBeenCalled();
+    expect((await post('/api/prime/media/route','owner_tok_'.padEnd(36,'a'),'csrf-owner-1234')).status).toBe(200);
+    expect((await post('/api/prime/enhance','owner_tok_'.padEnd(36,'a'),'csrf-owner-1234')).status).toBe(200);
+    expect(route).toHaveBeenCalledOnce();expect(enhance).toHaveBeenCalledOnce();
   });
 });
 

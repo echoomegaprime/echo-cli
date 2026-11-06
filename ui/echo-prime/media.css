@@ -10,6 +10,9 @@
 .media-badge.health-green{border-color:#3f8d6a;color:#9df0c7}
 .media-badge.health-amber{border-color:#8d7a3f;color:#f0dd9d}
 .media-badge.health-unknown,.media-badge.health-red,.media-badge.health-orphaned{border-color:#6c5a5a;color:#d9b3b3}
+/* Which catalog the ranking used: live SDK catalog, part of it, or only the shipped snapshot. */
+.media-badge.catalog-live{border-color:#3f7a8d;color:#9ddcf0}
+.media-badge.catalog-partial,.media-badge.catalog-snapshot{border-color:#8d7a3f;color:#f0dd9d}
 .media-actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
 .media-actions .quiet-button{display:inline-flex;border:1px solid #456e5b;background:#172b22;border-radius:6px;padding:7px 10px;font-size:11px;color:#d5efdf}
 .media-alternatives{display:grid;gap:6px}

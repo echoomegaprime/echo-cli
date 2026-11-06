@@ -46,7 +46,7 @@ async function harness(options:any={}){
  const composer=make('form',{id:'composer'}),prompt=make('textarea',{id:'prompt'}),sendActions=make('div',{class:'send-actions'}),send=make('button',{class:'send'},'Send'),caption=make('p',{class:'composer-caption'});sendActions.append(send);composer.append(prompt,sendActions,caption);
  const tools=make('div',{id:'creative-tools'}),category=make('select',{id:'creative-category'});category.value='auto';const brief=make('textarea',{id:'creative-prompt'}),creativeActions=make('div',{class:'creative-actions'}),args=make('textarea',{id:'creative-arguments'});root.append(tabs,composer,tools,category,brief,creativeActions,args);
  const ownSubmit=vi.fn();composer.addEventListener('submit',ownSubmit);
- const studio={open:vi.fn(),apply:vi.fn(()=>true),select:vi.fn(()=>true),catalog:()=>[],selected:vi.fn(()=>({id:'echo.llm.together.google-flash-image-2.5',category:'image'}))},originalOpen=studio.open;
+ const studio={open:vi.fn(),apply:vi.fn(()=>true),merge:vi.fn(()=>0),select:vi.fn(()=>true),catalog:()=>[],selected:vi.fn(()=>({id:'echo.llm.together.google-flash-image-2.5',category:'image'}))},originalOpen=studio.open;
  const workspace={enabled:true,ready:Promise.resolve(true),session:{authenticated:true,ownerAccess:true},ownerHeaders:async()=>({}),invalidate:vi.fn(),...options.workspace};
  const window:any={EchoPrimeWorkspace:workspace,EchoPrimeStudio:studio,addEventListener:(n:string,f:(e:any)=>unknown)=>(windowEvents[n]??=[]).push(f),dispatchEvent:(e:any)=>{for(const f of windowEvents[e.type]||[])f(e);}};
  const calls:any[]=[];let enhanceResolver:any;
@@ -76,5 +76,33 @@ it('does not replace text changed while Enhance is pending',async()=>{const w=aw
 it('lists providers and sends the selected GPT provider',async()=>{const w=await harness(),select=w.find('data-enhance-provider','composer')!;expect(select.children.map(o=>o.textContent)).toEqual(['Claude','GPT','Grok (unavailable)','Gemini (Argon)','Qwen']);expect(select.children[2].disabled).toBe(true);select.value='gpt';select.dispatchEvent(new TestEvent('change'));w.prompt.value='fox';w.find('data-enhance','composer')!.click();await tick();expect(w.calls.find(c=>c.url==='/api/prime/enhance').body.provider).toBe('gpt');});
 it('applies member, signed-out, and unconfigured-model gates',async()=>{for(const config of [{workspace:{session:{authenticated:true,ownerAccess:false}},want:'owner only'},{workspace:{session:{authenticated:false,ownerAccess:false}},want:'Sign in'},{models:{configured:false,providers:[]},want:'models section'}]){const w=await harness(config),button=w.find('data-enhance','composer')!;expect(button.disabled).toBe(true);expect(w.find('data-enhance-note','composer')!.textContent).toContain(config.want);button.click();await tick();expect(w.calls.some(c=>c.url==='/api/prime/enhance')).toBe(false);}});
 it('rejects Enhance text over 4000 characters locally',async()=>{const w=await harness();w.prompt.value='x'.repeat(4001);w.find('data-enhance','composer')!.click();await tick();expect(w.calls.some(c=>c.url==='/api/prime/enhance')).toBe(false);expect(w.find('data-enhance-note','composer')!.textContent).toContain('shorten');});
+it('merges live-only records into the Studio before applying the pick and badges the live catalog',async()=>{
+ const records=[{id:defaultPick.id,registered:true,health:'green',category:'image',description:'live only'}];
+ const w=await harness({route:()=>({...mediaResult(),records,catalog:{source:'live',queries:['flux'],listed:1,failed:[],cached:false}})});
+ w.studio.open('auto','fox');await tick();
+ expect(w.studio.merge).toHaveBeenCalledWith(records);expect(w.studio.merge.mock.invocationCallOrder[0]).toBeLessThan(w.studio.apply.mock.invocationCallOrder[0]);
+ expect(w.find('data-media-auto')!.textContent).toContain('live catalog');expect(w.find('data-media-auto')!.textContent).not.toContain('shipped snapshot');
+});
+it('labels a snapshot-only ranking and says why, for a pick and for no pick',async()=>{
+ const catalog={source:'snapshot',queries:[],listed:0,failed:[],cached:false,reason:'The live capability catalog is not connected.'};
+ const w=await harness({route:()=>({...mediaResult(),catalog})});w.studio.open('auto','fox');await tick();
+ const panel=w.find('data-media-auto')!;expect(panel.textContent).toContain('shipped snapshot · not live');expect(panel.textContent).toContain('The live capability catalog is not connected.');
+ const none=await harness({route:()=>({...mediaResult(),picked:null,alternatives:[],reason:'No healthy image generator is listed.',catalog:{...catalog,source:'partial',queries:['a','b'],failed:[{query:'a',reason:'x'}],reason:'1 of 2 live catalog searches failed.'}})});none.studio.open('auto','fox');await tick();
+ expect(none.find('data-media-auto')!.textContent).toContain('No healthy image generator is listed. 1 of 2 live catalog searches failed.');
+});
+it('integrations.js merge adds a live-only tool under its medium so apply can select it',()=>{
+ class El {tagName:string;value='';textContent='';className='';disabled=false;checked=false;open=false;children:El[]=[];attributes:Record<string,string>={};constructor(tag='div'){this.tagName=tag.toUpperCase();}
+  append(...items:El[]){this.children.push(...items);}replaceChildren(...items:El[]){this.children=[...items];}setAttribute(k:string,v:string){this.attributes[k]=String(v);}addEventListener(){}showModal(){this.open=true;}close(){this.open=false;}focus(){}}
+ const nodes=new Map<string,El>(),get=(s:string)=>{if(!nodes.has(s))nodes.set(s,new El());return nodes.get(s)!;};get('#creative-category').value='all';
+ const window:any={EchoPrimeCatalog:{capabilities:[{id:'echo.media.image_generate',category:'image',description:'fixture',health:'unknown',registered:true}],models:[]},addEventListener(){}};
+ runInNewContext(readFileSync(new URL('../ui/echo-prime/integrations.js',import.meta.url),'utf8'),{window,document:{querySelector:get,createElement:(t:string)=>new El(t)},location:{protocol:'https:'},AbortController,AbortSignal,console:{debug(){}},CustomEvent:class {}});
+ const studio=window.EchoPrimeStudio,flux='echo.llm.together.black-forest-labs-FLUX.2-max',args={command:'generate',options:{prompt:'fox'}};
+ expect(studio.apply({id:flux,arguments:args})).toBe(false);
+ expect(studio.merge([{id:flux,category:'image',health:'green',registered:true,description:'live'},{id:'echo.bad id',category:'image'},{id:'echo.media.image_generate',health:'green',category:'video'}])).toBe(1);
+ expect(studio.catalog().find((c:any)=>c.id===flux)).toMatchObject({category:'image',health:'green',description:'live'});
+ expect(studio.catalog().find((c:any)=>c.id==='echo.media.image_generate')).toMatchObject({category:'image',health:'green',description:'fixture'});
+ expect(get('#creative-tools').children).toHaveLength(2);
+ expect(studio.apply({id:flux,arguments:args})).toBe(true);expect(get('#selected-tool').textContent).toBe(flux);expect(JSON.parse(get('#creative-arguments').value)).toEqual(args);
+});
 // The reset hides notes; the loading gate note clears itself once the models report answers (fixed after this test found it).
 it('account changes reset Auto and panels and re-fetch models',async()=>{const w=await harness();w.tabs.children[0].click();w.studio.open('auto','fox');await tick();const before=w.modelsCalls().length;w.window.dispatchEvent(new TestEvent('echo-account-changed'));await tick();expect(w.tabs.children[0].getAttribute('aria-selected')).toBe('false');expect(w.find('data-media-auto')!.hidden).toBe(true);expect(w.find('data-enhance-note','composer')!.hidden).toBe(true);expect(w.find('data-enhance-note','composer')!.textContent).toBe('');expect(w.modelsCalls().length).toBeGreaterThan(before);});
