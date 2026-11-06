@@ -879,7 +879,7 @@
     refused=error?.status===404||error?.status===409;
    }
    if(!live())return;
-   if(refused){membersCarry={select:view.selected,query:view.query,filter:view.filter,inviteNotice:`Nothing was sent to ${email}. ${failure}`};await open('members');status(failure);return;}
+   if(refused){membersCarry={select:view.selected,query:view.query,filter:view.filter,inviteNotice:`Nothing was sent to ${email}. ${failure}`};await open('members');return;}// the refusal is in the card (a status region); a status line set after open() could land on the next account
    const mail=failure?{state:'failed',text:failure}:mailOutcome(receipt?.email);
    view.inviteNotice='';view.inviteError=null;view.invite={email,existing:true,kind:'resend',mail};
    inviteOutput();status(mailLine(mail,email));
