@@ -65,7 +65,7 @@ function fakeBridge(over:Record<string,any>={}){
   startConversation:vi.fn(async()=>{}),stopVoice:vi.fn(async()=>{}),interrupt:vi.fn(async()=>{}),setChat:vi.fn(),onStatus:vi.fn((fn:(t:string)=>void)=>{hooks.push(fn);}),...over.bridge};
  return bridge;
 }
-async function world(files:string[],bridge:any,options:{enabled?:boolean;storage?:Map<string,string>;storageThrows?:boolean;rms?:{value:number};real?:{Transport:any}}={}):Promise<World>{
+async function world(files:string[],bridge:any,options:{enabled?:boolean;storage?:Map<string,string>;storageThrows?:boolean;rms?:{value:number};real?:{Transport:any};fetch?:any;hidden?:boolean;now?:()=>number}={}):Promise<World>{
  const nodes=new Map<string,Node>(),events:Record<string,((event:any)=>unknown)[]>={},documentEvents:Record<string,((event:any)=>unknown)[]>={},orb:any[]=[],debug:any[]=[],utterances:any[]=[];
  const storage=options.storage??new Map<string,string>();
  const get=(selector:string)=>{if(!nodes.has(selector))nodes.set(selector,new Node());return nodes.get(selector)!;};
@@ -78,7 +78,7 @@ async function world(files:string[],bridge:any,options:{enabled?:boolean;storage
  const window:any={addEventListener:(name:string,fn:(e:any)=>unknown)=>(events[name]??=[]).push(fn),removeEventListener(){},dispatchEvent:(event:any)=>{for(const fn of events[event.type]||[])fn(event);}};
  // Either a synthetic bridge (fast, isolated) or the real workspace.js on a Transport stand-in (`options.real`).
  if(options.real){window.EchoPrimeWorkspaceTransport=options.real.Transport;window.EchoPrimeChat={reset:vi.fn()};}
- else window.EchoPrimeWorkspace={ready:Promise.resolve(options.enabled??true),get enabled(){return options.enabled??true;},bridge,get session(){return bridge.session;},send,newChat};
+ else window.EchoPrimeWorkspace={ready:Promise.resolve(options.enabled??true),get enabled(){return options.enabled??true;},bridge,get session(){return bridge.session;},send,newChat,ownerHeaders:async()=>({'x-echo-csrf':'csrf-test'})};
  const document:any={body,head:new Node('head'),hidden:false,querySelector:query,querySelectorAll:()=>[],createElement:(t:string)=>new Node(t),createTextNode:(t:string)=>Object.assign(new Node('#text'),{_text:t}),
   addEventListener:(name:string,fn:(e:any)=>unknown)=>(documentEvents[name]??=[]).push(fn),dispatchEvent:(event:any)=>{orb.push(event.detail);}};
  const localStorage=options.storageThrows?{getItem(){throw new Error('blocked');},setItem(){throw new Error('blocked');},removeItem(){throw new Error('blocked');}}:{getItem:(k:string)=>storage.get(k)??null,setItem:(k:string,v:string)=>{storage.set(k,v);},removeItem:(k:string)=>{storage.delete(k);}};
@@ -95,7 +95,9 @@ async function world(files:string[],bridge:any,options:{enabled?:boolean;storage
  let urls=0;
  const context={window,document,localStorage,sessionStorage:localStorage,navigator:{mediaDevices:{getUserMedia:media.getUserMedia}},crypto:{randomUUID},Event,CustomEvent,setTimeout,clearTimeout,console:{debug:(_tag:string,event:any)=>debug.push(event),warn:vi.fn()},
   Audio:FakeAudio,URL:{createObjectURL:()=>'blob:echo-'+(++urls),revokeObjectURL:vi.fn()},Blob,atob:(x:string)=>Buffer.from(x,'base64').toString('binary'),btoa:(x:string)=>Buffer.from(x,'binary').toString('base64'),
-  speechSynthesis:synth,SpeechSynthesisUtterance,AudioContext,AbortController,AbortSignal,TextEncoder,TextDecoder,Error,Number,Math,JSON,Set,Map,Array,Object,String,Promise,Boolean,Float32Array,Uint8Array,ArrayBuffer,DataView,Infinity};
+  speechSynthesis:synth,SpeechSynthesisUtterance,AudioContext,AbortController,AbortSignal,TextEncoder,TextDecoder,Error,Number,Math,JSON,Set,Map,Array,Object,String,Promise,Boolean,Float32Array,Uint8Array,ArrayBuffer,DataView,Infinity,
+  ...(options.fetch?{fetch:options.fetch}:{}),...(options.now?{performance:{now:options.now}}:{})};
+ if(options.hidden)document.hidden=true;
  if(options.real)get('#workspace-chat-kind').value='workspace';
  for(const file of files)runInNewContext(source(file),context);
  if(options.real)await window.EchoPrimeWorkspace.ready;
@@ -563,4 +565,304 @@ it('serves speech.js and speech.css from the Prime asset allowlist',async()=>{
   for(const name of ['speech.js','speech.css']){const r=await fetch(s.url+'/'+name,{headers:{cookie}});expect(r.status).toBe(200);expect(await r.text()).toContain(name);}
   expect((await fetch(s.url+'/speech-private.js',{headers:{cookie}})).status).toBe(404);
  }finally{await s.close();rmSync(dir,{recursive:true,force:true});}
+});
+
+// ---------- Echo's own voice on every reply path: the owner-only Prime route ----------
+// ECHO Code replies, Swarm and Agents results and Steward advice are not saved Workspace messages, so speech.js
+// speaks them through POST /api/prime/voice/speak (stand-in fetch below; no real gateway or provider is called).
+const jsonReply=(status:number,value:unknown)=>({ok:status>=200&&status<300,status,headers:{get:(n:string)=>n.toLowerCase()==='content-type'?'application/json; charset=utf-8':null},json:async()=>value,blob:async()=>new Blob([JSON.stringify(value)])});
+const audioReply=(body='ID3-audio',type='audio/mpeg')=>({ok:true,status:200,headers:{get:(n:string)=>(({'content-type':type,'x-echo-voice-provider':'elevenlabs','x-echo-voice-label':encodeURIComponent('Prime Voice')} as Record<string,string>)[n.toLowerCase()]??null)},json:async()=>{throw new Error('audio is not JSON');},blob:async()=>new Blob([body])});
+const primeStatus=(extra:Record<string,unknown>={})=>({configured:true,available:true,persona:'forge-voice',label:'Prime Voice',provider:'elevenlabs',model:'eleven_v4',format:'mp3',maxChars:4000,maxAudioBytes:5242880,...extra});
+function primeRoute(over:{status?:()=>unknown;speak?:(body:any,n:number,init:any)=>unknown}={}){
+ const calls:any[]=[];
+ const fetch=vi.fn(async(url:string,init:any={})=>{
+  const call={url,method:init.method||'GET',headers:init.headers||{},body:init.body?JSON.parse(init.body):undefined,signal:init.signal};calls.push(call);
+  if(url==='/api/prime/voice/status')return over.status?over.status():jsonReply(200,primeStatus());
+  if(url==='/api/prime/voice/speak'){const n=calls.filter(c=>c.url===url).length-1;return over.speak?over.speak(call.body,n,init):audioReply('ID3-section-'+n);}
+  return jsonReply(404,{error:'Unknown route'});
+ });
+ return {fetch,calls,speaks:()=>calls.filter(c=>c.url==='/api/prime/voice/speak'),statuses:()=>calls.filter(c=>c.url==='/api/prime/voice/status')};
+}
+async function primeWorld(route=primeRoute(),over:Record<string,any>={},now?:()=>number){const bridge=fakeBridge(over);const w=await world(['speech.js'],bridge,{fetch:route.fetch,...(now?{now}:{})});await vi.waitFor(()=>expect(w.speech.primeVoice).not.toBeNull());return {w,bridge,route};}
+const codeReply=(w:World,text='See https://x.y/z for 3 items.',article=new Node('article'))=>{w.emit('echo-code-reply',{text,article,status:'completed',sessionId:'s1'});return article;};
+async function playing(w:World,count=1){await vi.waitFor(()=>expect(w.spoken().length).toBeGreaterThanOrEqual(count));const audio=w.spoken()[count-1];await vi.waitFor(()=>expect(audio.paused).toBe(false));return audio;}
+const statusText=(w:World)=>w.attr('data-speech-status')!.textContent;
+const toggleDevice=async(w:World)=>{const t=w.attr('data-speech-device')!;t.checked=true;await t.fire('change');};
+const WORDS=['one','two','three','four','five','six','seven','eight','nine','ten','eleven','twelve'];
+const longText=WORDS.map(word=>`Sentence ${word} explains one more detail of the plan.`).join(' ');
+
+it("speaks an ECHO Code reply in Echo's own voice through the owner-only Prime route when spoken replies is on",async()=>{
+ const {w,route}=await primeWorld();
+ codeReply(w);
+ const audio=await playing(w);
+ expect(route.speaks()).toHaveLength(1);
+ const call=route.speaks()[0];
+ expect(call.method).toBe('POST');expect(call.body).toEqual({text:'See link for three items.'});
+ expect(call.headers).toMatchObject({'x-prime-request':'1','x-echo-csrf':'csrf-test','content-type':'application/json'});
+ expect(w.synth.speak).not.toHaveBeenCalled();
+ await vi.waitFor(()=>expect(statusText(w)).toBe('Speaking · Prime Voice · elevenlabs'));
+ audio.end();await vi.waitFor(()=>expect(w.speech.speaking).toBe(false));
+ expect(statusText(w)).toContain('Spoke the ECHO Code reply with Prime Voice');
+ expect(w.debug.find(e=>e.event==='first_audio'&&e.source==='echo')).toBeTruthy();
+ expect(w.debug.find(e=>e.event==='speech_finished'&&e.route==='prime')).toMatchObject({origin:'code',chunks:1});
+ expect(w.attr('data-speech-count')!.textContent).toBe('Spoken: 1');
+ w.dispose();
+});
+it('reads the Prime voice status once per identity and again after an account change',async()=>{
+ const {w,route,bridge}=await primeWorld();
+ expect(route.statuses()).toHaveLength(1);expect(route.statuses()[0].headers).toMatchObject({'x-prime-request':'1'});
+ codeReply(w,'One reply.');(await playing(w)).end();
+ codeReply(w,'Second reply.');await playing(w,2);
+ expect(route.statuses()).toHaveLength(1);
+ bridge.state.accountEpoch=1;w.emit('echo-account-changed');
+ await vi.waitFor(()=>expect(route.statuses()).toHaveLength(2));
+ expect(w.speech.speaking).toBe(false);// the account change stopped the old identity's speech
+ w.dispose();
+});
+it('splits a long reply into a short first section and bounded sections, prefetching the next one while the current one plays',async()=>{
+ const {w,route}=await primeWorld();
+ codeReply(w,longText);
+ const first=await playing(w);
+ await vi.waitFor(()=>expect(route.speaks()).toHaveLength(2));// section two was requested while section one plays
+ expect(first.paused).toBe(false);
+ first.end();const second=await playing(w,2);
+ await vi.waitFor(()=>expect(route.speaks()).toHaveLength(3));
+ second.end();(await playing(w,3)).end();
+ await vi.waitFor(()=>expect(w.speech.speaking).toBe(false));
+ const bodies=route.speaks().map(c=>c.body.text as string);
+ expect(bodies).toHaveLength(3);expect(bodies[0].length).toBeLessThanOrEqual(220);for(const body of bodies.slice(1))expect(body.length).toBeLessThanOrEqual(400);
+ expect(bodies.join(' ')).toBe(w.speech.normalizeForSpeech(longText));
+ expect(w.debug.find(e=>e.event==='speech_requested'&&e.route==='prime')).toMatchObject({sections:3,mode:'full'});
+ w.dispose();
+});
+it('keeps sections whole, bounded and in order, and Brief speech keeps only the opening sections',async()=>{
+ const s=await pure();
+ const full=s.primeChunks(longText,false),brief=s.primeChunks(longText,true);
+ expect(full).toHaveLength(3);expect(full.join(' ')).toBe(longText);expect(full[0].length).toBeLessThanOrEqual(220);
+ expect(brief).toEqual(full.slice(0,2));expect(brief.join(' ').length).toBeLessThanOrEqual(600);
+ const run=s.primeChunks('x'.repeat(30)+' '+'word '.repeat(200),false);
+ for(const chunk of run)expect(chunk.length).toBeLessThanOrEqual(400);
+ expect(s.primeChunks('',false)).toEqual([]);
+});
+it('honours Brief speech on the Prime route',async()=>{
+ const {w,route,bridge}=await primeWorld();bridge.voiceOptions.brief=true;
+ codeReply(w,longText);
+ (await playing(w)).end();(await playing(w,2)).end();
+ await vi.waitFor(()=>expect(w.speech.speaking).toBe(false));
+ expect(route.speaks()).toHaveLength(2);
+ expect(w.debug.find(e=>e.event==='speech_requested'&&e.route==='prime')).toMatchObject({sections:2,mode:'summary'});
+ w.dispose();
+});
+it('stays silent while Echo is muted or spoken replies is off, and the Speak action still works on request',async()=>{
+ const {w,route,bridge}=await primeWorld();
+ w.speech.setMuted(true);
+ const article=codeReply(w);await tick();
+ expect(route.speaks()).toHaveLength(0);
+ w.speech.setMuted(false);bridge.voiceOptions.spoken=false;
+ codeReply(w,'Another reply.');await tick();
+ expect(route.speaks()).toHaveLength(0);
+ const speak=walk(article).find(n=>n.tagName==='BUTTON')!;expect(speak.textContent).toBe('🔊 Speak');
+ await speak.click();await playing(w);
+ expect(route.speaks()).toHaveLength(1);expect(route.speaks()[0].body.text).toBe('See link for three items.');
+ w.dispose();
+});
+it('never calls the owner-only route for an anonymous visitor',async()=>{
+ const {w,route}=await primeWorld(primeRoute(),{bridge:{session:{authenticated:false,user:null}}});
+ const article=codeReply(w);await tick();
+ await walk(article).find(n=>n.tagName==='BUTTON')!.click();
+ expect(route.calls).toHaveLength(0);expect(w.synth.speak).not.toHaveBeenCalled();
+ expect(statusText(w)).toContain('sign in to an approved account');
+ w.dispose();
+});
+it('tells a signed-in member that these replies speak for the owner only, without calling the route',async()=>{
+ const {w,route}=await primeWorld(primeRoute(),{bridge:{session:{authenticated:true,ownerAccess:false,user:{uid:'member',status:'approved'}}}});
+ codeReply(w);await tick();
+ expect(route.calls).toHaveLength(0);expect(w.synth.speak).not.toHaveBeenCalled();
+ expect(statusText(w)).toBe("Echo's voice is unavailable for this ECHO Code reply: Echo's voice for these replies is owner-only. Turn on \"Device voice (not Echo's)\" to hear this ECHO Code reply.");
+ w.dispose();
+});
+it('says why when the Prime config has no voice section, explains once per identity, and never substitutes a voice',async()=>{
+ const route=primeRoute({status:()=>jsonReply(200,{configured:false,available:false,reason:"Echo's voice route is off: add a `voice` section to the Prime config"})});
+ const {w}=await primeWorld(route);
+ codeReply(w);await tick();
+ expect(route.speaks()).toHaveLength(0);expect(w.synth.speak).not.toHaveBeenCalled();
+ expect(statusText(w)).toBe("Echo's voice is unavailable for this ECHO Code reply: Echo's voice route is off: add a `voice` section to the Prime config. Turn on \"Device voice (not Echo's)\" to hear this ECHO Code reply.");
+ w.attr('data-speech-status')!.textContent='';codeReply(w,'Next reply.');await tick();
+ expect(statusText(w)).toBe('');
+ expect(w.speech.snapshot().primeVoice).toEqual({configured:false,available:false});
+ w.dispose();
+});
+it('uses the explicitly toggled device voice only when the Prime route cannot speak at all',async()=>{
+ const route=primeRoute({status:()=>jsonReply(200,{configured:true,available:false,reason:'Voice gateway reports ElevenLabs is not available'})});
+ const {w}=await primeWorld(route);
+ await toggleDevice(w);
+ codeReply(w,'Device fallback was chosen by the user.');
+ await vi.waitFor(()=>expect(w.synth.speak).toHaveBeenCalledTimes(1));
+ expect(route.speaks()).toHaveLength(0);expect(w.utterances[0].text).toBe('Device fallback was chosen by the user.');
+ w.dispose();
+});
+it("keeps speaking in Echo's voice when the route is available even if the device voice is toggled on",async()=>{
+ const {w,route}=await primeWorld();
+ await toggleDevice(w);
+ codeReply(w);await playing(w);
+ expect(route.speaks()).toHaveLength(1);expect(w.synth.speak).not.toHaveBeenCalled();
+ w.dispose();
+});
+it('shows the reason when the route fails, makes no automatic retry and never substitutes the device voice',async()=>{
+ const route=primeRoute({speak:()=>jsonReply(502,{error:'Voice gateway answered HTTP 502'})});
+ const {w}=await primeWorld(route);
+ await toggleDevice(w);
+ codeReply(w);
+ await vi.waitFor(()=>expect(statusText(w)).toBe('Echo could not speak this ECHO Code reply: Voice gateway answered HTTP 502. No automatic retry was made.'));
+ expect(route.speaks()).toHaveLength(1);expect(w.synth.speak).not.toHaveBeenCalled();expect(w.spoken()).toEqual([]);
+ expect(w.debug.find(e=>e.event==='prime_chunk_failed')).toMatchObject({origin:'code',index:0,status:502});
+ w.dispose();
+});
+it("refuses a response that is not Echo's audio and an oversized audio body",async()=>{
+ let mode='html';
+ const route=primeRoute({speak:()=>mode==='html'?audioReply('<html></html>','text/html'):audioReply('x'.repeat(5*1024*1024+1))});
+ const {w}=await primeWorld(route);
+ codeReply(w,'First try.');
+ await vi.waitFor(()=>expect(statusText(w)).toBe("Echo could not speak this ECHO Code reply: the Prime voice route did not return Echo's audio. No automatic retry was made."));
+ mode='large';codeReply(w,'Second try.');
+ await vi.waitFor(()=>expect(statusText(w)).toBe('Echo could not speak this ECHO Code reply: the speech audio exceeds the 5 MiB limit. No automatic retry was made.'));
+ expect(w.spoken()).toEqual([]);
+ w.dispose();
+});
+it('barge-in while the first section is still being synthesised aborts that request and stays quiet',async()=>{
+ let seen:any=null;
+ const route=primeRoute({speak:(_body,_n,init)=>{seen=init.signal;return new Promise((_resolve,reject)=>init.signal.addEventListener('abort',()=>reject(Object.assign(new Error('This operation was aborted'),{name:'AbortError'}))));}});
+ const {w}=await primeWorld(route);
+ codeReply(w);
+ await vi.waitFor(()=>expect(seen).not.toBeNull());
+ expect(w.speech.speaking).toBe(true);expect(statusText(w)).toBe('Preparing Prime Voice…');
+ await w.get('#prompt').fire('input');
+ expect(seen.aborted).toBe(true);expect(w.speech.speaking).toBe(false);
+ await tick();expect(statusText(w)).not.toContain('could not speak');expect(w.spoken()).toEqual([]);
+ w.dispose();
+});
+it('a new reply replaces the one being spoken and drops its prefetch',async()=>{
+ const {w,route}=await primeWorld();
+ codeReply(w,longText);
+ const first=await playing(w);
+ await vi.waitFor(()=>expect(route.speaks()).toHaveLength(2));
+ codeReply(w,'Newer reply.');
+ await vi.waitFor(()=>expect(route.speaks()[2]?.body.text).toBe('Newer reply.'));
+ expect(first.paused).toBe(true);expect(route.speaks()[1].signal.aborted).toBe(true);
+ const newer=await playing(w,2);newer.end();
+ await vi.waitFor(()=>expect(w.speech.speaking).toBe(false));
+ expect(route.speaks()).toHaveLength(3);
+ w.dispose();
+});
+it("speaks Swarm results in Echo's voice: Speak result toggles speak and stop",async()=>{
+ const {w,route}=await primeWorld();
+ w.speech.setMuted(true);
+ const article=new Node('article');w.emit('echo-result-rendered',{source:'swarm',text:'The swarm agrees on the plan.',article});
+ const speak=walk(article).find(n=>n.tagName==='BUTTON')!;expect(speak.textContent).toBe('🔊 Speak result');
+ expect(route.speaks()).toHaveLength(0);
+ await speak.click();await playing(w);
+ expect(route.speaks()[0].body.text).toBe('The swarm agrees on the plan.');await vi.waitFor(()=>expect(speak.textContent).toBe('⏹ Stop'));expect(speak.attributes['aria-pressed']).toBe('true');
+ await speak.click();expect(w.speech.speaking).toBe(false);expect(speak.textContent).toBe('🔊 Speak result');expect(w.synth.speak).not.toHaveBeenCalled();
+ w.dispose();
+});
+it('speaks a Swarm result automatically when spoken replies is on, and a re-rendered identical result only once',async()=>{
+ const {w,route}=await primeWorld();
+ w.emit('echo-result-rendered',{source:'swarm',text:'Fused answer: ship it.',article:new Node('article')});
+ (await playing(w)).end();await vi.waitFor(()=>expect(w.speech.speaking).toBe(false));
+ w.emit('echo-result-rendered',{source:'swarm',text:'Fused answer: ship it.',article:new Node('article')});await tick();
+ expect(route.speaks()).toHaveLength(1);expect(w.debug.find(e=>e.event==='duplicate_suppressed'&&e.origin==='swarm')).toBeTruthy();
+ w.emit('echo-result-rendered',{source:'swarm',text:'A different fused answer.',article:new Node('article')});
+ await vi.waitFor(()=>expect(route.speaks()).toHaveLength(2));
+ w.dispose();
+});
+it("offers Speak result beside an Agents run final text and speaks it in Echo's voice",async()=>{
+ const {w,route}=await primeWorld();
+ const final=new Node('p'),host=new Node('div');host.append(final);
+ w.emit('echo-result-rendered',{source:'agents',text:'The agent finished the audit.',container:final});
+ const button=walk(host).find(n=>n.tagName==='BUTTON')!;expect(button.attributes['data-speech-speak']).toBe('agents');expect(button.parent!.attributes['data-speech-result-row']).toBe('agents');
+ expect(button.textContent).toBe('⏹ Stop');// spoken replies is on, so Echo is already speaking it
+ const audio=await playing(w);
+ expect(route.speaks()[0].body.text).toBe('The agent finished the audit.');expect(w.debug.find(e=>e.event==='speech_requested'&&e.route==='prime')).toMatchObject({origin:'agents'});
+ audio.end();await vi.waitFor(()=>expect(button.textContent).toBe('🔊 Speak result'));
+ w.dispose();
+});
+it("speaks Steward advice in Echo's voice",async()=>{
+ const {w,route}=await primeWorld();
+ const pre=new Node('pre'),host=new Node('div');host.append(pre);
+ w.emit('echo-result-rendered',{source:'steward',text:'Restart the unit after the backup.',container:pre});
+ const button=walk(host).find(n=>n.tagName==='BUTTON')!;expect(button.attributes['data-speech-speak']).toBe('steward');
+ const audio=await playing(w);expect(route.speaks()[0].body.text).toBe('Restart the unit after the backup.');
+ audio.end();await vi.waitFor(()=>expect(button.textContent).toBe('🔊 Speak advice'));
+ w.dispose();
+});
+it('offers "Tap to hear Echo" when autoplay blocks a Prime-route reply, and the tap replays that text',async()=>{
+ const {w,route}=await primeWorld();FakeAudio.block=true;
+ codeReply(w);
+ await vi.waitFor(()=>expect(w.attr('data-speech-tap')!.hidden).toBe(false));
+ expect(statusText(w)).toBe('Tap to hear Echo.');expect(w.speech.blocked).toBe(true);
+ FakeAudio.block=false;await w.attr('data-speech-tap')!.click();
+ await vi.waitFor(()=>expect(route.speaks()).toHaveLength(2));
+ await vi.waitFor(()=>expect(w.spoken().some(a=>!a.paused)).toBe(true));
+ expect(route.speaks()[1].body.text).toBe('See link for three items.');expect(w.attr('data-speech-tap')!.hidden).toBe(true);
+ w.dispose();
+});
+it('defers a reply that arrives while the tab is hidden and offers it back with Resume Echo',async()=>{
+ const {w,route}=await primeWorld();
+ w.document.hidden=true;codeReply(w);await tick();
+ expect(route.speaks()).toHaveLength(0);expect(w.speech.deferred).toBe(true);
+ w.document.hidden=false;w.emitDocument('visibilitychange');
+ expect(w.attr('data-speech-resume')!.hidden).toBe(false);
+ await w.attr('data-speech-resume')!.click();
+ await playing(w);expect(route.speaks()).toHaveLength(1);expect(w.attr('data-speech-resume')!.hidden).toBe(true);
+ w.dispose();
+});
+it('hiding the tab mid-reply pauses Echo and Resume Echo replays the same reply',async()=>{
+ const {w,route}=await primeWorld();
+ codeReply(w);const audio=await playing(w);
+ w.document.hidden=true;w.emitDocument('visibilitychange');
+ expect(audio.paused).toBe(true);expect(w.speech.deferred).toBe(true);
+ w.document.hidden=false;w.emitDocument('visibilitychange');
+ await w.attr('data-speech-resume')!.click();
+ await vi.waitFor(()=>expect(route.speaks()).toHaveLength(2));expect(route.speaks()[1].body.text).toBe('See link for three items.');
+ w.dispose();
+});
+it('re-reads an unavailable verdict after a minute so Echo speaks again once the gateway is back',async()=>{
+ let up=false,now=1000;
+ const route=primeRoute({status:()=>jsonReply(200,up?primeStatus():{configured:true,available:false,reason:'Voice gateway unreachable at http://127.0.0.1:8239'})});
+ const {w}=await primeWorld(route,{},()=>now);
+ const article=codeReply(w,'Back online soon.');await tick();
+ expect(route.speaks()).toHaveLength(0);expect(statusText(w)).toContain('Voice gateway unreachable');
+ const speak=walk(article).find(n=>n.tagName==='BUTTON')!;
+ up=true;now+=30000;await speak.click();await tick();
+ expect(route.statuses()).toHaveLength(1);expect(route.speaks()).toHaveLength(0);// still inside the minute: the cached verdict answers
+ now+=31000;await speak.click();
+ await playing(w);
+ expect(route.statuses()).toHaveLength(2);expect(route.speaks()[0].body.text).toBe('Back online soon.');
+ expect(w.speech.primeVoice).toMatchObject({configured:true,available:true});
+ w.dispose();
+});
+it('reports a failed or refused status check as the reason',async()=>{
+ const broken=primeRoute({status:()=>{throw new TypeError('Failed to fetch');}});
+ const one=await primeWorld(broken);
+ codeReply(one.w);await tick();
+ expect(statusText(one.w)).toContain("Echo's voice is unavailable for this ECHO Code reply: the Prime voice status check failed.");
+ one.w.dispose();
+ const refused=primeRoute({status:()=>jsonReply(403,{error:'Primary owner admission required'})});
+ const two=await primeWorld(refused);
+ codeReply(two.w);await tick();
+ expect(statusText(two.w)).toContain('Primary owner admission required');expect(refused.speaks()).toHaveLength(0);
+ two.w.dispose();
+});
+it('never puts reply text into debug events',async()=>{
+ const {w}=await primeWorld();
+ codeReply(w,'The quartermaster password hint is Zanzibar.');(await playing(w)).end();
+ await vi.waitFor(()=>expect(w.speech.speaking).toBe(false));
+ expect(JSON.stringify(w.debug)).not.toContain('Zanzibar');expect(JSON.stringify(w.debug)).not.toContain('quartermaster');
+ w.dispose();
+});
+it('reaches the Prime route only through owner headers, never reads the CSRF value itself, and Agents announces its final text',async()=>{
+ const text=source('speech.js');
+ expect(text).toContain("'/api/prime/voice/speak'");expect(text).toContain("'/api/prime/voice/status'");expect(text).toContain('ownerHeaders');
+ expect(text).not.toMatch(/session\.csrf|x-echo-csrf/);
+ expect(source('agents.js')).toMatch(/echo-result-rendered[\s\S]{0,120}source:'agents'/);
 });

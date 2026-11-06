@@ -6,6 +6,7 @@ import {scorePersonalities,type CatalogLoader} from './personality.js';
 import {disconnectedSteward,type StewardOwner} from './steward.js';
 import type {ModelRouter} from '../code/model-factory.js';
 import {SwarmError,type SwarmClient} from './swarm.js';
+import {VoiceError,type VoiceClient} from './voice.js';
 import {ADK_MAX_STEPS_CEILING,AdkError,type AdkClient} from './agents.js';
 import {VideoAgentError,discoverVideoCatalog,offlineCatalog,parseVideoRequest,parseVideoRun,planVideo,resolveVideoInputs,videoAgentDefinition,videoRunPrompt,type VideoCatalog} from './videoagent.js';
 import {MediaRouter} from './media.js';
@@ -34,6 +35,8 @@ export interface SdkBroker {
 export interface PrimeRequest {target:'sdk'|'esh';name:string;arguments:Json}
 export interface PrimeOptions {
  capabilities:Capability[];sdk?:SdkBroker;esh?:McpConnection;chat?:SharedChat;steward?:StewardOwner;models?:ModelRouter;swarm?:SwarmClient;
+ /** Opt-in loopback Echo voice gateway client. Absent = the route is off. */
+ voice?:VoiceClient;
  /** Opt-in loopback `echo-adk-api` client (Agents view). Absent = the feature is off. */
  adk?:AdkClient;
  /** Auto media routing over this hub's catalog (built on demand from `capabilities`, `sdk.read` and `models` when absent). */
@@ -167,6 +170,8 @@ export class PrimeHub {
  private swarmClient(){if(!this.options.swarm)throw new SwarmError(503,'Swarm is not enabled: the reviewed Prime configuration has no swarm section');return this.options.swarm;}
  async swarmRun(input:unknown,signal?:AbortSignal){return this.swarmClient().run(input,signal);}
  async swarmStatus(runId:string,signal?:AbortSignal){return this.swarmClient().status(runId,signal);}
+ async voiceStatus(signal?:AbortSignal){return this.options.voice?this.options.voice.status(signal):{configured:false,available:false,reason:"Echo's voice route is off: add a `voice` section to the Prime config"};}
+ async voiceSpeak(input:unknown,signal?:AbortSignal){if(!this.options.voice)throw new VoiceError(503,"Echo's voice route is off: add a `voice` section to the Prime config");return this.options.voice.speak(input,signal);}
  /** Opt-in Echo ADK service: health never throws for an unconfigured or unreachable service, it says why. Runs never fall back to another provider. */
  async adkHealth(signal?:AbortSignal){
   const adk=this.options.adk;
