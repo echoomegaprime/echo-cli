@@ -205,9 +205,10 @@ async function ownerFixture(authEnabled=true){
  const tokens={owner:randomBytes(32).toString('hex'),member:randomBytes(32).toString('hex'),admin:randomBytes(32).toString('hex')};
  const calls:Array<{path:string;cookie:string;origin:string|undefined;authorization:string|undefined}>=[];
  const revoked=new Set<string>();
+ const bodies:Array<{path:string;body:string}>=[];
  const pending=new Set<string>();
  const roles=new Map<string,string>();
- const behavior={delayMs:0,actionDelayMs:0,historyText:'',tokenText:'Hello Ω',legacyOwnerUid:'owner',stateUid:'',stateCsrf:''};
+ const behavior={delayMs:0,actionDelayMs:0,historyText:'',tokenText:'Hello Ω',legacyOwnerUid:'owner',stateUid:'',stateCsrf:'',resendLimitedHeader:''};
  const server=createServer(async(req,res)=>{
   const url=new URL(req.url??'/','http://localhost'),cookie=req.headers.cookie??'';
   const account=(Object.keys(tokens) as Array<keyof typeof tokens>).find(k=>cookie===`echo_workspace_session=${tokens[k]}`&&!revoked.has(k));
@@ -230,7 +231,13 @@ async function ownerFixture(authEnabled=true){
   if(url.pathname==='/api/auth/accounts'){json(200,{accounts:[{uid:'owner',role:'owner',status:'approved'}]});return;}
   if(url.pathname==='/api/auth/decide'){json(200,{ok:true});return;}
   if(url.pathname==='/api/auth/invites'){json(200,{invites:[]});return;}
-  if(['/api/auth/usage','/api/auth/invite','/api/auth/invite/revoke'].includes(url.pathname)){for await(const _chunk of req){/* drain */}json(200,{ok:true});return;}
+  if(['/api/auth/usage','/api/auth/invite','/api/auth/invite/resend','/api/auth/invite/revoke'].includes(url.pathname)){
+   let text='';for await(const chunk of req)text+=chunk;bodies.push({path:url.pathname,body:text});
+   // A rate-limited resend names the wait in the body and in Retry-After (what the Workspace answers).
+   if(url.pathname==='/api/auth/invite/resend'&&behavior.resendLimitedHeader){res.writeHead(429,{'content-type':'application/json','retry-after':behavior.resendLimitedHeader});res.end(JSON.stringify({error:'Too many attempts.',retry_after:600}));return;}
+   if(url.pathname==='/api/auth/invite'||url.pathname==='/api/auth/invite/resend'){json(200,{invite:{id:'invite-id',email:'new@example.test',status:'active'},email:{sent:true,message_id:'msg-1'}});return;}
+   json(200,{ok:true});return;
+  }
   if(url.pathname==='/api/state'){if(behavior.delayMs)await new Promise(resolve=>setTimeout(resolve,behavior.delayMs));json(200,{auth_enabled:true,tenant_isolation:account!==behavior.legacyOwnerUid,user:{uid:behavior.stateUid||account},csrf:behavior.stateCsrf||`csrf-${account}`,chats:[{id:`chat-${account}`,title:`Private ${account}`}],projects:[],library:[]});return;}
   if(['/api/action','/api/sync','/api/plugins'].includes(url.pathname)){if(behavior.actionDelayMs)await new Promise(resolve=>setTimeout(resolve,behavior.actionDelayMs));json(200,{ok:true});return;}
   if(['/api/voice/start','/api/voice/next','/api/voice/transcribe','/api/review','/api/compact'].includes(url.pathname)){
@@ -252,7 +259,7 @@ async function ownerFixture(authEnabled=true){
  await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));
  cleanup.push(()=>new Promise<void>((resolve,reject)=>{server.close(e=>e?reject(e):resolve());server.closeAllConnections();}));
  const address=server.address();if(!address||typeof address==='string')throw new Error('Fixture missing address');
- return {baseUrl:`http://127.0.0.1:${address.port}`,calls,revoked,pending,roles,behavior};
+ return {baseUrl:`http://127.0.0.1:${address.port}`,calls,bodies,revoked,pending,roles,behavior};
 }
 async function prime(baseUrl:string,ownerUid='owner'){
  // Reflect permits the RED test against the existing three-argument host.
@@ -459,19 +466,41 @@ describe('canonical Workspace boundary in the existing Prime host',()=>{
   expect(upstream.calls.filter(c=>c.path==='/api/auth/accounts')).toHaveLength(1);
   expect(upstream.calls.filter(c=>c.path==='/api/auth/decide')).toHaveLength(1);
  });
- it('restricts the member-management routes (usage, invites, invite, revoke) to the currently approved primary owner',async()=>{
+ it('restricts the member-management routes (usage, invites, invite, resend, revoke) to the currently approved primary owner',async()=>{
   const upstream=await ownerFixture(),root=await prime(upstream.baseUrl);
   const owner=await login(root,'owner'),member=await login(root,'member'),admin=await login(root,'admin');
-  const routes:Array<[string,string,unknown]>=[['GET','invites',undefined],['POST','usage',{uid:'member'}],['POST','invite',{email:'new@example.test'}],['POST','invite/revoke',{id:'invite-id'}]];
+  const routes:Array<[string,string,unknown]>=[['GET','invites',undefined],['POST','usage',{uid:'member'}],['POST','invite',{email:'new@example.test'}],['POST','invite/resend',{invite_id:'invite-id'}],['POST','invite/revoke',{id:'invite-id'}]];
   const call=(p:typeof owner,[method,path,body]:[string,string,unknown])=>fetch(p.url+'/api/workspace/auth/'+path,{method,headers:headers(p),...(body===undefined?{}:{body:JSON.stringify(body)})});
   for(const p of [member,admin])for(const route of routes)expect((await call(p,route)).status,route[1]).toBe(403);
-  for(const path of ['/api/auth/invites','/api/auth/usage','/api/auth/invite','/api/auth/invite/revoke'])expect(upstream.calls.filter(c=>c.path===path)).toHaveLength(0);
+  for(const path of ['/api/auth/invites','/api/auth/usage','/api/auth/invite','/api/auth/invite/resend','/api/auth/invite/revoke'])expect(upstream.calls.filter(c=>c.path===path)).toHaveLength(0);
   for(const route of routes)expect((await call(owner,route)).status,route[1]).toBe(200);
-  for(const path of ['/api/auth/invites','/api/auth/usage','/api/auth/invite','/api/auth/invite/revoke'])expect(upstream.calls.filter(c=>c.path===path),path).toHaveLength(1);
+  for(const path of ['/api/auth/invites','/api/auth/usage','/api/auth/invite','/api/auth/invite/resend','/api/auth/invite/revoke'])expect(upstream.calls.filter(c=>c.path===path),path).toHaveLength(1);
   // Owner writes still need the current session CSRF, and the invite list takes no query.
   expect((await fetch(owner.url+'/api/workspace/auth/usage',{method:'POST',headers:headers(owner,'csrf-member'),body:JSON.stringify({uid:'member'})})).status).toBe(403);
   expect((await fetch(owner.url+'/api/workspace/auth/invites?x=1',{headers:headers(owner)})).status).toBe(400);
   expect(upstream.calls.filter(c=>['/api/auth/usage','/api/auth/invites'].includes(c.path))).toHaveLength(2);
+ });
+ // Emailed invitations (PRIME_MEMBERS_CONTRACT.md): Prime passes the request and the Workspace's `email` result through
+ // untouched and adds nothing of its own.
+ it('passes send_email, invite_id and the email result through the owner invite and resend routes untouched',async()=>{
+  const upstream=await ownerFixture(),owner=await login(await prime(upstream.baseUrl),'owner');
+  const post=(path:string,body:unknown)=>fetch(owner.url+'/api/workspace/auth/'+path,{method:'POST',headers:headers(owner),body:JSON.stringify(body)});
+  const created=await post('invite',{email:'new@example.test',send_email:true});
+  expect(created.status).toBe(200);expect(await created.json()).toEqual({invite:{id:'invite-id',email:'new@example.test',status:'active'},email:{sent:true,message_id:'msg-1'}});
+  const resent=await post('invite/resend',{invite_id:'invite-id'});
+  expect(resent.status).toBe(200);expect(await resent.json()).toMatchObject({email:{sent:true,message_id:'msg-1'}});
+  expect(upstream.bodies.map(b=>[b.path,JSON.parse(b.body)])).toEqual([['/api/auth/invite',{email:'new@example.test',send_email:true}],['/api/auth/invite/resend',{invite_id:'invite-id'}]]);
+ });
+ // The real Workspace never answers a resend with 429 (a rate-limited mail is reported inside a 200), and a Retry-After
+ // relay would change every Workspace 429, the sign-in ones included. So the status and body pass through, no header is added.
+ it('passes a Workspace 429 through untouched and adds no Retry-After header',async()=>{
+  const upstream=await ownerFixture(),owner=await login(await prime(upstream.baseUrl),'owner');
+  const resend=()=>fetch(owner.url+'/api/workspace/auth/invite/resend',{method:'POST',headers:headers(owner),body:JSON.stringify({invite_id:'invite-id'})});
+  for(const header of ['600','Wed, 21 Oct 2026 07:28:00 GMT']){
+   upstream.behavior.resendLimitedHeader=header;
+   const limited=await resend();
+   expect(limited.status).toBe(429);expect(limited.headers.get('retry-after')).toBeNull();expect(await limited.json()).toEqual({error:'Too many attempts.',retry_after:600});
+  }
  });
  it('rejects invalid UTF-8 request bytes before any upstream write',async()=>{
   const upstream=await ownerFixture(),p=await login(await prime(upstream.baseUrl),'owner');
