@@ -17,11 +17,21 @@
  *      delta form {action, botId, status?, name?}  (autoagents.js and bots.js tell the orb a bot was created, resumed,
  *      paused or deleted, on window): upserts or removes the moon 'bot:'+botId inside the 'bots' source, so the next full
  *      list from bots.js (source 'bots') replaces it. Owner-only publishers: anonymous users are sent nothing, so nothing
- *      orbits; 'echo-account-changed' on window clears every moon.
+ *      orbits.
+ *  - window Event 'echo-account-changed' drops every moon, every state claim and any error/success overlay: nothing the
+ *      previous account started can keep the orb thinking.
  *  - document CustomEvent 'echo-orb-open'  detail {id, kind}  dispatched here when a moon is clicked (mouse), or tapped a
  *      second time while its name is showing (touch: the first tap shows the name).
- *  window.EchoOrb (installed by mount): setState, getState, pulse, setSatellites, satellites, arcs, links, destroy.
- *  Publishers: agents.js (source 'agents'), bots.js (source 'bots'), swarm.js (source 'swarm'), autoagents.js (deltas).
+ *  window.EchoOrb (installed by mount): setState, getState, pulse, setSatellites, satellites, depthOrder, arcs, links, destroy.
+ *  Publishers: chat.js and workspace.js (source 'chat'), speech.js (source 'speech'), agents.js (source 'agents'),
+ *  bots.js (source 'bots'), swarm.js (source 'swarm'), autoagents.js (bot deltas).
+ *
+ * Depth: every frame the moons are insertion-sorted by depth into a preallocated index (back to front). Moons behind the
+ * sphere's limb are painted before the sphere (2D) or clipped by its disc in the shader (WebGL), and their trails and
+ * steady links are clipped the same way; bolts only join moons in front of the limb and die if an end slips behind.
+ * Allocation: the scene step and the WebGL frame write into preallocated typed arrays, pooled moons and pooled arcs; the
+ * 2D fallback takes its colour strings from a bounded cache but still creates CanvasGradient objects each frame (the
+ * Canvas 2D API binds a gradient to its coordinates).
  */
 (() => {
   'use strict';
@@ -167,11 +177,12 @@ void main(){vec2 c=gl_PointCoord-.5;float d=length(c)*2.;if(d>1.)discard;
  vec3 col=vColor*(.25+.75*diff)+vColor*rim*.6+vec3(1.)*pow(max(dot(reflect(-l,n),vec3(0.,0.,1.)),0.),24.)*.5;
  float a=(1.-smoothstep(.72,1.,d))*(vBehind>.5?.75:1.);
  gl_FragColor=vec4(col*(1.+vGlow*.5),a);}`;
-  // Glow lines: lightning bolts, orbit trails and steady links share one additive program.
-  const LINE_VERTEX = `attribute vec2 position;attribute vec4 color;uniform float pointSize;varying vec4 vColor;
-void main(){gl_Position=vec4(position,0.,1.);gl_PointSize=pointSize;vColor=color;}`;
-  const LINE_FRAGMENT = `precision mediump float;uniform float soft;varying vec4 vColor;
-void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(d>1.)discard;a*=pow(1.-d,2.);}gl_FragColor=vec4(vColor.rgb,a);}`;
+  // Glow lines: lightning bolts, orbit trails and steady links share one additive program. A vertex flagged `behind`
+  // belongs to a moon behind the limb, so its fragments inside the sphere's disc are discarded (the sphere hides them).
+  const LINE_VERTEX = `attribute vec2 position;attribute vec4 color;attribute float behind;uniform float pointSize;varying vec4 vColor;varying float vBehind;
+void main(){gl_Position=vec4(position,0.,1.);gl_PointSize=pointSize;vColor=color;vBehind=behind;}`;
+  const LINE_FRAGMENT = `precision mediump float;uniform float soft;uniform vec3 sphere;varying vec4 vColor;varying float vBehind;
+void main(){if(vBehind>.5&&distance(gl_FragCoord.xy,sphere.xy)<sphere.z)discard;float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(d>1.)discard;a*=pow(1.-d,2.);}gl_FragColor=vec4(vColor.rgb,a);}`;
   const PALETTES = {
     prism:[[.22,.94,.63],[.18,.72,.88],[.62,.38,.88]],
     emerald:[[.3,.95,.53],[.14,.65,.52],[.7,.85,.38]],
@@ -194,7 +205,13 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
   const STATUSES=['paused','idle','running','error'],BOT_ID=/^[0-9a-f]{32}$/;
   const MAX_SATS=24,MAX_ARCS=12,SEGMENTS=16,TRAIL=10,MAX_LIGHTS=4,ERROR_MS=900,SUCCESS_MS=720,TIP_MS=1600,TAU=Math.PI*2;
   // A moon centre is hidden by the sphere once its depth drops below the limb, z < R*R/d (camera at d=3.3, sphere R=.83).
+  // The sphere breathes (look.scale), so the live limb is LIMB_Z*scale*scale (look.limb), recomputed every step.
   const LIMB_Z=.83*.83/3.3;
+  // The eased look keys, iterated by index so the step never enumerates an object.
+  const GOAL_KEYS=['energy','swirl','flow','rim','shimmer','filaments','hue','ripple','ampl','intensity'];
+  // The three decorative orbit rings (inclination, tilt) shared by both renderers.
+  const RING_INCL=[1.15,.92,1.37],RING_TILT=[.38,1.08,2.14];
+  const COLOR_UNIFORMS=['colorA','colorB','colorC'];
   const now=()=>Date.now();
   const clamp01=v=>typeof v==='number'&&Number.isFinite(v)?Math.min(1,Math.max(0,v)):0;
   function hash(text){let h=2166136261;for(let i=0;i<text.length;i++){h^=text.charCodeAt(i);h=Math.imul(h,16777619);}return (h>>>0)/4294967296;}
@@ -202,6 +219,16 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
   function hueRotate(c,a,out){const Y=.299*c[0]+.587*c[1]+.114*c[2],I=.596*c[0]-.274*c[1]-.322*c[2],Q=.211*c[0]-.523*c[1]+.312*c[2],co=Math.cos(a),si=Math.sin(a),I2=I*co-Q*si,Q2=I*si+Q*co;
     out[0]=Math.min(1,Math.max(0,Y+.956*I2+.621*Q2));out[1]=Math.min(1,Math.max(0,Y-.272*I2-.647*Q2));out[2]=Math.min(1,Math.max(0,Y-1.106*I2+1.703*Q2));return out;}
   function dispatch(name,detail){try{if(typeof document.dispatchEvent==='function'&&typeof CustomEvent==='function')document.dispatchEvent(new CustomEvent(name,{detail}));}catch{}}
+  // 2D colour strings, quantised to 6 bits per channel and 5 bits of alpha and made once per distinct value (an integer
+  // key, so a lookup allocates nothing). The cap only matters if the palette drifts through an unusual number of colours.
+  const STYLE_CAP=16384,styleCache=new Map();
+  function q6(v){return Math.round((v>0?v<1?v:1:0)*63);}
+  function rgbaStyle(r,g,b,a){
+    const ri=q6(r),gi=q6(g),bi=q6(b),ai=Math.round((a>0?a<1?a:1:0)*31),key=((ri*64+gi)*64+bi)*32+ai;
+    let style=styleCache.get(key);
+    if(style===undefined){if(styleCache.size>=STYLE_CAP)styleCache.clear();style='rgba('+Math.round(ri*255/63)+','+Math.round(gi*255/63)+','+Math.round(bi*255/63)+','+(ai/31).toFixed(3)+')';styleCache.set(key,style);}
+    return style;
+  }
 
   /** Shared state, satellites and arcs for both renderers. Everything is preallocated; the frame loop allocates nothing. */
   function createScene(){
@@ -209,19 +236,22 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
     // `version` changes whenever something a static frame shows changes (mode, intensity, the listening layer, the roster).
     let version=0,lastMode='idle',lastIntensity=0,lastRipple=0;
     const state={mode:'idle',intensity:0,amplitude:0,source:'app'};
-    const look={energy:.15,swirl:0,flow:1,rim:0,shimmer:.35,filaments:0,hue:0,pulse:0,ripple:0,red:0,flash:0,flashR:0,ampl:0,scale:1,intensity:0};
+    const look={energy:.15,swirl:0,flow:1,rim:0,shimmer:.35,filaments:0,hue:0,pulse:0,ripple:0,red:0,flash:0,flashR:0,ampl:0,scale:1,intensity:0,limb:LIMB_Z};
     const goal={energy:.15,swirl:0,flow:1,rim:0,shimmer:.35,filaments:0,hue:0,ripple:0,ampl:0,intensity:0};
     const sources=new Map();
     const sats=[];for(let i=0;i<MAX_SATS;i++)sats.push({id:'',kind:'agent',name:'',status:'idle',busy:false,group:'',size:4,radius:1.1,speed:.3,incl:0,tilt:0,phase:0,dir:1,ecc:0,peri:0,ci:1,si:0,ct:1,st:0,cp:1,sp:0,sq:1,glow:0,color:new Float32Array(3),x:0,y:0,z:0,sx:0,sy:0,k:1,nextArc:0,nextLink:0,trail:new Float32Array(TRAIL*2),trailLen:0,trailAt:0});
     let satCount=0;
-    const arcs=[];for(let i=0;i<MAX_ARCS;i++)arcs.push({active:false,a:-1,b:-1,born:0,life:0,seed:0,alpha:0});
+    // Painter's order: indexes into `sats`, back (smallest z) to front, re-sorted in place every orbit step.
+    const order=new Uint8Array(MAX_SATS);
+    // Arcs remember their ends' ids so a roster rebuild that moves a moon to another slot retires the bolt.
+    const arcs=[];for(let i=0;i<MAX_ARCS;i++)arcs.push({active:false,a:-1,b:-1,aid:'',bid:'',born:0,life:0,seed:0,alpha:0});
     const lights=new Float32Array(MAX_LIGHTS*4);
     const bolt=new Float32Array((SEGMENTS+1)*2);
     let clock=0,fclock=0,hover=-1,hoverId='',tipUntil=0;
     const palette=[new Float32Array(3),new Float32Array(3),new Float32Array(3)];
     const base=[new Float32Array(3),new Float32Array(3),new Float32Array(3)];
     const self={
-      state,look,sats,arcs,lights,bolt,palette,base,
+      state,look,sats,arcs,lights,bolt,palette,base,order,
       get satCount(){return satCount;},get clock(){return clock;},get fclock(){return fclock;},get hover(){return hover;},get version(){return version;},
       setBase(colors){for(let i=0;i<3;i++){base[i][0]=colors[i][0];base[i][1]=colors[i][1];base[i][2]=colors[i][2];}},
       setState(detail){
@@ -267,17 +297,18 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
         // Animated frames ease toward the goal; a static frame (reduced motion, Animation off, hidden tab) has dt=0, so it
         // snaps straight to the state's colours instead, and shows speaking at rest (amplitude pulsation is motion).
         const t=now(),ease=Math.min(1,dt*4.5);
-        if(motion)for(const key in goal){look[key]+=(goal[key]-look[key])*(key==='ampl'?Math.min(1,dt*14):key==='ripple'?Math.min(1,dt*6):ease);}
-        else{for(const key in goal)look[key]=goal[key];look.ampl=0;}
+        if(motion)for(let i=0;i<GOAL_KEYS.length;i++){const key=GOAL_KEYS[i];look[key]+=(goal[key]-look[key])*(key==='ampl'?Math.min(1,dt*14):key==='ripple'?Math.min(1,dt*6):ease);}
+        else{for(let i=0;i<GOAL_KEYS.length;i++){const key=GOAL_KEYS[i];look[key]=goal[key];}look.ampl=0;}
         look.pulse=motion?look.pulse*Math.exp(-dt*6):0; // static redraws never animate, so a pulse must not accumulate there
         const et=(t-errorAt)/ERROR_MS;look.red=et<1?Math.max(0,1-et*et)*(transient&&transient.mode==='error'?1:.4):0;
         const ft=(t-flashAt)/SUCCESS_MS;look.flash=ft<1?1-ft:0;look.flashR=ft<1?ft:0;
         look.scale=1+.016*Math.sin(clock*1.4)*(.3+look.energy)+look.pulse*.05+look.ampl*.08+look.flash*.02;
+        look.limb=LIMB_Z*look.scale*look.scale;
         const hue=look.hue*.9;
         for(let i=0;i<3;i++)hueRotate(base[i],hue*Math.sin(fclock*.35+i*1.3+(i===2?.8:0)),palette[i]);
         self.orbit(motion);
-        if(motion)self.arcStep(t);else for(const a of arcs)a.active=false;
-        self.lightStep(t);
+        if(motion)self.arcStep(t);else for(let i=0;i<MAX_ARCS;i++)arcs[i].active=false;
+        self.lightStep();
       },
       /** Orbital positions in sphere space: Keplerian ellipses with the sphere at a focus (moons dive and whip past
        *  periapsis), inclined and tilted per moon, the whole system slowly spinning. A frozen clock is a static layout. */
@@ -293,6 +324,11 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
           if(motion&&clock-s.trailAt>.05){s.trailAt=clock;const n=Math.min(TRAIL,s.trailLen+1);for(let k=n-1;k>0;k--){s.trail[k*2]=s.trail[(k-1)*2];s.trail[k*2+1]=s.trail[(k-1)*2+1];}s.trail[0]=x;s.trail[1]=y;s.trailLen=n;}
           self.colorFor(s);
         }
+        self.sortDepth();
+      },
+      /** Insertion sort of `order` by depth, back to front. Frame to frame the order barely changes, so this is ~O(n). */
+      sortDepth(){
+        for(let i=1;i<satCount;i++){const v=order[i],z=sats[v].z;let j=i-1;while(j>=0&&sats[order[j]].z>z){order[j+1]=order[j];j--;}order[j+1]=v;}
       },
       colorFor(s){
         const A=palette[0],B=palette[1],C=palette[2],c=s.color;
@@ -336,8 +372,13 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
         }
         sources.set('bots',items);self.rebuild();return true;
       },
-      /** Drops every moon (account change); returns whether anything was orbiting. */
-      clearSatellites(){const had=satCount>0;sources.clear();self.rebuild();return had;},
+      /** Account change: drops every moon, every claim (deep, thinking, speaking...) and any timed overlay, so nothing the
+       *  previous account started keeps the orb busy. Publishers still active after the change claim again on their next event. */
+      clearAccount(){
+        for(const key in claims)delete claims[key];
+        transient=null;if(transientTimer){clearTimeout(transientTimer);transientTimer=0;}errorAt=-Infinity;flashAt=-Infinity;
+        sources.clear();self.rebuild();self.recompute('app');return true;
+      },
       rebuild(){
         // An id published by two sources (a bot delta and the bots list, say) orbits once; a busy copy wins.
         const byId=new Map();for(const items of sources.values())for(const s of items){const prev=byId.get(s.id);if(!prev||(!prev.busy&&s.busy))byId.set(s.id,s);}
@@ -355,36 +396,40 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
           s.id=src.id;s.kind=src.kind;s.name=src.name;s.status=src.status;s.busy=src.busy;s.group=src.group;
           s.size=K.size;s.radius=K.radius+(hash(src.id+'/r')-.5)*.14;s.speed=K.speed*(.85+hash(src.id+'/s')*.3);
         }
-        satCount=n;if(hover>=n){hover=-1;hoverId='';}
-        for(const a of arcs)if(a.a>=n||a.b>=n)a.active=false;
+        satCount=n;
+        // The hovered moon may now sit in another slot (or be gone); follow it by id.
+        if(hoverId){hover=-1;for(let i=0;i<n;i++)if(sats[i].id===hoverId){hover=i;break;}if(hover<0)hoverId='';}else hover=-1;
+        for(const a of arcs)if(a.active&&(a.b>=n||sats[a.b].id!==a.bid||(a.a>=0&&(a.a>=n||sats[a.a].id!==a.aid))))a.active=false;
+        for(let i=0;i<n;i++)order[i]=i;
         self.orbit(false);
       },
       busyCount(){let n=0;for(let i=0;i<satCount;i++)if(sats[i].busy)n++;return n;},
-      activeArcs(){let n=0;for(const a of arcs)if(a.active)n++;return n;},
-      spawn(a,b,t){for(const arc of arcs){if(arc.active)continue;arc.active=true;arc.a=a;arc.b=b;arc.born=t;arc.life=140+prand(t*.37+a*3+b*7)*140;arc.seed=Math.floor(t*.013)+a*17+b*31;arc.alpha=1;return arc;}return null;},
+      activeArcs(){let n=0;for(let i=0;i<MAX_ARCS;i++)if(arcs[i].active)n++;return n;},
+      spawn(a,b,t){for(let i=0;i<MAX_ARCS;i++){const arc=arcs[i];if(arc.active)continue;arc.active=true;arc.a=a;arc.b=b;arc.aid=a<0?'':sats[a].id;arc.bid=sats[b].id;arc.born=t;arc.life=140+prand(t*.37+a*3+b*7)*140;arc.seed=Math.floor(t*.013)+a*17+b*31;arc.alpha=1;return arc;}return null;},
       /** Time-scheduled bolts: every busy satellite fires to the core; busy members of one group fire to each other. */
       arcStep(t){
-        for(const arc of arcs){if(!arc.active)continue;const age=(t-arc.born)/arc.life;if(age>=1){arc.active=false;continue;}arc.alpha=age<.15?age/.15:1-(age-.15)/.85;}
+        const limb=look.limb;
+        // Bolts only join moons in front of the limb; one whose end slips behind the sphere would cross its face, so it dies.
+        for(let i=0;i<MAX_ARCS;i++){const arc=arcs[i];if(!arc.active)continue;const age=(t-arc.born)/arc.life;if(age>=1||sats[arc.b].z<limb||(arc.a>=0&&sats[arc.a].z<limb)){arc.active=false;continue;}arc.alpha=age<.15?age/.15:1-(age-.15)/.85;}
         const busy=self.busyCount();if(!busy)return;
         const rate=Math.min(1.6,.45+busy*.14),cap=Math.min(MAX_ARCS,2+busy*2);let spawned=0;
-        // Bolts only reach moons in front of the limb; one aimed behind the sphere would cross its face.
         for(let i=0;i<satCount&&spawned<2;i++){
-          const s=sats[i];if(!s.busy||s.z<LIMB_Z)continue;
+          const s=sats[i];if(!s.busy||s.z<limb)continue;
           if(!s.nextArc)s.nextArc=t+200+prand(i*7.1+t*.001)*900/rate;
           if(t>=s.nextArc){s.nextArc=t+(380+prand(i*3.7+t*.003)*1100)/rate;if(self.activeArcs()<cap&&self.spawn(-1,i,t))spawned++;}
           if(!s.group)continue;
           if(!s.nextLink)s.nextLink=t+500+prand(i*5.3+t*.002)*1200;
-          if(t>=s.nextLink){s.nextLink=t+(700+prand(i*9.1+t*.004)*1500)/rate;for(let j=i+1;j<satCount;j++){const o=sats[j];if(o.busy&&o.z>=LIMB_Z&&o.group===s.group&&self.activeArcs()<cap&&spawned<2){if(self.spawn(i,j,t))spawned++;break;}}}
+          if(t>=s.nextLink){s.nextLink=t+(700+prand(i*9.1+t*.004)*1500)/rate;for(let j=i+1;j<satCount;j++){const o=sats[j];if(o.busy&&o.z>=limb&&o.group===s.group&&self.activeArcs()<cap&&spawned<2){if(self.spawn(i,j,t))spawned++;break;}}}
         }
       },
       lightStep(){
         lights.fill(0);let n=0;
-        for(const arc of arcs){if(!arc.active||n>=MAX_LIGHTS)continue;const s=sats[arc.a<0?arc.b:arc.a];const len=Math.hypot(s.x,s.y,s.z)||1;lights[n*4]=s.x/len;lights[n*4+1]=s.y/len;lights[n*4+2]=s.z/len;lights[n*4+3]=arc.alpha*(arc.a<0?.9:.45);n++;}
+        for(let i=0;i<MAX_ARCS&&n<MAX_LIGHTS;i++){const arc=arcs[i];if(!arc.active)continue;const s=sats[arc.a<0?arc.b:arc.a];const len=Math.sqrt(s.x*s.x+s.y*s.y+s.z*s.z)||1;lights[n*4]=s.x/len;lights[n*4+1]=s.y/len;lights[n*4+2]=s.z/len;lights[n*4+3]=arc.alpha*(arc.a<0?.9:.45);n++;}
       },
       /** Writes a jittered bolt between two screen points into `bolt` (SEGMENTS+1 pairs) and returns the point count. */
       makeBolt(x0,y0,x1,y1,seed,t){
         bolt[0]=x0;bolt[1]=y0;bolt[SEGMENTS*2]=x1;bolt[SEGMENTS*2+1]=y1;
-        const len=Math.hypot(x1-x0,y1-y0),nx=-(y1-y0)/(len||1),ny=(x1-x0)/(len||1),frame=Math.floor(t/40);
+        const dx=x1-x0,dy=y1-y0,len=Math.sqrt(dx*dx+dy*dy),nx=-dy/(len||1),ny=dx/(len||1),frame=Math.floor(t/40);
         for(let step=SEGMENTS;step>1;step>>=1){
           for(let i=0;i<SEGMENTS;i+=step){
             const m=i+step/2,ax=bolt[i*2],ay=bolt[i*2+1],bx=bolt[(i+step)*2],by=bolt[(i+step)*2+1];
@@ -398,8 +443,10 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
       setHover(index,t){hover=index;hoverId=index>=0?sats[index].id:'';if(index>=0)tipUntil=t+TIP_MS;},
       get hoverId(){return hoverId;},get tipUntil(){return tipUntil;},
       snapshot(){
-        const list=[];for(let i=0;i<satCount;i++){const s=sats[i];list.push({id:s.id,kind:s.kind,name:s.name,status:s.status,busy:s.busy,group:s.group||undefined,size:s.size,color:[s.color[0],s.color[1],s.color[2]],glow:s.glow,x:s.x,y:s.y,z:s.z,sx:s.sx,sy:s.sy,front:s.z>=LIMB_Z});}return list;
+        const list=[];for(let i=0;i<satCount;i++){const s=sats[i];list.push({id:s.id,kind:s.kind,name:s.name,status:s.status,busy:s.busy,group:s.group||undefined,size:s.size,color:[s.color[0],s.color[1],s.color[2]],glow:s.glow,x:s.x,y:s.y,z:s.z,sx:s.sx,sy:s.sy,front:s.z>=look.limb});}return list;
       },
+      /** Moon ids in painting order, back to front (what both renderers draw). */
+      depthOrder(){const list=[];for(let i=0;i<satCount;i++)list.push(sats[order[i]].id);return list;},
       arcList(){const list=[];for(const a of arcs)if(a.active)list.push({from:a.a<0?'core':sats[a.a].id,to:sats[a.b].id,alpha:a.alpha,kind:a.a<0?'core':'group'});return list;},
       linkList(){const list=[];for(let i=0;i<satCount;i++)if(sats[i].busy)list.push({to:sats[i].id,steady:true});return list;},
       getState(){return {mode:state.mode,source:state.source,intensity:state.intensity,amplitude:state.amplitude,transient:transient?transient.mode:null,pulse:look.pulse,ripple:look.ripple,red:look.red,flash:look.flash,energy:look.energy,swirl:look.swirl,flow:look.flow,filaments:look.filaments,hue:look.hue,ampl:look.ampl,hover:hover>=0?{id:sats[hover].id,name:sats[hover].name,kind:sats[hover].kind}:null,satellites:satCount,arcs:self.activeArcs(),claims:Object.keys(claims)};},
@@ -412,9 +459,9 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
     const onState=e=>{if(scene.setState(e&&e.detail))hooks.changed();};
     const onSatellites=e=>{if(scene.setSatellites(e&&e.detail))hooks.changed();};
     const onPulse=e=>{scene.pulse(e&&e.detail&&e.detail.strength);hooks.changed();};
-    const onAccount=()=>{if(scene.clearSatellites())hooks.changed();};
+    const onAccount=()=>{if(scene.clearAccount())hooks.changed();};
     const listen=typeof document.addEventListener==='function';
-    // autoagents.js and bots.js send bot deltas on window; an account change on window clears every moon.
+    // autoagents.js and bots.js send bot deltas on window; an account change on window clears every moon and claim.
     const winListen=typeof window.addEventListener==='function'&&typeof window.removeEventListener==='function';
     if(listen){document.addEventListener('echo-orb-state',onState);document.addEventListener('echo-orb-satellites',onSatellites);document.addEventListener('echo-orb-pulse',onPulse);}
     if(winListen){window.addEventListener('echo-orb-satellites',onSatellites);window.addEventListener('echo-account-changed',onAccount);}
@@ -423,24 +470,42 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
       getState(){return scene.getState();},
       pulse(strength){const v=scene.pulse(strength);hooks.changed();return v;},
       setSatellites(detail){const ok=scene.setSatellites(Array.isArray(detail)?{satellites:detail}:detail);if(ok)hooks.changed();return ok;},
-      satellites(){return scene.snapshot();},arcs(){return scene.arcList();},links(){return scene.linkList();},
+      satellites(){return scene.snapshot();},depthOrder(){return scene.depthOrder();},arcs(){return scene.arcList();},links(){return scene.linkList();},
       destroy(){if(listen){document.removeEventListener('echo-orb-state',onState);document.removeEventListener('echo-orb-satellites',onSatellites);document.removeEventListener('echo-orb-pulse',onPulse);}if(winListen){window.removeEventListener('echo-orb-satellites',onSatellites);window.removeEventListener('echo-account-changed',onAccount);}if(window.EchoOrb===api)window.EchoOrb=undefined;},
     };
     window.EchoOrb=api;return api;
   }
   /** Hover tooltip and open-on-click for the moons; shared by both renderers. Touch has no hover, so the first tap on a moon
    *  shows its name (for TIP_MS) and a second tap while the name shows opens it. */
+  // Pixel strings for the name tag's position, made once per whole pixel and reused, so following a moving moon allocates
+  // nothing frame to frame.
+  const PX=new Array(12288);
+  function px(v){const n=Math.max(-4096,Math.min(8191,Math.round(v))),i=n+4096;return PX[i]||(PX[i]=n+'px');}
   function pointerBridge(canvas,scene,redraw){
-    let tip=null,pointerType='mouse',tipTimer=0;
-    function ensureTip(){if(tip||!canvas.parentNode||typeof document.createElement!=='function')return;try{tip=document.createElement('div');tip.className='orb-tip';tip.hidden=true;tip.setAttribute('role','tooltip');canvas.parentNode.insertBefore(tip,canvas.nextSibling);}catch{tip=null;}}
+    let tip=null,tipName=null,tipMeta=null,pointerType='mouse',tipTimer=0,filledIndex=-1,filledVersion=-1,left=NaN,top=NaN;
+    // The tag and its two lines are built once; a hover change only rewrites their text.
+    function ensureTip(){
+      if(tip||!canvas.parentNode||typeof document.createElement!=='function')return;
+      try{tip=document.createElement('div');tip.className='orb-tip';tip.hidden=true;tip.setAttribute('role','tooltip');canvas.parentNode.insertBefore(tip,canvas.nextSibling);}catch{tip=null;return;}
+      try{tipName=document.createElement('strong');tipMeta=document.createElement('small');tip.append(tipName,tipMeta);}catch{tipName=null;tipMeta=null;}
+    }
+    /** Rewrites the tag's text; runs on a hover change or when the roster changed under a showing tag, never per frame. */
+    function fill(i){
+      const s=scene.sats[i];filledIndex=i;filledVersion=scene.version;
+      if(tipName&&tipMeta){tipName.textContent=s.name;tipMeta.textContent=s.kind+' · '+s.status+(s.busy?' · busy':'');}else tip.textContent=s.name;
+    }
+    /** Moves the tag over its moon; writes the style only when the whole-pixel position changed. */
+    function place(i){
+      const s=scene.sats[i],x=Math.round(s.sx),y=Math.round(s.sy-s.size*s.k*.7);
+      if(x!==left){left=x;tip.style.left=px(x);}if(y!==top){top=y;tip.style.top=px(y);}
+    }
     function show(){
       ensureTip();const i=scene.hover;
-      if(canvas.dataset)canvas.dataset.orbHover=String(i>=0);
+      if(canvas.dataset)canvas.dataset.orbHover=i>=0?'true':'false';
       if(!tip)return;
-      if(i<0){tip.hidden=true;return;}
-      const s=scene.sats[i];tip.textContent='';
-      try{const name=document.createElement('strong'),meta=document.createElement('small');name.textContent=s.name;meta.textContent=s.kind+' · '+s.status+(s.busy?' · busy':'');tip.append(name,meta);}catch{tip.textContent=s.name;}
-      tip.style.left=s.sx+'px';tip.style.top=(s.sy-s.size*s.k*.7)+'px';tip.hidden=false;
+      if(i<0){tip.hidden=true;filledIndex=-1;return;}
+      if(i!==filledIndex||scene.version!==filledVersion)fill(i);
+      place(i);tip.hidden=false;
     }
     function locate(event){const r=canvas.getBoundingClientRect();return [event.clientX-r.left,event.clientY-r.top];}
     function hide(){tipTimer=0;if(scene.hover>=0){scene.setHover(-1,now());show();redraw();}}
@@ -454,7 +519,7 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
       scene.setHover(hit,now());show();const s=scene.sats[hit];dispatch('echo-orb-open',{id:s.id,kind:s.kind});
     }
     canvas.addEventListener('pointerdown',down);canvas.addEventListener('pointermove',move);canvas.addEventListener('pointerleave',leave);canvas.addEventListener('click',click);
-    return {refresh(){if(scene.hover>=0)show();},destroy(){if(tipTimer)clearTimeout(tipTimer);tipTimer=0;canvas.removeEventListener('pointerdown',down);canvas.removeEventListener('pointermove',move);canvas.removeEventListener('pointerleave',leave);canvas.removeEventListener('click',click);if(tip&&tip.parentNode)tip.parentNode.removeChild(tip);tip=null;}};
+    return {refresh(){if(scene.hover>=0||filledIndex>=0)show();},destroy(){if(tipTimer)clearTimeout(tipTimer);tipTimer=0;canvas.removeEventListener('pointerdown',down);canvas.removeEventListener('pointermove',move);canvas.removeEventListener('pointerleave',leave);canvas.removeEventListener('click',click);if(tip&&tip.parentNode)tip.parentNode.removeChild(tip);tip=null;}};
   }
   function stageMode(canvas,mode){try{if(canvas.dataset&&canvas.dataset.orbMode!==mode)canvas.dataset.orbMode=mode;const stage=canvas.parentNode;if(stage&&stage.dataset&&stage.dataset.orbMode!==mode)stage.dataset.orbMode=mode;}catch{}}
 
@@ -468,26 +533,22 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
     let width=1,height=1,dpr=1,pointer=[0,0],target=[0,0],pts=new Float32Array(0),count=0,stars=new Float32Array(0),starCount=0,drawCount=0;
     const scene=createScene();scene.setBase(PALETTES[palette]);
     const R3=new Float64Array(3),P3=new Float64Array(3),T3=new Float64Array(3),M3=new Float64Array(3);
-    const rgb=(c,a=1)=>`rgba(${Math.round(c[0]*255)},${Math.round(c[1]*255)},${Math.round(c[2]*255)},${a})`;
+    const rgb=(c,a=1)=>rgbaStyle(c[0],c[1],c[2],a);
     const mix=(a,b,t,out=M3)=>{out[0]=a[0]+(b[0]-a[0])*t;out[1]=a[1]+(b[1]-a[1])*t;out[2]=a[2]+(b[2]-a[2])*t;return out;};
     const WHITE=[1,1,1],MINT=[.83,1,.95],GLASS=[.55,.85,.76],DEEP=[.01,.035,.05];
-    const tintCache=new Array(32*8);let tintKey='';
     function tint(x,y){const colors=scene.palette,t=Math.max(0,Math.min(1,(x+1)*.55+y*.12));return t<.5?mix(colors[0],colors[1],t*2,T3):mix(colors[1],colors[2],(t-.5)*2,T3);}
-    function tintStyle(x,y,alpha){
-      const key=palette+':'+Math.round(scene.look.hue*Math.sin(scene.fclock*.35)*64);
-      if(key!==tintKey){tintKey=key;for(let ti=0;ti<32;ti++){const t=ti/31,c=t<.5?mix(scene.palette[0],scene.palette[1],t*2,T3):mix(scene.palette[1],scene.palette[2],(t-.5)*2,T3);mix(c,MINT,.16,T3);for(let ai=0;ai<8;ai++)tintCache[ai*32+ti]=rgb(T3,(ai+1)/8);}}
-      const t=Math.max(0,Math.min(1,(x+1)*.55+y*.12));return tintCache[Math.round(Math.max(0,Math.min(1,alpha))*7)*32+Math.round(t*31)];
-    }
+    function tintStyle(x,y,alpha){mix(tint(x,y),MINT,.16,T3);return rgbaStyle(T3[0],T3[1],T3[2],alpha);}
     function makePoints(){count=quality==='high'?3200:quality==='quiet'?800:2000;pts=new Float32Array(count*4);for(let i=0;i<count;i++){const y=1-2*(i+.5)/count,r=Math.sqrt(1-y*y),a=i*2.39996323;pts[i*4]=Math.cos(a)*r*.842;pts[i*4+1]=y*.842;pts[i*4+2]=Math.sin(a)*r*.842;pts[i*4+3]=((i*73)%997)/997;}
       starCount=quality==='high'?140:quality==='quiet'?50:90;stars=new Float32Array(starCount*4);for(let i=0;i<starCount;i++){stars[i*4]=prand(i*1.7+.3)*2-1;stars[i*4+1]=prand(i*2.9+.7)*2-1;stars[i*4+2]=.3+prand(i*4.1+.1)*.7;stars[i*4+3]=prand(i*6.3+.9);}}
     function rotate(x,y,z,a){const c=Math.cos(a),s=Math.sin(a),xx=x*c+z*s;z=z*c-x*s;x=xx;const angle=-.16+Math.sin(scene.clock*.035)*.12+pointer[1]*.035,cc=Math.cos(angle),ss=Math.sin(angle);R3[0]=x;R3[1]=y*cc-z*ss;R3[2]=y*ss+z*cc;return R3;}
     function project(x,y,z){const k=height*1.2/(3.3-z);P3[0]=width/2+x*k;P3[1]=height/2-y*k;P3[2]=k;return P3;}
-    function orbit(front){const clock=scene.clock;ctx.lineWidth=.55;for(let ring=0;ring<3;ring++){const c=scene.palette[ring],incl=[1.15,.92,1.37][ring],tilt=[.38,1.08,2.14][ring]+Math.sin(clock*.03)*.04;ctx.strokeStyle=rgb(c,front?.24:.085);ctx.beginPath();let connected=false;for(let i=0;i<=240;i++){const a=i/240*Math.PI*2;let x=Math.cos(a)*1.19,y=Math.sin(a)*1.19,z=y*Math.sin(incl);y*=Math.cos(incl);const xx=x*Math.cos(tilt)-y*Math.sin(tilt);y=x*Math.sin(tilt)+y*Math.cos(tilt);x=xx;rotate(x,y,z,clock*.025);if((R3[2]>=0)!==front){connected=false;continue;}project(R3[0],R3[1],R3[2]);if(connected)ctx.lineTo(P3[0],P3[1]);else ctx.moveTo(P3[0],P3[1]);connected=true;}ctx.stroke();}}
+    function orbit(front){const clock=scene.clock;ctx.lineWidth=.55;for(let ring=0;ring<3;ring++){const c=scene.palette[ring],incl=RING_INCL[ring],tilt=RING_TILT[ring]+Math.sin(clock*.03)*.04;ctx.strokeStyle=rgb(c,front?.24:.085);ctx.beginPath();let connected=false;for(let i=0;i<=240;i++){const a=i/240*Math.PI*2;let x=Math.cos(a)*1.19,y=Math.sin(a)*1.19,z=y*Math.sin(incl);y*=Math.cos(incl);const xx=x*Math.cos(tilt)-y*Math.sin(tilt);y=x*Math.sin(tilt)+y*Math.cos(tilt);x=xx;rotate(x,y,z,clock*.025);if((R3[2]>=0)!==front){connected=false;continue;}project(R3[0],R3[1],R3[2]);if(connected)ctx.lineTo(P3[0],P3[1]);else ctx.moveTo(P3[0],P3[1]);connected=true;}ctx.stroke();}}
     function satScreen(){for(let i=0;i<scene.satCount;i++){const s=scene.sats[i];project(s.x,s.y,s.z);s.sx=P3[0];s.sy=P3[1];s.k=P3[2]/(height*.37);}}
+    /** Paints the moons on one side of the limb in depth order (back to front), so a nearer moon covers a farther one. */
     function moons(front){
-      const clock=scene.clock;
-      for(let i=0;i<scene.satCount;i++){
-        const s=scene.sats[i];if((s.z>=LIMB_Z*scene.look.scale*scene.look.scale)!==front)continue;
+      const clock=scene.clock,limb=scene.look.limb,order=scene.order;
+      for(let k=0;k<scene.satCount;k++){
+        const i=order[k],s=scene.sats[i];if((s.z>=limb)!==front)continue;
         const size=s.size*s.k*(1+(s.busy?.08*Math.sin(clock*7+i):0)),dim=front?1:.75;
         if(motion&&quality!=='quiet'&&s.trailLen>1){ctx.beginPath();project(s.x,s.y,s.z);ctx.moveTo(P3[0],P3[1]);for(let k=0;k<s.trailLen;k++){project(s.trail[k*2],s.trail[k*2+1],s.z);ctx.lineTo(P3[0],P3[1]);}ctx.strokeStyle=rgb(s.color,.16*dim*(s.busy?1.5:1));ctx.lineWidth=Math.max(.5,size*.25);ctx.stroke();}
         if(s.glow>0){const g=ctx.createRadialGradient(s.sx,s.sy,0,s.sx,s.sy,size*3.2);g.addColorStop(0,rgb(s.color,.4*s.glow*dim));g.addColorStop(1,rgb(s.color,0));ctx.fillStyle=g;ctx.fillRect(s.sx-size*3.2,s.sy-size*3.2,size*6.4,size*6.4);}
@@ -498,15 +559,16 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
     }
     function bolts(){
       const t=now(),B=scene.bolt;
-      for(const arc of scene.arcs){
-        if(!arc.active)continue;const to=scene.sats[arc.b];let x0,y0;
-        if(arc.a<0){const len=Math.hypot(to.x,to.y,to.z)||1;project(to.x/len*.83,to.y/len*.83,to.z/len*.83);x0=P3[0];y0=P3[1];}else{x0=scene.sats[arc.a].sx;y0=scene.sats[arc.a].sy;}
+      for(let k=0;k<MAX_ARCS;k++){
+        const arc=scene.arcs[k];if(!arc.active)continue;const to=scene.sats[arc.b];let x0,y0;
+        if(arc.a<0){const len=Math.sqrt(to.x*to.x+to.y*to.y+to.z*to.z)||1;project(to.x/len*.83,to.y/len*.83,to.z/len*.83);x0=P3[0];y0=P3[1];}else{x0=scene.sats[arc.a].sx;y0=scene.sats[arc.a].sy;}
         const n=scene.makeBolt(x0,y0,to.sx,to.sy,arc.seed,t),c=arc.a<0?scene.palette[1]:to.color;
         ctx.lineWidth=3;ctx.strokeStyle=rgb(c,.22*arc.alpha);ctx.beginPath();ctx.moveTo(B[0],B[1]);for(let i=1;i<n;i++)ctx.lineTo(B[i*2],B[i*2+1]);ctx.stroke();
         ctx.lineWidth=1;ctx.strokeStyle=rgb(mix(c,WHITE,.7),.95*arc.alpha);ctx.beginPath();ctx.moveTo(B[0],B[1]);for(let i=1;i<n;i++)ctx.lineTo(B[i*2],B[i*2+1]);ctx.stroke();
       }
     }
-    function links(){for(let i=0;i<scene.satCount;i++){const s=scene.sats[i];if(!s.busy)continue;const len=Math.hypot(s.x,s.y,s.z)||1;project(s.x/len*.83,s.y/len*.83,s.z/len*.83);ctx.strokeStyle=rgb(s.color,.28);ctx.lineWidth=1.2;ctx.beginPath();ctx.moveTo(P3[0],P3[1]);ctx.lineTo(s.sx,s.sy);ctx.stroke();}}
+    /** Steady links (reduced motion) for the busy moons on one side of the limb; the back ones go under the sphere body. */
+    function links(front){const limb=scene.look.limb;for(let i=0;i<scene.satCount;i++){const s=scene.sats[i];if(!s.busy||(s.z>=limb)!==front)continue;const len=Math.sqrt(s.x*s.x+s.y*s.y+s.z*s.z)||1;project(s.x/len*.83,s.y/len*.83,s.z/len*.83);ctx.strokeStyle=rgb(s.color,.28);ctx.lineWidth=1.2;ctx.beginPath();ctx.moveTo(P3[0],P3[1]);ctx.lineTo(s.sx,s.sy);ctx.stroke();}}
     function draw(){
       if(dead)return;drawCount++;
       const look=scene.look,colors=scene.palette,clock=scene.clock,fclock=scene.fclock,cx=width/2,cy=height/2,r=height*.312*look.scale;
@@ -515,10 +577,11 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
       let g=ctx.createRadialGradient(cx,cy,r*.75,cx,cy,r*(1.6+look.rim*.5+look.energy*.3));g.addColorStop(0,rgb(colors[0],.07+look.rim*.08+look.pulse*.06));g.addColorStop(.5,rgb(colors[1],.035+look.rim*.04));g.addColorStop(1,rgb(colors[2],0));ctx.fillStyle=g;ctx.fillRect(0,0,width,height);
       // Star field with pointer parallax.
       ctx.globalCompositeOperation='lighter';
-      for(let i=0;i<starCount;i++){const depth=stars[i*4+2],x=cx+stars[i*4]*width*.5+pointer[0]*depth*18,y=cy+stars[i*4+1]*height*.5-pointer[1]*depth*14,tw=.5+.5*Math.sin(clock*(.6+depth)+stars[i*4+3]*20);if(Math.hypot(x-cx,y-cy)<r*1.05)continue;ctx.fillStyle=rgb(colors[i%3],(.08+.22*tw)*depth);const sz=depth>.8?1.4:.8;ctx.fillRect(x,y,sz,sz);}
+      for(let i=0;i<starCount;i++){const depth=stars[i*4+2],x=cx+stars[i*4]*width*.5+pointer[0]*depth*18,y=cy+stars[i*4+1]*height*.5-pointer[1]*depth*14,tw=.5+.5*Math.sin(clock*(.6+depth)+stars[i*4+3]*20);if((x-cx)*(x-cx)+(y-cy)*(y-cy)<r*r*1.1025)continue;ctx.fillStyle=rgb(colors[i%3],(.08+.22*tw)*depth);const sz=depth>.8?1.4:.8;ctx.fillRect(x,y,sz,sz);}
       ctx.globalCompositeOperation='source-over';
       orbit(false);
-      ctx.globalCompositeOperation='lighter';if(!motion)links();moons(false);ctx.globalCompositeOperation='source-over';
+      // Everything behind the limb is painted before the sphere body, which then hides whatever lies over its face.
+      ctx.globalCompositeOperation='lighter';if(!motion)links(false);moons(false);ctx.globalCompositeOperation='source-over';
       // A solid tinted body keeps the emerald volume visible throughout the animation.
       ctx.fillStyle=rgb(mix(colors[0],DEEP,.9));ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.fill();
       // Analytic lighting: a shaded glass core, reflected color and a soft rim.
@@ -530,7 +593,7 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
       for(let band=0;band<27;band++){const y0=-.95+band/26*1.9;let connected=false;ctx.beginPath();for(let i=0;i<=148;i++){const a=i/148*Math.PI*2,y=y0+.035*Math.sin(a*4+fclock*.19+band*.46),ring=Math.sqrt(Math.max(0,1-y*y));rotate(Math.cos(a)*ring*.823,y*.823,Math.sin(a)*ring*.823,fclock*.075);const ripple=1+.012*Math.sin(a*11+fclock*.21+band*.4);const x=R3[0]*ripple,yy=R3[1]*ripple,z=R3[2];if(z<.08){connected=false;continue;}project(x,yy,z);if(connected)ctx.lineTo(P3[0],P3[1]);else ctx.moveTo(P3[0],P3[1]);connected=true;}ctx.lineWidth=band%4===0?.65:.35;ctx.strokeStyle=rgb(mix(colors[0],colors[2],band/27),(band%4===0?.24:.12)*(1+look.energy*.5));ctx.stroke();}
       // A second oblique filament layer gives the sphere volume, not a flat grid.
       for(let strand=0;strand<18;strand++){ctx.beginPath();let connected=false;for(let i=0;i<=125;i++){const a=i/125*Math.PI,b= strand/18*Math.PI*2+Math.sin(a*3+fclock*.1)*.26;rotate(Math.sin(a)*Math.cos(b)*.831,Math.cos(a)*.831,Math.sin(a)*Math.sin(b)*.831,fclock*.055+.7);if(R3[2]<.15){connected=false;continue;}project(R3[0],R3[1],R3[2]);if(connected)ctx.lineTo(P3[0],P3[1]);else ctx.moveTo(P3[0],P3[1]);connected=true;}ctx.strokeStyle=rgb(colors[(strand+1)%3],.15);ctx.lineWidth=.55;ctx.stroke();}
-      // Projected particles; additive blending makes depth order irrelevant, so nothing is sorted or allocated.
+      // Projected particles; additive blending makes depth order irrelevant, so nothing is sorted.
       for(let i=0;i<count;i++){const px=pts[i*4],py=pts[i*4+1],pz=pts[i*4+2],s=pts[i*4+3];const wobble=1+.011*Math.sin(py*11+fclock*.22+s*4);rotate(px*wobble,py*wobble,pz*wobble,fclock*.075+pointer[0]*.025);const x=R3[0],y=R3[1],z=R3[2];if(z<-.12)continue;project(x,y,z);const sx=P3[0],sy=P3[1],front=Math.max(0,z/.842),shine=.6+.4*Math.sin(s*31+fclock*.35);const alpha=(.25+front*.72)*(.65+s*.35)*(.7+.3*shine);const size=(.65+s*.85)*(P3[2]/(height*.37));ctx.fillStyle=tintStyle(x,y,alpha);ctx.fillRect(sx-size/2,sy-size/2,size,size);if(s>.988&&front>.2){const c=tint(x,y),sz=2.3+front;g=ctx.createRadialGradient(sx,sy,0,sx,sy,sz*2);g.addColorStop(0,rgb(mix(c,WHITE,.5),.7));g.addColorStop(.25,rgb(c,.2));g.addColorStop(1,rgb(c,0));ctx.fillStyle=g;ctx.fillRect(sx-sz*2,sy-sz*2,sz*4,sz*4);}}
       // Two-tone vortex while thinking; brighter and tighter when thinking hard.
       if(look.swirl>.02){ctx.lineWidth=1.1;for(let arm=0;arm<6;arm++){ctx.beginPath();for(let i=0;i<=60;i++){const u=i/60,ang=arm/6*Math.PI*2+u*5.5+fclock*.9*(arm%2?1:-1)*.6,rad=r*(.08+u*.78);ctx.lineTo(cx+Math.cos(ang)*rad,cy+Math.sin(ang)*rad*.86);}ctx.strokeStyle=rgb(arm%2?colors[0]:colors[2],.22*look.swirl);ctx.stroke();}}
@@ -541,15 +604,15 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
       // Soft limb highlights facing a firing satellite.
       for(let i=0;i<MAX_LIGHTS;i++){const w=scene.lights[i*4+3];if(w<=0)continue;const lx=cx+scene.lights[i*4]*r*.95,ly=cy-scene.lights[i*4+1]*r*.95;g=ctx.createRadialGradient(lx,ly,0,lx,ly,r*.55);g.addColorStop(0,rgb(mix(colors[1],WHITE,.5),.45*w));g.addColorStop(1,rgb(colors[1],0));ctx.fillStyle=g;ctx.fillRect(cx-r,cy-r,2*r,2*r);}
       ctx.globalCompositeOperation='source-over';
-      if(look.red>.01){const flick=.55+.45*prand(Math.floor(now()/36));ctx.fillStyle=`rgba(255,56,43,${(.55*look.red*flick).toFixed(3)})`;ctx.fillRect(cx-r,cy-r,2*r,2*r);}
+      if(look.red>.01){const flick=.55+.45*prand(Math.floor(now()/36));ctx.fillStyle=rgbaStyle(1,.22,.17,.55*look.red*flick);ctx.fillRect(cx-r,cy-r,2*r,2*r);}
       ctx.restore();ctx.globalCompositeOperation='lighter';orbit(true);
       // Bright orbital sparks only while no real satellite orbits; sparse suspended dust always.
-      if(!scene.satCount)for(let j=0;j<3;j++){const a=clock*(.12+j*.025)+j*2.1,incl=[1.15,.92,1.37][j],tilt=[.38,1.08,2.14][j];let x=Math.cos(a)*1.19,y=Math.sin(a)*1.19,z=y*Math.sin(incl);y*=Math.cos(incl);const xx=x*Math.cos(tilt)-y*Math.sin(tilt);y=x*Math.sin(tilt)+y*Math.cos(tilt);x=xx;rotate(x,y,z,clock*.025);if(R3[2]<0)continue;project(R3[0],R3[1],R3[2]);const px=P3[0],py=P3[1];g=ctx.createRadialGradient(px,py,0,px,py,7);g.addColorStop(0,'rgba(228,255,248,.9)');g.addColorStop(.13,rgb(colors[j],.65));g.addColorStop(.5,rgb(colors[j],.09));g.addColorStop(1,rgb(colors[j],0));ctx.fillStyle=g;ctx.fillRect(px-7,py-7,14,14);}
+      if(!scene.satCount)for(let j=0;j<3;j++){const a=clock*(.12+j*.025)+j*2.1,incl=RING_INCL[j],tilt=RING_TILT[j];let x=Math.cos(a)*1.19,y=Math.sin(a)*1.19,z=y*Math.sin(incl);y*=Math.cos(incl);const xx=x*Math.cos(tilt)-y*Math.sin(tilt);y=x*Math.sin(tilt)+y*Math.cos(tilt);x=xx;rotate(x,y,z,clock*.025);if(R3[2]<0)continue;project(R3[0],R3[1],R3[2]);const px=P3[0],py=P3[1];g=ctx.createRadialGradient(px,py,0,px,py,7);g.addColorStop(0,'rgba(228,255,248,.9)');g.addColorStop(.13,rgb(colors[j],.65));g.addColorStop(.5,rgb(colors[j],.09));g.addColorStop(1,rgb(colors[j],0));ctx.fillStyle=g;ctx.fillRect(px-7,py-7,14,14);}
       for(let i=0;i<58;i++){const a=i*2.39996323+clock*.008,rr=1.16+(i*53%97)/97*.55;project(Math.cos(a)*rr,Math.sin(a)*rr*.72,Math.sin(i*1.7)*.2);ctx.fillStyle=rgb(colors[i%3],.1+.13*(.5+.5*Math.sin(clock*.4+i)));ctx.fillRect(P3[0],P3[1],i%9===0?1.2:.6,i%9===0?1.2:.6);}
       // Listening ripples and the success flash ring sit just outside the sphere.
       if(look.ripple>.02){ctx.lineWidth=1.2;for(let k=0;k<3;k++){const ph=((clock*.9+k/3)%1),rr=r*(1.04+ph*.42);ctx.strokeStyle=rgb(mix(colors[1],WHITE,.3),(1-ph)*.42*look.ripple);ctx.beginPath();ctx.arc(cx,cy,rr,0,Math.PI*2);ctx.stroke();}}
       if(look.flash>.01){const rr=r*(1.05+look.flashR*1.4);ctx.lineWidth=2+look.flash*3;ctx.strokeStyle=rgb(mix(colors[0],WHITE,.55),look.flash*.9);ctx.beginPath();ctx.arc(cx,cy,rr,0,Math.PI*2);ctx.stroke();}
-      moons(true);if(motion)bolts();
+      if(!motion)links(true);moons(true);if(motion)bolts();
       ctx.globalCompositeOperation='source-over';
     }
     function resize(){const r=canvas.getBoundingClientRect();width=Math.max(1,r.width);height=Math.max(1,r.height);dpr=Math.min(devicePixelRatio||1,quality==='high'?2:quality==='quiet'?1:1.5);canvas.width=Math.round(width*dpr);canvas.height=Math.round(height*dpr);scene.step(0,motion);draw();}
@@ -578,16 +641,17 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
     let pointer=[0,0],target=[0,0],core,particles,moonProgram,lineProgram,quad,cloud,moonBuffer,lineBuffer,count=0;
     const scene=createScene();scene.setBase(PALETTES[palette]);
     const resources=[];const locations=new Map();
-    const MOON_STRIDE=8,moonData=new Float32Array(MAX_SATS*MOON_STRIDE),LINE_STRIDE=6;
+    // Per-frame vertex data lives in these two arrays; each frame overwrites them and uploads the whole array (no views).
+    const MOON_STRIDE=8,moonData=new Float32Array(MAX_SATS*MOON_STRIDE),LINE_STRIDE=7;
     const lineCap=MAX_ARCS*SEGMENTS*2+MAX_SATS*TRAIL*2+MAX_SATS*2+MAX_ARCS*(SEGMENTS+1),lineData=new Float32Array(lineCap*LINE_STRIDE);
     const P2=new Float64Array(3);
     function shader(type,code){const s=gl.createShader(type);gl.shaderSource(s,code);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)){const message=gl.getShaderInfoLog(s);gl.deleteShader(s);throw new Error('ECHO orb shader: '+message);}resources.push(['shader',s]);return s;}
-    function program(vertex,fragment){const p=gl.createProgram();gl.attachShader(p,shader(gl.VERTEX_SHADER,vertex));gl.attachShader(p,shader(gl.FRAGMENT_SHADER,fragment));gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS)){const message=gl.getProgramInfoLog(p);gl.deleteProgram(p);throw new Error('ECHO orb program failed: '+message);}resources.push(['program',p]);return p;}
+    function program(vertex,fragment){const p=gl.createProgram();gl.attachShader(p,shader(gl.VERTEX_SHADER,vertex));gl.attachShader(p,shader(gl.FRAGMENT_SHADER,fragment));gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS)){const message=gl.getProgramInfoLog(p);gl.deleteProgram(p);throw new Error('ECHO orb program failed: '+message);}resources.push(['program',p]);locations.set(p,new Map());return p;}
     function buffer(data,usage){const b=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.bufferData(gl.ARRAY_BUFFER,data instanceof Float32Array?data:new Float32Array(data),usage||gl.STATIC_DRAW);resources.push(['buffer',b]);return b;}
     function makeCloud(){const data=[],n=quality==='high'?3600:quality==='quiet'?900:2200;
       const add=(x,y,z,s,k)=>data.push(x,y,z,s,k);
       for(let i=0;i<n;i++){const y=1-2*(i+.5)/n,r=Math.sqrt(1-y*y),a=i*2.39996323;add(Math.cos(a)*r*.842,y*.842,Math.sin(a)*r*.842,((i*73)%997)/997,0);}
-      for(let ring=0;ring<3;ring++){const nRing=quality==='quiet'?128:320;for(let i=0;i<nRing;i++){const a=i/nRing*Math.PI*2;let x=Math.cos(a)*1.19,y=Math.sin(a)*1.19,z=0;const tilt=[.38,1.08,2.14][ring],incl=[1.15,.92,1.37][ring];z=y*Math.sin(incl);y*=Math.cos(incl);const xx=x*Math.cos(tilt)-y*Math.sin(tilt);y=x*Math.sin(tilt)+y*Math.cos(tilt);x=xx;add(x,y,z,((i*19+ring*127)%311)/311,1);}}
+      for(let ring=0;ring<3;ring++){const nRing=quality==='quiet'?128:320;for(let i=0;i<nRing;i++){const a=i/nRing*Math.PI*2;let x=Math.cos(a)*1.19,y=Math.sin(a)*1.19,z=0;const tilt=RING_TILT[ring],incl=RING_INCL[ring];z=y*Math.sin(incl);y*=Math.cos(incl);const xx=x*Math.cos(tilt)-y*Math.sin(tilt);y=x*Math.sin(tilt)+y*Math.cos(tilt);x=xx;add(x,y,z,((i*19+ring*127)%311)/311,1);}}
       const dust=quality==='high'?150:quality==='quiet'?60:110;
       for(let i=0;i<dust;i++){const a=i*2.39996323,r=1.22+((i*53)%97)/97*.65;add(Math.cos(a)*r,Math.sin(a)*r*.68,Math.sin(i*1.71)*.2,((i*37)%83)/83,2);}
       if(cloud){gl.deleteBuffer(cloud);const index=resources.findIndex(r=>r[1]===cloud);if(index>=0)resources.splice(index,1);}
@@ -595,36 +659,50 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
     }
     function init(){locations.clear();core=program(VERTEX,FRAGMENT);particles=program(PARTICLE_VERTEX,PARTICLE_FRAGMENT);moonProgram=program(MOON_VERTEX,MOON_FRAGMENT);lineProgram=program(LINE_VERTEX,LINE_FRAGMENT);quad=buffer([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]);moonBuffer=buffer(moonData,gl.DYNAMIC_DRAW);lineBuffer=buffer(lineData,gl.DYNAMIC_DRAW);makeCloud();ready=true;resize();}
     function resize(){const rect=canvas.getBoundingClientRect();width=Math.max(1,rect.width);height=Math.max(1,rect.height);const cap=quality==='high'?2:quality==='quiet'?.85:adaptiveCap;ratio=Math.min(devicePixelRatio||1,cap);canvas.width=Math.round(width*ratio);canvas.height=Math.round(height*ratio);if(!lost&&!dead){scene.step(0,motion);draw();}}
-    function location(prog,name){let map=locations.get(prog);if(!map){map=new Map();locations.set(prog,map);}let loc=map.get(name);if(loc===undefined){loc=gl.getUniformLocation(prog,name);map.set(name,loc);}return loc;}
-    function uniform(prog,name,type,...value){const loc=location(prog,name);if(loc!==null)gl[type](loc,...value);}
-    function colors(prog){const c=scene.base;for(let i=0;i<3;i++)uniform(prog,['colorA','colorB','colorC'][i],'uniform3f',c[i][0],c[i][1],c[i][2]);}
+    // Uniform locations, looked up once per program and name (each program's map is made when the program is linked).
+    function location(prog,name){const map=locations.get(prog);let loc=map.get(name);if(loc===undefined){loc=gl.getUniformLocation(prog,name);map.set(name,loc);}return loc;}
+    // Fixed-arity uniform setters: no rest parameters or spreads, so setting a uniform allocates nothing.
+    function u1(prog,name,a){const loc=location(prog,name);if(loc!==null)gl.uniform1f(loc,a);}
+    function u2(prog,name,a,b){const loc=location(prog,name);if(loc!==null)gl.uniform2f(loc,a,b);}
+    function u3(prog,name,a,b,c){const loc=location(prog,name);if(loc!==null)gl.uniform3f(loc,a,b,c);}
+    function u4(prog,name,a,b,c,d){const loc=location(prog,name);if(loc!==null)gl.uniform4f(loc,a,b,c,d);}
+    function u4v(prog,name,v){const loc=location(prog,name);if(loc!==null)gl.uniform4fv(loc,v);}
+    function colors(prog){const c=scene.base;for(let i=0;i<3;i++)u3(prog,COLOR_UNIFORMS[i],c[i][0],c[i][1],c[i][2]);}
+    function off(loc){if(loc>=0)gl.disableVertexAttribArray(loc);}
     function attrib(prog,name,size,stride,offset){const a=gl.getAttribLocation(prog,name);if(a>=0){gl.enableVertexAttribArray(a);gl.vertexAttribPointer(a,size,gl.FLOAT,false,stride,offset);}return a;}
     function project(x,y,z){const d=3.3-z;P2[0]=2.4*x/d/(width/height);P2[1]=2.4*y/d;P2[2]=3.3/d;return P2;}
     function satScreen(){for(let i=0;i<scene.satCount;i++){const s=scene.sats[i];project(s.x,s.y,s.z);s.sx=(P2[0]+1)/2*width;s.sy=(1-P2[1])/2*height;s.k=P2[2]*height*1.2/3.3/(height*.37);}}
-    function fillMoons(){for(let i=0;i<scene.satCount;i++){const s=scene.sats[i],o=i*MOON_STRIDE;moonData[o]=s.x;moonData[o+1]=s.y;moonData[o+2]=s.z;moonData[o+3]=s.size*1.9*(1+(s.busy?.08*Math.sin(scene.clock*7+i):0));moonData[o+4]=s.color[0]*(i===scene.hover?1.3:1);moonData[o+5]=s.color[1]*(i===scene.hover?1.3:1);moonData[o+6]=s.color[2]*(i===scene.hover?1.3:1);moonData[o+7]=s.glow+(i===scene.hover?.5:0);}}
+    /** Moon vertices in painting order (back to front): alpha-blended bodies then overlap the way their depths say. */
+    function fillMoons(){
+      const order=scene.order,hover=scene.hover;
+      for(let k=0;k<scene.satCount;k++){const i=order[k],s=scene.sats[i],o=k*MOON_STRIDE,lit=i===hover?1.3:1;moonData[o]=s.x;moonData[o+1]=s.y;moonData[o+2]=s.z;moonData[o+3]=s.size*1.9*(1+(s.busy?.08*Math.sin(scene.clock*7+i):0));moonData[o+4]=s.color[0]*lit;moonData[o+5]=s.color[1]*lit;moonData[o+6]=s.color[2]*lit;moonData[o+7]=s.glow+(i===hover?.5:0);}
+    }
     let lineVerts=0,boltStart=0,boltVerts=0,glowStart=0,glowVerts=0;
-    function vertex(px,py,r,g,b,a){if(lineVerts>=lineCap)return;const o=lineVerts*LINE_STRIDE;lineData[o]=px/width*2-1;lineData[o+1]=1-py/height*2;lineData[o+2]=r;lineData[o+3]=g;lineData[o+4]=b;lineData[o+5]=a;lineVerts++;}
-    /** Trails and steady links first (LINES), then bolts (LINES) and their glow points (POINTS), all in one buffer. */
+    function vertex(px,py,r,g,b,a,behind){if(lineVerts>=lineCap)return;const o=lineVerts*LINE_STRIDE;lineData[o]=px/width*2-1;lineData[o+1]=1-py/height*2;lineData[o+2]=r;lineData[o+3]=g;lineData[o+4]=b;lineData[o+5]=a;lineData[o+6]=behind;lineVerts++;}
+    /** Screen point on the sphere's surface facing a moon, written into P2[0..1] (pixels). */
+    function anchor(s){const len=Math.sqrt(s.x*s.x+s.y*s.y+s.z*s.z)||1;project(s.x/len*.83,s.y/len*.83,s.z/len*.83);P2[0]=(P2[0]+1)/2*width;P2[1]=(1-P2[1])/2*height;}
+    /** Trails and steady links first (LINES), then bolts (LINES) and their glow points (POINTS), all in one buffer. Trails and
+     *  links of moons behind the limb are flagged so the line shader clips them where the sphere covers them. */
     function fillLines(){
-      lineVerts=0;const B=scene.bolt,t=now();
-      for(let i=0;i<scene.satCount;i++){const s=scene.sats[i];
-        if(motion&&quality!=='quiet'&&s.trailLen>1){const dim=s.z>=LIMB_Z?1:.6;let px=s.sx,py=s.sy;for(let k=0;k<s.trailLen;k++){project(s.trail[k*2],s.trail[k*2+1],s.z);const qx=(P2[0]+1)/2*width,qy=(1-P2[1])/2*height,a=.22*dim*(1-k/s.trailLen)*(s.busy?1.5:1);vertex(px,py,s.color[0],s.color[1],s.color[2],a);vertex(qx,qy,s.color[0],s.color[1],s.color[2],a);px=qx;py=qy;}}
-        if(!motion&&s.busy){const len=Math.hypot(s.x,s.y,s.z)||1;project(s.x/len*.83,s.y/len*.83,s.z/len*.83);vertex((P2[0]+1)/2*width,(1-P2[1])/2*height,s.color[0],s.color[1],s.color[2],.3);vertex(s.sx,s.sy,s.color[0],s.color[1],s.color[2],.3);}
+      lineVerts=0;const B=scene.bolt,t=now(),limb=scene.look.limb;
+      for(let i=0;i<scene.satCount;i++){const s=scene.sats[i],behind=s.z<limb?1:0;
+        if(motion&&quality!=='quiet'&&s.trailLen>1){const dim=behind?.6:1;let px=s.sx,py=s.sy;for(let k=0;k<s.trailLen;k++){project(s.trail[k*2],s.trail[k*2+1],s.z);const qx=(P2[0]+1)/2*width,qy=(1-P2[1])/2*height,a=.22*dim*(1-k/s.trailLen)*(s.busy?1.5:1);vertex(px,py,s.color[0],s.color[1],s.color[2],a,behind);vertex(qx,qy,s.color[0],s.color[1],s.color[2],a,behind);px=qx;py=qy;}}
+        if(!motion&&s.busy){anchor(s);vertex(P2[0],P2[1],s.color[0],s.color[1],s.color[2],.3,behind);vertex(s.sx,s.sy,s.color[0],s.color[1],s.color[2],.3,behind);}
       }
       boltStart=lineVerts;
-      if(motion)for(const arc of scene.arcs){
-        if(!arc.active)continue;const to=scene.sats[arc.b];let x0,y0;
-        if(arc.a<0){const len=Math.hypot(to.x,to.y,to.z)||1;project(to.x/len*.83,to.y/len*.83,to.z/len*.83);x0=(P2[0]+1)/2*width;y0=(1-P2[1])/2*height;}else{x0=scene.sats[arc.a].sx;y0=scene.sats[arc.a].sy;}
+      if(motion)for(let k=0;k<MAX_ARCS;k++){
+        const arc=scene.arcs[k];if(!arc.active)continue;const to=scene.sats[arc.b];let x0,y0;
+        if(arc.a<0){anchor(to);x0=P2[0];y0=P2[1];}else{x0=scene.sats[arc.a].sx;y0=scene.sats[arc.a].sy;}
         const n=scene.makeBolt(x0,y0,to.sx,to.sy,arc.seed,t),c=arc.a<0?scene.palette[1]:to.color;
         const r=c[0]*.3+.7,g=c[1]*.3+.7,b=c[2]*.3+.7;
-        for(let i=1;i<n;i++){vertex(B[(i-1)*2],B[(i-1)*2+1],r,g,b,arc.alpha);vertex(B[i*2],B[i*2+1],r,g,b,arc.alpha);}
+        for(let i=1;i<n;i++){vertex(B[(i-1)*2],B[(i-1)*2+1],r,g,b,arc.alpha,0);vertex(B[i*2],B[i*2+1],r,g,b,arc.alpha,0);}
       }
       boltVerts=lineVerts-boltStart;glowStart=lineVerts;
-      if(motion)for(const arc of scene.arcs){
-        if(!arc.active)continue;const to=scene.sats[arc.b];let x0,y0;
-        if(arc.a<0){const len=Math.hypot(to.x,to.y,to.z)||1;project(to.x/len*.83,to.y/len*.83,to.z/len*.83);x0=(P2[0]+1)/2*width;y0=(1-P2[1])/2*height;}else{x0=scene.sats[arc.a].sx;y0=scene.sats[arc.a].sy;}
+      if(motion)for(let k=0;k<MAX_ARCS;k++){
+        const arc=scene.arcs[k];if(!arc.active)continue;const to=scene.sats[arc.b];let x0,y0;
+        if(arc.a<0){anchor(to);x0=P2[0];y0=P2[1];}else{x0=scene.sats[arc.a].sx;y0=scene.sats[arc.a].sy;}
         const n=scene.makeBolt(x0,y0,to.sx,to.sy,arc.seed,t),c=arc.a<0?scene.palette[1]:to.color;
-        for(let i=0;i<n;i++)vertex(B[i*2],B[i*2+1],c[0],c[1],c[2],arc.alpha*.35);
+        for(let i=0;i<n;i++)vertex(B[i*2],B[i*2+1],c[0],c[1],c[2],arc.alpha*.35,0);
       }
       glowVerts=lineVerts-glowStart;
     }
@@ -633,24 +711,29 @@ void main(){float a=vColor.a;if(soft>.5){float d=length(gl_PointCoord-.5)*2.;if(
       const look=scene.look;satScreen();fillMoons();fillLines();
       gl.viewport(0,0,canvas.width,canvas.height);gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT);gl.disable(gl.DEPTH_TEST);gl.disable(gl.BLEND);
       gl.useProgram(core);gl.bindBuffer(gl.ARRAY_BUFFER,quad);const a=attrib(core,'position',2,0,0);
-      uniform(core,'resolution','uniform2f',canvas.width,canvas.height);uniform(core,'pointer','uniform2f',pointer[0],pointer[1]);uniform(core,'time','uniform1f',scene.clock);uniform(core,'ftime','uniform1f',scene.fclock);colors(core);
-      uniform(core,'modeA','uniform4f',look.energy,look.swirl,look.pulse,look.rim);uniform(core,'modeB','uniform4f',look.ripple,look.shimmer,look.red,look.flash);uniform(core,'modeC','uniform4f',look.filaments,look.hue,look.ampl,look.scale);uniform(core,'modeD','uniform4f',look.flashR,0,0,0);
-      uniform(core,'arcLights[0]','uniform4fv',scene.lights);
-      gl.drawArrays(gl.TRIANGLES,0,6);gl.disableVertexAttribArray(a);
-      gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE);gl.useProgram(particles);gl.bindBuffer(gl.ARRAY_BUFFER,cloud);const attrs=[['position',3,0],['seed',1,12],['kind',1,16]];for(const [name,size,offset] of attrs)attrib(particles,name,size,20,offset);uniform(particles,'time','uniform1f',scene.fclock);uniform(particles,'aspect','uniform1f',width/height);uniform(particles,'pixelRatio','uniform1f',ratio);uniform(particles,'pointer','uniform2f',pointer[0],pointer[1]);colors(particles);gl.drawArrays(gl.POINTS,0,count);for(const [name] of attrs){const loc=gl.getAttribLocation(particles,name);if(loc>=0)gl.disableVertexAttribArray(loc);}
+      u2(core,'resolution',canvas.width,canvas.height);u2(core,'pointer',pointer[0],pointer[1]);u1(core,'time',scene.clock);u1(core,'ftime',scene.fclock);colors(core);
+      u4(core,'modeA',look.energy,look.swirl,look.pulse,look.rim);u4(core,'modeB',look.ripple,look.shimmer,look.red,look.flash);u4(core,'modeC',look.filaments,look.hue,look.ampl,look.scale);u4(core,'modeD',look.flashR,0,0,0);
+      u4v(core,'arcLights[0]',scene.lights);
+      gl.drawArrays(gl.TRIANGLES,0,6);off(a);
+      gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE);gl.useProgram(particles);gl.bindBuffer(gl.ARRAY_BUFFER,cloud);
+      const pp=attrib(particles,'position',3,20,0),ps=attrib(particles,'seed',1,20,12),pk=attrib(particles,'kind',1,20,16);
+      u1(particles,'time',scene.fclock);u1(particles,'aspect',width/height);u1(particles,'pixelRatio',ratio);u2(particles,'pointer',pointer[0],pointer[1]);colors(particles);gl.drawArrays(gl.POINTS,0,count);off(pp);off(ps);off(pk);
+      const sx=canvas.width/2,sy=canvas.height/2,sr=.3152*canvas.height*look.scale;
       // Trails, steady links, bolts and bolt glow.
-      if(lineVerts){gl.useProgram(lineProgram);gl.bindBuffer(gl.ARRAY_BUFFER,lineBuffer);gl.bufferSubData(gl.ARRAY_BUFFER,0,lineData.subarray(0,lineVerts*LINE_STRIDE));const lp=attrib(lineProgram,'position',2,LINE_STRIDE*4,0),lc=attrib(lineProgram,'color',4,LINE_STRIDE*4,8);
-        uniform(lineProgram,'soft','uniform1f',0);uniform(lineProgram,'pointSize','uniform1f',1);if(boltStart)gl.drawArrays(gl.LINES,0,boltStart);
+      if(lineVerts){gl.useProgram(lineProgram);gl.bindBuffer(gl.ARRAY_BUFFER,lineBuffer);gl.bufferSubData(gl.ARRAY_BUFFER,0,lineData);
+        const lp=attrib(lineProgram,'position',2,LINE_STRIDE*4,0),lc=attrib(lineProgram,'color',4,LINE_STRIDE*4,8),lb=attrib(lineProgram,'behind',1,LINE_STRIDE*4,24);
+        u3(lineProgram,'sphere',sx,sy,sr);u1(lineProgram,'soft',0);u1(lineProgram,'pointSize',1);if(boltStart)gl.drawArrays(gl.LINES,0,boltStart);
         if(boltVerts){gl.drawArrays(gl.LINES,boltStart,boltVerts);}
-        if(glowVerts){uniform(lineProgram,'soft','uniform1f',1);uniform(lineProgram,'pointSize','uniform1f',7*ratio);gl.drawArrays(gl.POINTS,glowStart,glowVerts);}
-        if(lp>=0)gl.disableVertexAttribArray(lp);if(lc>=0)gl.disableVertexAttribArray(lc);}
-      // Moons: halos (additive) then shaded bodies (alpha blended); the ones behind the sphere are clipped in the shader.
-      if(scene.satCount){gl.useProgram(moonProgram);gl.bindBuffer(gl.ARRAY_BUFFER,moonBuffer);gl.bufferSubData(gl.ARRAY_BUFFER,0,moonData.subarray(0,scene.satCount*MOON_STRIDE));
+        if(glowVerts){u1(lineProgram,'soft',1);u1(lineProgram,'pointSize',7*ratio);gl.drawArrays(gl.POINTS,glowStart,glowVerts);}
+        off(lp);off(lc);off(lb);}
+      // Moons in depth order: halos (additive) then shaded bodies (alpha blended); the ones behind the sphere are clipped in
+      // the shader by its screen-space disc.
+      if(scene.satCount){gl.useProgram(moonProgram);gl.bindBuffer(gl.ARRAY_BUFFER,moonBuffer);gl.bufferSubData(gl.ARRAY_BUFFER,0,moonData);
         const mp=attrib(moonProgram,'position',3,MOON_STRIDE*4,0),ms=attrib(moonProgram,'size',1,MOON_STRIDE*4,12),mc=attrib(moonProgram,'color',3,MOON_STRIDE*4,16),mg=attrib(moonProgram,'glow',1,MOON_STRIDE*4,28);
-        uniform(moonProgram,'aspect','uniform1f',width/height);uniform(moonProgram,'pixelRatio','uniform1f',ratio);uniform(moonProgram,'limbZ','uniform1f',LIMB_Z*look.scale*look.scale);uniform(moonProgram,'sphere','uniform3f',canvas.width/2,canvas.height/2,.3152*canvas.height*look.scale);
-        uniform(moonProgram,'halo','uniform1f',1);gl.drawArrays(gl.POINTS,0,scene.satCount);
-        gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);uniform(moonProgram,'halo','uniform1f',0);gl.drawArrays(gl.POINTS,0,scene.satCount);
-        for(const loc of [mp,ms,mc,mg])if(loc>=0)gl.disableVertexAttribArray(loc);}
+        u1(moonProgram,'aspect',width/height);u1(moonProgram,'pixelRatio',ratio);u1(moonProgram,'limbZ',look.limb);u3(moonProgram,'sphere',sx,sy,sr);
+        u1(moonProgram,'halo',1);gl.drawArrays(gl.POINTS,0,scene.satCount);
+        gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);u1(moonProgram,'halo',0);gl.drawArrays(gl.POINTS,0,scene.satCount);
+        off(mp);off(ms);off(mc);off(mg);}
       gl.disable(gl.BLEND);
     }
     function tick(stamp){frame=0;if(dead||lost||!motion||document.hidden)return;const dt=last?Math.min((stamp-last)/1000,.07):0;last=stamp;clock+=dt;pointer[0]+=(target[0]-pointer[0])*.04;pointer[1]+=(target[1]-pointer[1])*.04;scene.step(dt,true);draw();bridge.refresh();if(quality==='adaptive'&&dt>.031&&dt<.07)slowFrames++;else slowFrames=Math.max(0,slowFrames-1);if(slowFrames>55&&adaptiveCap>1){adaptiveCap=1;slowFrames=0;resize();}frame=requestAnimationFrame(tick);}

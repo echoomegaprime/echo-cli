@@ -164,7 +164,8 @@
  }
  // Living orb (additive, optional): a Workspace turn drives the orb through document events; silent where none can be
  // dispatched. send -> thinking; 8 s, or a third tool call in one turn (a long tool loop) -> deep; every token -> pulse,
- // the first token after thinking -> replying; saved readback or recovery -> success; failure (not a Stop) -> error.
+ // the first token after thinking -> replying; saved readback or recovery -> success; failure (not a Stop), including a
+ // reply whose saved readback could not be confirmed -> error.
  let orbDeepTimer;
  const ORB_DEEP_MS=8000,ORB_DEEP_TOOLS=3;
  function orbEvent(name,detail){try{if(typeof document.dispatchEvent==='function'&&typeof CustomEvent==='function')document.dispatchEvent(new CustomEvent(name,{detail}));}catch{}}
@@ -227,7 +228,9 @@
     }
    }
    const detail=completed?once('Reply returned; saved readback is unavailable. Reopen the conversation before retrying.'):once(error instanceof Error?error.message:'Conversation failed.');
-   if(!completed)orb('error');
+   // Every path that reaches here failed (a Stop and a recovered reply returned above), including a reply whose saved
+   // readback could not be confirmed, so the orb always flashes error before the finally settles it to idle.
+   orb('error');
    endConversation();strip?.fail(detail);return {handled:true,sent:completed,verified:false,detail};
   }finally{clearTimeout(orbDeepTimer);if(epoch===state.epoch)orb('idle');if(state.turn===controller){state.turn=null;setBusy(false);}if(epoch===state.epoch&&verified&&spoken&&voiceOptions.conversation)scheduleListening();}
  }

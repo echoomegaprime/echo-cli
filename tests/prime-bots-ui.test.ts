@@ -101,7 +101,9 @@ function boot(opts: Opts = {}) {
   const noteLine = () => created.find(n => n.attributes.id === 'bots-note')!.textContent;
   const cards = () => all(dialog()).filter(n => n.className.startsWith('bots-card ') || n.className === 'bots-card');
   const pane = () => created.find(n => n.attributes.id === 'bots-pane')!;
-  return { api, navButton, dialog, calls, count, fire, documentFire, orbEvents, visibility, status, noteLine, cards, pane, document, localStorage, ws: opts.workspace, messagePolls: () => messagePolls, groupPolls: () => groupPolls, created };
+  /** What the stand-in service holds: tests replace it to model a bot changed or deleted somewhere else. */
+  const serverBots = { get: () => bots, set: (next: typeof bots) => { bots = next; } };
+  return { api, navButton, dialog, calls, count, fire, documentFire, orbEvents, visibility, status, noteLine, cards, pane, document, localStorage, ws: opts.workspace, messagePolls: () => messagePolls, groupPolls: () => groupPolls, created, serverBots };
 }
 const settle = async () => { for (let i = 0; i < 6; i++) await vi.advanceTimersByTimeAsync(0); };
 async function opened(opts: Opts = {}) { const s = boot(opts); await s.api.ready; await s.api.open(); await settle(); return s; }
@@ -359,6 +361,40 @@ describe('living orb satellites', () => {
     expect(s.orbEvents().at(-1).satellites.find((moon: any) => moon.id === `bot:${BOT2}`).status).toBe('idle');
     await find(s.cards()[0], 'Delete')!.fire('click'); await find(s.cards()[0], 'Confirm delete')!.fire('click'); await settle();
     expect(s.orbEvents().length).toBe(before + 3); expect(s.orbEvents().at(-1).satellites.map((moon: any) => moon.id)).toEqual([`bot:${BOT2}`]);
+  });
+  it('publishes the new bot with the rest of the list right after a create', async () => {
+    const s = await opened();
+    await find(s.dialog(), 'New bot')!.fire('click'); await settle();
+    byPlaceholder(s.pane(), 'Bot name').value = 'Night watch'; byPlaceholder(s.pane(), 'Echo ADK agent name').value = 'watcher';
+    await find(s.pane(), 'Create bot (starts paused)')!.fire('click'); await settle();
+    expect(s.calls.some(c => c.url === '/api/prime/bots/create')).toBe(true);
+    expect(s.orbEvents().at(-1)).toEqual({ source: 'bots', satellites: [
+      { id: `bot:${BOT}`, kind: 'bot', name: 'Release scout', status: 'paused', busy: false, group: undefined },
+      { id: `bot:${BOT2}`, kind: 'bot', name: 'Docs bot', status: 'idle', busy: false, group: undefined },
+      { id: `bot:${BOT3}`, kind: 'bot', name: 'Night watch', status: 'paused', busy: false, group: undefined },
+    ] });
+  });
+  it('republishes what the Refresh button reads, so a bot changed or deleted elsewhere updates the orb', async () => {
+    const s = await opened();
+    s.serverBots.set([{ ...s.serverBots.get()[0], status: 'running' }]); // BOT2 was deleted elsewhere; BOT is running now
+    await find(s.dialog(), 'Refresh')!.fire('click'); await settle();
+    expect(s.count('/api/prime/bots/list')).toBe(2);
+    expect(s.orbEvents().at(-1)).toEqual({ source: 'bots', satellites: [{ id: `bot:${BOT}`, kind: 'bot', name: 'Release scout', status: 'running', busy: true, group: undefined }] });
+  });
+  it('republishes on the 30 s list refresh while the view is open; the moons stay, unpolled, after it closes', async () => {
+    const s = await opened(); const before = s.orbEvents().length;
+    s.serverBots.set(s.serverBots.get().map(b => ({ ...b, status: 'error' })));
+    await vi.advanceTimersByTimeAsync(29000); expect(s.orbEvents().length).toBe(before);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(s.count('/api/prime/bots/list')).toBe(2); expect(s.orbEvents().length).toBe(before + 1);
+    expect(s.orbEvents().at(-1).satellites.map((moon: any) => moon.status)).toEqual(['error', 'error']);
+    s.api.close(); const after = s.orbEvents().length;
+    await vi.advanceTimersByTimeAsync(65000); expect(s.count('/api/prime/bots/list')).toBe(2); expect(s.orbEvents().length).toBe(after);
+  });
+  it('publishes nothing new when an action fails', async () => {
+    const s = await opened(); s.serverBots.set([]); const before = s.orbEvents().length;
+    await find(s.cards()[1], 'Pause')!.fire('click'); await settle();
+    expect(s.noteLine()).toContain('Pause failed for Docs bot'); expect(s.orbEvents().length).toBe(before);
   });
   it('clears bot satellites on account changes', async () => {
     const s = await opened(); s.fire('echo-account-changed'); await settle();

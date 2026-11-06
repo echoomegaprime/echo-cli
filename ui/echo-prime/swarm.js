@@ -126,10 +126,12 @@
   article.replaceChildren(el('strong','Swarm (40-seat brain)'),el('p',title,'swarm-error'),el('small',detail+' No other model was used.','swarm-meta'));
  }
  function stopTimers(r){if(r.timer)clearTimeout(r.timer);r.timer=null;r.controller.abort();}
- function finish(r,outcome){
+ /** Ends the watch. `stopped` marks the user's own Stop (or a quiet reset): the orb settles to idle, because no longer
+  *  waiting is not a failure. Only a run that failed, vanished or timed out flashes the orb's error. */
+ function finish(r,outcome,stopped){
   if(run!==r)return;
   run=null;stopTimers(r);busy(false);refreshHealth();r.resolve(outcome);
-  orb(outcome&&outcome.sent?'success':outcome&&outcome.cancelled?'idle':'error');orb('idle');orbSatellites(null);
+  orb(outcome&&outcome.sent?'success':stopped||outcome&&outcome.cancelled?'idle':'error');orb('idle');orbSatellites(null);
  }
  async function poll(r){
   r.inflight=true;r.lastPoll=Date.now();
@@ -174,7 +176,7 @@
   if(run!==r)return;
   const detail='Stopped waiting for swarm run '+r.runId+'. The worker has no cancel: the run may continue and spend up to its budget ('+budgetText(r.budget)+').';
   if(!quiet)failBox(r.article,'Stopped waiting.',detail);
-  finish(r,quiet?{cancelled:true}:{sent:false,detail});
+  finish(r,quiet?{cancelled:true}:{sent:false,detail},true);
  }
  async function sendSwarm(text){
   if(run)return {sent:false,detail:'A swarm run is in progress. Wait for it or select Stop (the worker cannot cancel it).'};
@@ -217,7 +219,9 @@
  chat.cancel=()=>{if(run)stopWatching(run,false);else original.cancel.call(chat);};
  chat.reset=()=>{generation++;if(run)stopWatching(run,true);original.reset.call(chat);};
  document.addEventListener('visibilitychange',()=>{if(run){run.lastPoll=0;if(!document.hidden){if(run.timer)clearTimeout(run.timer);tick(run);}else status(run);}});
- window.addEventListener('echo-account-changed',()=>{refreshHealth();});
+ // A watched run belongs to the account that started it: an account change stops watching quietly (orb idle, moon gone;
+ // finish() re-reads health), whether or not the chat reset reaches here first.
+ window.addEventListener('echo-account-changed',()=>{if(run)stopWatching(run,true);else refreshHealth();});
  window.addEventListener('pagehide',()=>{if(run)stopWatching(run,true);});
  window.EchoPrimeSwarm={ready:refreshHealth(),refresh:refreshHealth,active(){return run?run.runId:null;}};
 })();

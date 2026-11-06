@@ -22,17 +22,54 @@ function element(tag = 'div'): El {
   };
   return el;
 }
-/** A 2D context that records call counts and accepts every style the orb sets. */
+/** A 2D context that records call counts, the centre of every arc() in paint order, and accepts every style the orb sets. */
 function context2d() {
   const calls: Record<string, number> = {};
+  const arcLog: number[][] = [];
   const gradient = () => ({ addColorStop() { /* colours are not inspected */ } });
-  const ctx: Record<string, unknown> = { fillStyle: '', strokeStyle: '', lineWidth: 1, globalCompositeOperation: 'source-over', calls, createRadialGradient: gradient, createLinearGradient: gradient };
-  for (const name of ['setTransform', 'clearRect', 'fillRect', 'beginPath', 'arc', 'fill', 'stroke', 'moveTo', 'lineTo', 'save', 'restore', 'clip', 'closePath']) ctx[name] = () => { calls[name] = (calls[name] ?? 0) + 1; };
-  return ctx as Record<string, unknown> & { calls: Record<string, number> };
+  const ctx: Record<string, unknown> = { fillStyle: '', strokeStyle: '', lineWidth: 1, globalCompositeOperation: 'source-over', calls, arcLog, createRadialGradient: gradient, createLinearGradient: gradient };
+  for (const name of ['setTransform', 'clearRect', 'fillRect', 'beginPath', 'fill', 'stroke', 'moveTo', 'lineTo', 'save', 'restore', 'clip', 'closePath']) ctx[name] = () => { calls[name] = (calls[name] ?? 0) + 1; };
+  ctx.arc = (x: number, y: number, r: number) => { calls.arc = (calls.arc ?? 0) + 1; arcLog.push([x, y, r]); };
+  return ctx as Record<string, unknown> & { calls: Record<string, number>; arcLog: number[][] };
 }
-interface Opts { webgl?: boolean; twoD?: boolean; reduced?: boolean }
+/** A WebGL 1 stand-in: every call succeeds and is recorded. It proves the orb's WebGL frame (what is uploaded, in which
+ *  order, through which arrays), not what a GPU would draw; shader sources are kept but not compiled. */
+function fakeGL() {
+  let next = 0, bound: object | null = null, current: { id: number; sources: string[] } | null = null;
+  const sources = new Map<object, string>(), initial = new Map<object, unknown>();
+  const uploads: { buffer: object | null; data: unknown; program: string }[] = [], draws: { mode: number; first: number; count: number; program: string }[] = [];
+  const uniforms: { program: string; name: string; values: unknown[] }[] = [], enabled: { program: string; name: string }[] = [];
+  const attribNames = new Map<number, string>(), attribIds = new Map<string, number>();
+  const kind = (p: { sources: string[] } | null) => !p ? 'none' : p.sources[0].includes('attribute float behind') ? 'line' : p.sources[0].includes('limbZ') ? 'moon' : p.sources[0].includes('attribute float kind') ? 'particles' : 'core';
+  const uniform = (loc: { name: string; program: string }, ...values: unknown[]) => uniforms.push({ program: loc.program, name: loc.name, values });
+  const gl: Record<string, unknown> = {
+    VERTEX_SHADER: 1, FRAGMENT_SHADER: 2, COMPILE_STATUS: 3, LINK_STATUS: 4, ARRAY_BUFFER: 5, STATIC_DRAW: 6, DYNAMIC_DRAW: 7, DEPTH_TEST: 8, BLEND: 9,
+    SRC_ALPHA: 10, ONE: 11, ONE_MINUS_SRC_ALPHA: 12, COLOR_BUFFER_BIT: 13, TRIANGLES: 4, POINTS: 0, LINES: 1, FLOAT: 14,
+    createShader: () => ({ shader: ++next }), shaderSource: (s: object, src: string) => { sources.set(s, src); }, compileShader() { /* not compiled */ },
+    getShaderParameter: () => true, getShaderInfoLog: () => '', deleteShader() { /* noop */ },
+    createProgram: () => ({ id: ++next, sources: [] as string[] }), attachShader: (p: { sources: string[] }, s: object) => { p.sources.push(sources.get(s)!); },
+    linkProgram() { /* noop */ }, getProgramParameter: () => true, getProgramInfoLog: () => '', deleteProgram() { /* noop */ },
+    useProgram: (p: { id: number; sources: string[] }) => { current = p; },
+    createBuffer: () => ({ buffer: ++next }), bindBuffer: (_t: number, b: object) => { bound = b; }, deleteBuffer() { /* noop */ },
+    bufferData: (_t: number, data: unknown) => { if (bound) initial.set(bound, data); },
+    bufferSubData: (_t: number, _offset: number, data: unknown) => { uploads.push({ buffer: bound, data, program: kind(current) }); },
+    getUniformLocation: (p: { sources: string[] }, name: string) => ({ name, program: kind(p) }),
+    getAttribLocation: (p: { id: number; sources: string[] }, name: string) => {
+      if (!new RegExp('attribute [a-z0-9]+ ' + name + ';').test(p.sources[0])) return -1;
+      const key = p.id + ':' + name; if (!attribIds.has(key)) { attribIds.set(key, attribIds.size); attribNames.set(attribIds.size - 1, name); }
+      return attribIds.get(key)!;
+    },
+    enableVertexAttribArray: (id: number) => { enabled.push({ program: kind(current), name: attribNames.get(id) ?? '?' }); }, vertexAttribPointer() { /* noop */ }, disableVertexAttribArray() { /* noop */ },
+    uniform1f: uniform, uniform2f: uniform, uniform3f: uniform, uniform4f: uniform, uniform4fv: uniform,
+    viewport() { /* noop */ }, clearColor() { /* noop */ }, clear() { /* noop */ }, enable() { /* noop */ }, disable() { /* noop */ }, blendFunc() { /* noop */ },
+    drawArrays: (mode: number, first: number, count: number) => { draws.push({ mode, first, count, program: kind(current) }); },
+  };
+  return { gl, uploads, draws, uniforms, enabled, initial };
+}
+interface Opts { webgl?: boolean; twoD?: boolean; reduced?: boolean; gl?: ReturnType<typeof fakeGL> }
 interface OrbApi { setState(d: unknown): boolean; getState(): Record<string, unknown> & { mode: string; hover: { id: string; name: string; kind: string } | null; claims: string[]; pulse: number; ripple: number; amplitude: number; intensity: number; transient: string | null; arcs: number; satellites: number; energy: number; swirl: number; flow: number; filaments: number; hue: number; ampl: number };
-  pulse(s?: number): number; setSatellites(d: unknown): boolean; satellites(): { id: string; kind: string; status: string; busy: boolean; size: number; color: number[]; sx: number; sy: number; front: boolean }[]; arcs(): { from: string; to: string; kind: string }[]; links(): { to: string }[]; destroy(): void }
+  pulse(s?: number): number; setSatellites(d: unknown): boolean; satellites(): { id: string; kind: string; name: string; status: string; busy: boolean; size: number; color: number[]; x: number; y: number; z: number; sx: number; sy: number; front: boolean }[];
+  depthOrder(): string[]; arcs(): { from: string; to: string; kind: string }[]; links(): { to: string }[]; destroy(): void }
 interface Mounted { motion: boolean; frames: number; setPalette(v: string): void; setQuality(v: string): void; setMotion(v: boolean): void; destroy(): void }
 function setup(opts: Opts = {}) {
   const doc = element('document') as El & { hidden: boolean; createElement(tag: string): El; dispatchEvent(e: Event): boolean };
@@ -42,7 +79,7 @@ function setup(opts: Opts = {}) {
   stage.append(canvas); canvas.width = 0; canvas.height = 0;
   const ctx = context2d();
   canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 640, height: 440 });
-  canvas.getContext = (kind: string) => kind === 'webgl' ? (opts.webgl ? {} : null) : kind === '2d' ? (opts.twoD === false ? null : ctx) : null;
+  canvas.getContext = (kind: string) => kind === 'webgl' ? (opts.gl ? opts.gl.gl : opts.webgl ? {} : null) : kind === '2d' ? (opts.twoD === false ? null : ctx) : null;
   const rafs = new Map<number, (t: number) => void>(); let rafId = 0, cancelled = 0;
   const media = { matches: opts.reduced === true, handlers: [] as Fn[], addEventListener(_n: string, fn: Fn) { media.handlers.push(fn); }, removeEventListener() { /* noop */ } };
   const winHandlers = new Map<string, Set<Fn>>();
@@ -61,7 +98,7 @@ function setup(opts: Opts = {}) {
   runInNewContext(source, context);
   const mount = (win.EchoPrimeOrb as { mount(c: unknown, o: unknown): Mounted }).mount;
   const orb = mount(canvas, { onFallback: fallback, onMotionChange: motionChange });
-  if (opts.twoD !== false) orb.setQuality('quiet'); // fewer points: the fake context records every call, so frames stay cheap
+  if (opts.twoD !== false && !opts.gl) orb.setQuality('quiet'); // fewer points: the fake context records every call, so frames stay cheap
   let stamp = 0;
   /** Runs every pending animation frame once, `ms` later on the frame clock and on Date.now(). */
   const frame = (ms = 16) => { stamp += ms; vi.advanceTimersByTime(ms); const pending = [...rafs.values()]; rafs.clear(); for (const fn of pending) fn(stamp); };
@@ -456,6 +493,150 @@ describe('touch: the first tap names a moon, the second opens it', () => {
   });
 });
 
+describe('depth order', () => {
+  const eight = (s: ReturnType<typeof setup>) => s.dispatch('echo-orb-satellites', { satellites: Array.from({ length: 8 }, (_, i) => s.sat('d' + i, i % 2 ? 'bot' : 'agent')) });
+  it('keeps every moon in back-to-front order by depth, frame after frame, as moons cross each other', () => {
+    const s = setup(); const api = s.api()!; eight(s);
+    for (let f = 0; f < 60; f++) {
+      s.frame(60);
+      const z = Object.fromEntries(api.satellites().map(m => [m.id, m.z])), order = api.depthOrder();
+      expect(order.slice().sort()).toEqual(Object.keys(z).sort());
+      for (let k = 1; k < order.length; k++) expect(z[order[k]]).toBeGreaterThanOrEqual(z[order[k - 1]]);
+    }
+  });
+  it('2D: paints the moons behind the limb before the sphere body and the rest after it, each side back to front', () => {
+    const s = setup(); const api = s.api()!; eight(s);
+    let checked = 0;
+    for (let f = 0; f < 40; f++) {
+      s.ctx.arcLog.length = 0; s.frame(60);
+      const by = Object.fromEntries(api.satellites().map(m => [m.id, m])), order = api.depthOrder();
+      const at = (id: string) => s.ctx.arcLog.findIndex(a => Math.abs(a[0] - by[id].sx) < 1e-9 && Math.abs(a[1] - by[id].sy) < 1e-9);
+      const body = s.ctx.arcLog.findIndex(a => a[0] === 320 && a[1] === 220);
+      const back = order.filter(id => !by[id].front), front = order.filter(id => by[id].front);
+      expect(body).toBeGreaterThanOrEqual(0);
+      for (const id of back) expect(at(id)).toBeLessThan(body);
+      for (const id of front) expect(at(id)).toBeGreaterThan(body);
+      for (const side of [back, front]) for (let k = 1; k < side.length; k++) expect(at(side[k])).toBeGreaterThan(at(side[k - 1]));
+      if (back.length && front.length) checked++;
+    }
+    expect(checked).toBeGreaterThan(0);
+  });
+  it('retires a bolt whose moon slips behind the sphere, so no arc ever ends behind the limb', () => {
+    const s = setup(); const api = s.api()!;
+    s.dispatch('echo-orb-satellites', { satellites: Array.from({ length: 10 }, (_, i) => s.sat('busy' + i, 'bot', { busy: true, group: 'g' + (i % 2) })) });
+    let seen = 0;
+    for (let f = 0; f < 150; f++) {
+      s.frame(40);
+      const front = new Set(api.satellites().filter(m => m.front).map(m => m.id));
+      for (const arc of api.arcs()) { seen++; expect(front.has(arc.to)).toBe(true); if (arc.kind === 'group') expect(front.has(arc.from)).toBe(true); }
+    }
+    expect(seen).toBeGreaterThan(0);
+  });
+});
+
+describe('account change', () => {
+  it('drops deep, thinking, any error overlay and every moon, so the previous account cannot keep the orb busy', () => {
+    const s = setup(); const api = s.api()!;
+    s.dispatch('echo-orb-satellites', { source: 'agents', satellites: [s.sat('agent:a', 'agent', { busy: true })] });
+    api.setState({ mode: 'deep', source: 'agents' }); api.setState({ mode: 'thinking', source: 'chat' }); api.setState({ mode: 'error', source: 'chat' });
+    expect(api.getState()).toMatchObject({ mode: 'error', transient: 'error' });
+    s.winFire('echo-account-changed');
+    expect(api.getState()).toMatchObject({ mode: 'idle', transient: null, claims: [], satellites: 0 }); expect(s.canvas.dataset.orbMode).toBe('idle');
+    vi.advanceTimersByTime(2000); for (let i = 0; i < 5; i++) s.frame();
+    expect(api.getState().mode).toBe('idle'); expect(api.getState().red).toBe(0);
+    api.setState({ mode: 'thinking', source: 'chat' }); expect(api.getState().mode).toBe('thinking'); // a publisher still at work claims again
+  });
+  it('redraws a static (reduced-motion) orb once when the account change clears it', () => {
+    const s = setup({ reduced: true }); const api = s.api()!;
+    api.setState({ mode: 'deep', source: 'swarm' }); const drawn = s.orb.frames;
+    s.winFire('echo-account-changed'); expect(api.getState().mode).toBe('idle'); expect(s.orb.frames).toBe(drawn + 1);
+  });
+});
+
+describe('name tag', () => {
+  it('builds the tag once, follows the moon without rebuilding it, and rewrites its text only when the roster changes', () => {
+    const s = setup(); const api = s.api()!;
+    s.dispatch('echo-orb-satellites', { satellites: [s.sat('bot:n', 'bot', { name: 'Night Bot', status: 'running' })] });
+    s.frame(); const m = api.satellites()[0]; s.canvas.fire('pointermove', { clientX: m.sx, clientY: m.sy });
+    const tip = s.stage.children.find(c => c.className === 'orb-tip')!; const [name, meta] = tip.children;
+    const lefts = new Set<string>();
+    for (let i = 0; i < 30; i++) { s.frame(60); lefts.add(tip.style.left); expect(tip.children).toHaveLength(2); expect(tip.children[0]).toBe(name); expect(tip.children[1]).toBe(meta); }
+    expect(lefts.size).toBeGreaterThan(1); expect(name.textContent).toBe('Night Bot'); expect(meta.textContent).toContain('running');
+    s.dispatch('echo-orb-satellites', { satellites: [s.sat('bot:n', 'bot', { name: 'Night Bot', status: 'paused' })] }); s.frame();
+    expect(api.getState().hover!.id).toBe('bot:n'); expect(tip.children[0]).toBe(name); expect(meta.textContent).toContain('paused');
+    s.dispatch('echo-orb-satellites', { satellites: [] }); s.frame(); expect(tip.hidden).toBe(true);
+  });
+});
+
+describe('WebGL renderer (stub context)', () => {
+  const N = 12;
+  const roster = (s: ReturnType<typeof setup>, busy = false) => s.dispatch('echo-orb-satellites', { satellites: Array.from({ length: N }, (_, i) => s.sat('w' + i, i % 3 ? 'bot' : 'agent', { busy })) });
+  it('mounts the WebGL renderer, draws every frame and never falls back', () => {
+    const g = fakeGL(); const s = setup({ gl: g }); roster(s, true);
+    expect(s.canvas.dataset.renderer).toBe('webgl'); expect(s.fallback).not.toHaveBeenCalled();
+    const before = s.orb.frames; for (let i = 0; i < 40; i++) s.frame(50);
+    expect(s.orb.frames).toBe(before + 40);
+    expect(g.draws.filter(d => d.program === 'core' && d.count === 6).length).toBeGreaterThanOrEqual(40);
+    expect(g.draws.some(d => d.program === 'moon' && d.count === N)).toBe(true);
+    expect(g.enabled.some(e => e.program === 'line' && e.name === 'behind')).toBe(true);
+    expect(g.uniforms.some(u => u.program === 'line' && u.name === 'sphere')).toBe(true);
+  });
+  it('uploads the same two preallocated arrays every frame (no per-frame views or copies) and the same light array', () => {
+    const g = fakeGL(); const s = setup({ gl: g }); roster(s, true);
+    for (let i = 0; i < 40; i++) s.frame(50);
+    const moonUploads = g.uploads.filter(u => u.program === 'moon'), lineUploads = g.uploads.filter(u => u.program === 'line');
+    expect(moonUploads.length).toBeGreaterThan(30); expect(lineUploads.length).toBeGreaterThan(30);
+    expect(new Set(moonUploads.map(u => u.data)).size).toBe(1); expect(new Set(lineUploads.map(u => u.data)).size).toBe(1);
+    expect(moonUploads[0].data).toBe(g.initial.get(moonUploads[0].buffer!)); expect(lineUploads[0].data).toBe(g.initial.get(lineUploads[0].buffer!));
+    const lights = g.uniforms.filter(u => u.name === 'arcLights[0]').map(u => u.values[0]);
+    expect(lights.length).toBeGreaterThan(30); expect(new Set(lights).size).toBe(1); expect(Object.prototype.toString.call(lights[0])).toBe('[object Float32Array]');
+  });
+  it('fills the moon buffer back to front, so nearer moons blend over farther ones', () => {
+    const g = fakeGL(); const s = setup({ gl: g }); roster(s);
+    for (let f = 0; f < 30; f++) {
+      s.frame(60);
+      const data = g.uploads.filter(u => u.program === 'moon').at(-1)!.data as Float32Array;
+      const zs = Array.from({ length: N }, (_, k) => data[k * 8 + 2]);
+      for (let k = 1; k < zs.length; k++) expect(zs[k]).toBeGreaterThanOrEqual(zs[k - 1]);
+      const expected = s.api()!.depthOrder().map(id => s.api()!.satellites().find(m => m.id === id)!.z);
+      zs.forEach((z, k) => expect(z).toBeCloseTo(expected[k], 5));
+    }
+  });
+  it('flags the steady links of moons behind the limb so the line shader clips them under the sphere', () => {
+    const g = fakeGL(); const s = setup({ gl: g, reduced: true }); roster(s, true);
+    const sats = s.api()!.satellites(); expect(sats.some(m => m.front)).toBe(true); expect(sats.some(m => !m.front)).toBe(true);
+    const data = g.uploads.filter(u => u.program === 'line').at(-1)!.data as Float32Array;
+    sats.forEach((m, i) => { expect(data[(i * 2) * 7 + 6]).toBe(m.front ? 0 : 1); expect(data[(i * 2 + 1) * 7 + 6]).toBe(m.front ? 0 : 1); });
+    expect(g.draws.filter(d => d.program === 'line' && d.mode === 1).at(-1)).toMatchObject({ first: 0, count: N * 2 });
+  });
+});
+
+describe('the animated frame path allocates nothing', () => {
+  // A syntax guard over the per-frame functions (scene step, WebGL frame, name-tag placement). It cannot see what an
+  // engine allocates internally, but it fails on every construct that allocates in JavaScript: new, spreads and rest
+  // parameters, closures, iterator loops, array/object/template literals, string concatenation and copying array methods.
+  const createScene = source.indexOf('function createScene('), mountGL = source.indexOf('function mount(canvas'), bridge = source.indexOf('function pointerBridge(');
+  function body(signature: string, from: number) {
+    const at = source.indexOf(signature, from); if (at < 0) throw new Error('missing ' + signature);
+    const open = at + signature.length - 1; let depth = 0;
+    for (let j = open; j < source.length; j++) { if (source[j] === '{') depth++; else if (source[j] === '}' && --depth === 0) return source.slice(open, j + 1); }
+    throw new Error('unbalanced ' + signature);
+  }
+  const ALLOCATING: [RegExp, string][] = [[/\bnew\s/, 'new'], [/\.\.\./, 'spread or rest'], [/=>/, 'closure'], [/for\s*\([^;)]*\b(of|in)\b/, 'iterator or for-in loop'],
+    [/\.(map|filter|slice|subarray|concat|join|split|push|splice|from|keys|values|entries)\(/, 'copying array method'], [/`/, 'template literal'],
+    [/[=(,:?]\s*\[/, 'array literal'], [/[=(,:?]\s*\{|return\s*\{/, 'object literal'], [/'\s*\+|\+\s*'/, 'string concatenation']];
+  const frameFunctions: [string, number][] = [
+    ...['step(dt,motion){', 'orbit(motion){', 'sortDepth(){', 'colorFor(s){', 'busyCount(){', 'activeArcs(){', 'spawn(a,b,t){', 'arcStep(t){', 'lightStep(){', 'makeBolt(x0,y0,x1,y1,seed,t){'].map(sig => [sig, createScene] as [string, number]),
+    ...['function draw(){', 'function fillMoons(){', 'function fillLines(){', 'function vertex(px,py,r,g,b,a,behind){', 'function anchor(s){', 'function satScreen(){', 'function project(x,y,z){', 'function tick(stamp){',
+      'function location(prog,name){', 'function u1(prog,name,a){', 'function u2(prog,name,a,b){', 'function u3(prog,name,a,b,c){', 'function u4(prog,name,a,b,c,d){', 'function u4v(prog,name,v){', 'function colors(prog){', 'function off(loc){',
+      'function attrib(prog,name,size,stride,offset){'].map(sig => [sig, mountGL] as [string, number]),
+    ['function place(i){', bridge], ['function show(){', bridge]];
+  it.each(frameFunctions)('%s', (signature, from) => {
+    const code = body(signature, from);
+    for (const [pattern, what] of ALLOCATING) expect(pattern.test(code), signature + ' contains a ' + what).toBe(false);
+  });
+});
+
 // ---------------------------------------------------------------- dispatch wiring in chat.js and workspace.js
 const uiSource = (name: string) => readFileSync(new URL('../ui/echo-prime/' + name, import.meta.url), 'utf8');
 type OrbEvent = { type: string; mode?: string; intensity?: number; source?: string; strength?: number };
@@ -536,7 +717,7 @@ describe('workspace.js drives the orb through a streamed Workspace turn', () => 
       if (url === '/api/workspace/state') return json({ chats: [], projects: [], library: [], preferences: [], personalities: [] });
       if (url === '/api/workspace/chats' && opts.method === 'POST') return json({ id: 'c1', title: 'New chat', messages: [], project_id: null });
       if (url === '/api/workspace/chat' && opts.method === 'POST') { req = JSON.parse(String(opts.body)).request_id; return ndjson(stream); }
-      if (url.startsWith('/api/workspace/chats/c1')) return json(readback(req));
+      if (url.startsWith('/api/workspace/chats/c1')) { const back = readback(req); return back instanceof Response ? back : json(back); }
       return json({});
     });
     const nodes = new Map<string, Node>(), get = (sel: string) => { if (!nodes.has(sel)) nodes.set(sel, new Node()); return nodes.get(sel)!; };
@@ -584,5 +765,11 @@ describe('workspace.js drives the orb through a streamed Workspace turn', () => 
     const h = wsHarness([started(0), result(0)], none);
     expect((await h.send('q')).sent).toBe(false);
     expect(modes(h.events)).toEqual(['thinking', 'thinking', 'error', 'idle']);
+  });
+  it('a reply whose saved readback fails flashes error (not success), then idle', async () => {
+    const h = wsHarness([token('All '), token('good.'), done], () => new Response(JSON.stringify({ error: 'Workspace store unavailable' }), { status: 503, headers: { 'content-type': 'application/json' } }));
+    expect(await h.send('q')).toMatchObject({ sent: true, verified: false });
+    expect(modes(h.events)).toEqual(['thinking', 'replying', 'error', 'idle']);
+    expect(h.chatPosts()).toBe(1); // one readback attempt, no retry
   });
 });
