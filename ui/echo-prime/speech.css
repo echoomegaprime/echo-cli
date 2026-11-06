@@ -7,7 +7,7 @@
 .speech-voice.unavailable{border-color:#7a5a3a;color:#e6c08a;background:#241a10}
 .speech-dock .speech-button,.speech-actions .quiet-button{display:inline-flex;align-items:center;justify-content:center;min-height:30px;padding:5px 10px;border:1px solid #486a57;border-radius:7px;background:#183126;color:#cff0df;font-size:11px;white-space:normal;text-align:left}
 .speech-dock .speech-button:hover,.speech-actions .quiet-button:hover{border-color:#7ed7ae}
-.speech-dock .speech-button[aria-pressed=true],.speech-actions .quiet-button[aria-pressed=true]{background:#1f4a39;border-color:#7ed7ae;color:#eafff5}
+.speech-dock .speech-button[aria-pressed=true],.speech-dock .speech-button[role=switch][aria-checked=true],.speech-actions .quiet-button[aria-pressed=true]{background:#1f4a39;border-color:#7ed7ae;color:#eafff5}
 .speech-dock .speech-chip{min-height:32px;padding:6px 14px;border-radius:999px;border:1px solid #7ed7ae;background:linear-gradient(120deg,#1f4a39,#163b2f);color:#eafff5;font-weight:600;box-shadow:0 0 18px #64e5af33;animation:speech-pulse 1.6s ease-in-out infinite}
 @keyframes speech-pulse{0%,100%{box-shadow:0 0 10px #64e5af22}50%{box-shadow:0 0 22px #64e5af55}}
 .speech-count{color:#7fa593;font-size:10px;margin-left:auto;white-space:nowrap}

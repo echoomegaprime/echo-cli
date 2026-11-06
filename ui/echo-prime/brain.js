@@ -22,7 +22,7 @@
  const wrap=document.createElement('div'),label=document.createElement('label'),select=document.createElement('select'),toggle=document.createElement('button'),note=document.createElement('small');
  wrap.className='personality-control';label.className='sr-only';label.textContent='Personality';
  select.id=SELECT_ID;select.setAttribute('aria-label','Personality: automatic, or pin one');
- toggle.type='button';toggle.id='personality-toggle';toggle.className='quiet-button';
+ toggle.type='button';toggle.id='personality-toggle';toggle.className='quiet-button';toggle.setAttribute('role','switch');
  note.className='connection-note';note.setAttribute('role','status');note.setAttribute('aria-live','polite');
  label.append(select);wrap.append(label,toggle,note);
  const mount=document.querySelector('#rail-personality-slot')||document.querySelector('.composer-toolbar')||document.querySelector('#composer');
@@ -32,7 +32,7 @@
   const on=!!settings&&settings.enabled!==false,pinned=settings&&typeof settings.pinned==='string'?settings.pinned:null;
   select.replaceChildren(option(AUTO,'Personality: auto (by task)'),...catalog.map(e=>option(e.id,text(e.name,60)+(e.registered?'':' · not registered'))));
   select.value=pinned&&catalog.some(e=>e.id===pinned)?pinned:AUTO;
-  toggle.textContent=on?'Personality: on':'Personality: off';toggle.setAttribute('aria-pressed',String(on));
+  toggle.textContent=on?'Personality: on':'Personality: off';toggle.setAttribute('aria-checked',String(on));
   const locked=!!gate||failed||!configured;
   select.disabled=locked||!on;toggle.disabled=locked;select.hidden=!configured&&!gate;toggle.hidden=!configured&&!gate;
   if(gate==='signin')note.textContent='Sign in to see which personality answers.';
