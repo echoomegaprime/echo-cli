@@ -48,6 +48,8 @@
   ]},
   {id:'bottom',label:'Account',bottom:true,items:[
    {id:'account',label:'Account',icon:'i-user',match:{id:'workspace-account',workspaceView:'account'}},
+   // Owner-only member management (workspace.js view 'members'); the button lives in #workspace-navigation.
+   {id:'members',label:'Members',icon:'i-members',workspace:true,ownerOnly:true,match:{id:'workspace-members',workspaceView:'members'}},
    {id:'appearance',label:'Appearance',icon:'i-sliders',match:{id:'open-appearance'}},
   ]},
  ];

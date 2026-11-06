@@ -59,12 +59,15 @@ async function jsonResponse(response:Response,max=65536):Promise<unknown>{
  try{return JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(await boundedBytes(response,max)));}
  catch(error){if(error instanceof WorkspaceHttpError)throw error;throw new WorkspaceHttpError(502,'Invalid Workspace response');}
 }
-const reads=new Set(['/api/state','/api/diagnostics','/api/fleet','/api/health','/api/mcp','/api/plugins','/api/catalog','/api/chats','/api/auth/accounts']);
+const reads=new Set(['/api/state','/api/diagnostics','/api/fleet','/api/health','/api/mcp','/api/plugins','/api/catalog','/api/chats','/api/auth/accounts','/api/auth/invites']);
 const writes=new Set(['/api/mcp','/api/chats','/api/chat/update','/api/chat','/api/compact','/api/fork','/api/projects','/api/project/update','/api/library','/api/import','/api/action','/api/sync','/api/review','/api/voice/start','/api/voice/next','/api/voice/cancel','/api/voice/transcribe']);
 const publicReads=new Set(['/api/auth/session','/api/auth/config']);
 // Exactly the account routes the Workspace implements (accounts_http.py). `/api/auth/refresh` and
 // `/api/auth/verify` were allowlisted until 2026-11-04 although the Workspace never served them.
-const authWrites=new Set(['/api/auth/login','/api/auth/signup','/api/auth/reset','/api/auth/logout','/api/auth/decide']);
+// Member management (PRIME_MEMBERS_CONTRACT.md, 2026-11-06) adds usage and the invite create/revoke writes.
+const authWrites=new Set(['/api/auth/login','/api/auth/signup','/api/auth/reset','/api/auth/logout','/api/auth/decide','/api/auth/usage','/api/auth/invite','/api/auth/invite/revoke']);
+// Account administration: only the pinned, currently approved primary owner reaches these upstream.
+const primaryOwnerOnly=new Set(['/api/fleet','/api/diagnostics','/api/catalog','/api/plugins','/api/sync','/api/auth/accounts','/api/auth/decide','/api/auth/usage','/api/auth/invites','/api/auth/invite','/api/auth/invite/revoke']);
 function route(url:URL,method:string):string {
  const path=url.pathname.replace(/^\/api\/workspace\//,'/api/');
  const allowed=method==='GET'?(reads.has(path)||publicReads.has(path)||/^\/api\/(?:chats|journals|library|mcp\/tools|voice\/audio)\/[A-Za-z0-9_-]{1,120}$/.test(path)):
@@ -156,7 +159,7 @@ export class WorkspaceBridge {
    const session=publicRoute||localLogout?null:await this.session(req,signal);
    if(session&&!session.authenticated)throw new WorkspaceHttpError(401,'Sign in required');
    if(session&&!pathname.startsWith('/api/auth/')&&session.user?.status!=='approved')throw new WorkspaceHttpError(403,'Account approval required');
-   if(['/api/fleet','/api/diagnostics','/api/catalog','/api/plugins','/api/sync','/api/auth/accounts','/api/auth/decide'].includes(pathname)&&session&&!this.ownerAccess(session))throw new WorkspaceHttpError(403,'Primary owner admission required');
+   if(primaryOwnerOnly.has(pathname)&&session&&!this.ownerAccess(session))throw new WorkspaceHttpError(403,'Primary owner admission required');
    if(localLogout){if(typeof req.headers['x-echo-csrf']!=='string'||!/^[A-Za-z0-9_-]{8,256}$/.test(req.headers['x-echo-csrf']))throw new WorkspaceHttpError(403,'Account session check failed');}
    else if(!publicRoute)checkCsrf(req,session!.csrf!);
    else if(req.method==='POST')checkCsrf(req,'login');

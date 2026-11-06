@@ -141,3 +141,50 @@ body.panel-dragging{user-select:none;cursor:grabbing}body.panel-dragging .worksp
 .system-row[data-state="off"] .system-state,.system-row[data-state="locked"] .system-state{color:var(--muted,#8aa39a)}
 .system-row[data-state="connected"] svg{filter:drop-shadow(0 0 6px rgba(91,227,168,.55))}
 .system-row .system-reason{display:block;margin-top:2px;font-size:.78em;opacity:.75;overflow-wrap:anywhere}
+
+/* Members (owner-only view in #workspace-dialog, workspace.js): counts bar, drop-down picker with search and status
+   chips, member detail and usage cards, confirm cards and invites. Compact rows; one column at phone width. */
+.members-counts{display:flex;flex-wrap:wrap;gap:6px}
+.members-count{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border:1px solid #2f5143;border-radius:999px;background:#0a1813;color:#a8c5b7;font-size:11px}
+.members-count strong{color:#eafff5;font-weight:600}
+.members-count[data-status=pending] strong{color:#f5d68a}.members-count[data-status=banned] strong{color:#f0a09b}
+.members-toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:end;min-width:0}
+.members-toolbar .workspace-field{flex:1 1 220px;min-width:0}
+.members-chips{display:flex;flex-wrap:wrap;gap:6px;min-width:0}
+.workspace-card-content .members-chip{display:inline-flex;align-items:center;min-height:32px;padding:4px 12px;border:1px solid #2f5143;border-radius:999px;background:#0a1813;color:#a8c5b7;font-size:11px;cursor:pointer}
+.workspace-card-content .members-chip[aria-pressed=true]{background:#193a2d;border-color:#64e5af;color:#eafff5}
+.workspace-card-content .members-notice{padding:8px 12px;border:1px solid #2f6b55;border-radius:8px;background:#0d221b;color:#c9f3e2}
+.members-detail-host{display:grid;gap:16px;min-width:0}
+.members-hint{margin:0;font-size:12px;line-height:1.6;color:#8fb0a4}
+.members-detail h3{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.members-email{min-width:0;overflow-wrap:anywhere}
+.members-badge{display:inline-block;font-size:9.5px;font-weight:600;letter-spacing:1.2px;text-transform:uppercase;padding:3px 8px;border:1px solid #2f5143;border-radius:20px;color:#a7f5dd;white-space:nowrap}
+.members-badge[data-status=pending]{color:#f5d68a;border-color:#6f5d2c}
+.members-badge[data-status=denied],.members-badge[data-status=expired],.members-badge[data-status=revoked],.members-badge[data-status=used]{color:#b8c4c0;border-color:#3d4a46}
+.members-badge[data-status=banned]{color:#f0a09b;border-color:#a8504b}
+.members-facts{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:2px 16px;margin:0;min-width:0}
+.members-facts div{display:flex;justify-content:space-between;align-items:baseline;gap:10px;min-width:0;padding:5px 0;border-bottom:1px solid #1b3127;font-size:12px}
+.members-facts dt{color:#8fb0a4;flex:none}
+.members-facts dd{margin:0;min-width:0;color:#e1f2ea;text-align:right;overflow-wrap:anywhere}
+.members-actions,.members-copy{display:flex;flex-wrap:wrap;gap:8px;align-items:center;min-width:0}
+.members-copy input{flex:1 1 220px;min-width:0}
+.workspace-card-content .members-danger{border-color:#a8504b;background:#2a1214;color:#f5c2c2}
+.workspace-card-content .members-primary{border-color:#3f8a64;background:#1d3d2e}
+.workspace-card-content .members-fine{font-size:11px;color:#6e8d85}
+.workspace-card-content .members-error{color:#f0b3ae}
+.workspace-card-content .members-confirm-who{font-size:14px;color:#e1f2ea;overflow-wrap:anywhere}
+.members-subhead{margin:4px 0 0;font-size:12px;letter-spacing:.4px;color:#a9c9b9}
+.members-invite-result{display:grid;gap:10px;min-width:0}.members-invite-result:empty{display:none}
+.members-invites{list-style:none;margin:0;padding:0;display:grid;gap:2px;min-width:0}
+.members-invite{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:6px 0;border-bottom:1px solid #1b3127;font-size:12px;min-width:0}
+.members-invite .members-email{flex:1 1 200px;color:#e1f2ea}
+.members-invite small{color:#8fb0a4;font-size:11px}
+@media(max-width:640px){
+ .members-toolbar,.members-actions,.members-copy,.members-invite{flex-direction:column;align-items:stretch}
+ .members-toolbar .workspace-field,.members-copy input,.members-invite .members-email{flex-basis:auto}
+ .members-chips{display:grid;grid-template-columns:repeat(auto-fill,minmax(88px,1fr))}
+ .workspace-card-content .members-chip{justify-content:center;min-height:40px}
+ .members-actions .quiet-button,.members-copy .quiet-button,.members-invite .quiet-button{width:100%;min-height:44px}
+ .members-facts{grid-template-columns:1fr}
+ .members-badge{align-self:flex-start}
+}

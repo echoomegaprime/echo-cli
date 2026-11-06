@@ -5,6 +5,9 @@
  const voiceOptions={spoken:false,brief:false,autoSend:false,conversation:false,remaining:0,limitReached:false};let listenTimer;
  const dialog=$('#workspace-dialog'),content=$('#workspace-panel-content'),notice=$('#workspace-panel-status');
  const esh={generation:0,rows:new Map(),review:null,busy:false,floating:false,rect:{x:280,y:90,width:640,height:430}};
+ // Members view (owner only): what the next render keeps after an action (null on a fresh open) and the usage token
+ // that discards a late usage readback for a member who is no longer selected.
+ let membersCarry=null,membersUsage=0;
  const transport=new window.EchoPrimeWorkspaceTransport({onIdentityChange:identityChanged});
  // Microphone capture: up to two minutes, transcribed in eight-second mono PCM parts (the canonical
  // Workspace per-request contract). A capture that hears nothing for fifteen seconds stops by itself.
@@ -66,7 +69,7 @@
   identity=key;
   if(!first&&!changed){log('identity','unchanged');return;}
   log('identity',first?'observed':'changed');
-  state.accountEpoch++;
+  state.accountEpoch++;membersCarry=null;membersUsage++;// the next account starts Members with nothing selected
   state.controller.abort();state.controller=new AbortController();clearFields();content.replaceChildren();status('');state.data=null;clearConversation();
   voiceOptions.spoken=false;voiceOptions.brief=false;voiceOptions.autoSend=false;
   $('#workspace-chat-search').value='';$('#workspace-project').replaceChildren(element('option',{value:''},'No project'));
@@ -587,6 +590,172 @@
   const service=input('Service reference'),username=input('Account reference'),secret=input('Credential value','','password');
   section('Isolated Vault credential entry',field('Service',service),field('Account',username),field('Credential',secret),button('Store credential in existing Vault',async()=>{try{await api('/action',{action:'vault',operation:'put',service:service.value,username:username.value,secret:secret.value});status('Vault operation returned. No credential value is displayed or added to the conversation.');}finally{secret.value='';}}));
  }
+ // ---- Members (primary owner only; docs/echo-code/PRIME_MEMBERS_CONTRACT.md) ----------------------------------------
+ // One accounts read and one invites read per render; usage is read for the selected member only, never one request
+ // per member. Every action passes a confirm card naming the email and the consequence, then the list reloads with the
+ // member still selected. Usage holds counts only; every value is rendered as text.
+ const memberStatuses=['pending','approved','denied','banned'];
+ const memberStatus=value=>({pending:'Pending',approved:'Approved',denied:'Denied',banned:'Banned',active:'Active',used:'Used',expired:'Expired',revoked:'Revoked'})[value]||'Unknown';
+ const memberNumber=value=>Math.max(0,Number(value)||0).toLocaleString();
+ const memberPlural=(value,one,many)=>`${memberNumber(value)} ${Number(value)===1?one:many}`;
+ function memberWhen(seconds){const value=Number(seconds);if(!Number.isFinite(value)||value<=0)return 'Not recorded';const date=new Date(value*1000);return Number.isNaN(date.getTime())?'Not recorded':date.toLocaleString();}
+ function memberBytes(bytes){let value=Math.max(0,Number(bytes)||0),unit=0;if(value<1024)return Math.round(value)+' B';const units=['KB','MB','GB','TB'];value/=1024;while(value>=1024&&unit<units.length-1){value/=1024;unit++;}return value.toFixed(1)+' '+units[unit];}
+ const memberFeatures={sdk:'SDK',esh:'ESH',adk:'ADK',web_search:'web search'};
+ const memberFact=(label,value)=>element('div',{},element('dt',{},label),element('dd',{},String(value)));
+ function memberOption(value,label){const node=element('option',{},label);node.setAttribute('value',value);return node;}
+ const memberActions={
+  approve:['Approve','Approve this account?','Approves the account. Their private Workspace opens on their next request.'],
+  deny:['Deny','Deny this application?','Refuses the application. They can still sign in but cannot open a Workspace.'],
+  kick:['Kick','Kick this member?','Signs them out everywhere now. They can sign in again.'],
+  ban:['Ban','Ban this member?','Signs them out and blocks this account and email from signing in.'],
+  unban:['Unban','Unban this member?','Restores access as an approved member.'],
+ };
+ const signedOut=count=>`Signed out ${memberPlural(count,'session','sessions')}.`;
+ const inviteEmailPattern=/^[^\s@]{1,64}@[^\s@]+\.[^\s@]{2,}$/;
+ function inviteLink(){const origin=typeof location==='object'&&location&&typeof location.origin==='string'&&/^https?:\/\/[^/]+$/.test(location.origin)?location.origin:'';return origin+'/#invite';}
+ // Prime's own owner route (not the Workspace): one account's upload count and bytes, with the same CSRF proof.
+ async function memberUploads(uid){
+  const epoch=state.epoch,panel=state.panel;
+  const response=await fetch('/api/prime/members/uploads',{method:'POST',credentials:'same-origin',cache:'no-store',headers:{...transport.headers(),'content-type':'application/json'},body:JSON.stringify({uid}),signal:state.controller.signal});
+  let value=null;try{if(String(response.headers.get('content-type')||'').includes('application/json'))value=await response.json();}catch{value=null;}
+  if(epoch!==state.epoch||panel!==state.panel)throw new Error('Workspace view changed; response discarded.');
+  if(!response.ok||!value||typeof value!=='object')throw new Error(typeof value?.error==='string'?value.error.slice(0,300):'Upload counts did not return.');
+  return value;
+ }
+ async function members(){
+  if(!transport.session?.ownerAccess)throw new Error('Primary owner admission required.');
+  const carry=membersCarry||{};membersCarry=null;
+  const epoch=state.epoch,panel=state.panel;
+  const [accounts,invites]=await Promise.allSettled([api('/auth/accounts'),api('/auth/invites')]);
+  if(epoch!==state.epoch||panel!==state.panel)return;
+  if(accounts.status==='rejected')throw accounts.reason;
+  const value=accounts.value&&typeof accounts.value==='object'?accounts.value:{};
+  const rows=(Array.isArray(value.accounts)?value.accounts:[]).filter(row=>row&&typeof row.uid==='string'&&row.role!=='owner').slice(0,500);
+  const counts=Object.fromEntries(memberStatuses.map(name=>[name,Number.isFinite(value.counts?.[name])?value.counts[name]:rows.filter(row=>row.status===name).length]));
+  renderMembers({rows,counts,truncated:value.truncated===true,
+   invites:invites.status==='fulfilled'&&Array.isArray(invites.value?.invites)?invites.value.invites.filter(item=>item&&typeof item.id==='string').slice(0,200):[],
+   invitesError:invites.status==='rejected'?(invites.reason instanceof Error?invites.reason.message:'Invites did not return.'):'',
+   selected:rows.some(row=>row.uid===carry.select)?carry.select:'',query:typeof carry.query==='string'?carry.query:'',filter:memberStatuses.includes(carry.filter)?carry.filter:'all',
+   notice:typeof carry.notice==='string'?carry.notice:'',invite:carry.invite||null,inviteNotice:typeof carry.inviteNotice==='string'?carry.inviteNotice:'',inviteError:null,usage:null});
+ }
+ function renderMembers(view){
+  const epoch=state.epoch,panel=state.panel,accountEpoch=state.accountEpoch,live=()=>epoch===state.epoch&&panel===state.panel&&accountEpoch===state.accountEpoch;
+  const search=element('input',{type:'search',placeholder:'Email, account or status','aria-label':'Search members',autocomplete:'off',maxlength:200,value:view.query});
+  const picker=element('select',{'aria-label':'Member',class:'members-picker'}),detail=element('div',{class:'members-detail-host'});
+  const notice=element('p',{class:'members-notice',role:'status'},view.notice);notice.hidden=!view.notice;
+  const chips=['all',...memberStatuses].map(name=>{const chip=button(name==='all'?'All':memberStatus(name),()=>{view.filter=name;press();fill();},'members-chip');chip.setAttribute('data-filter',name);return chip;});
+  const press=()=>{for(const chip of chips)chip.setAttribute('aria-pressed',String(chip.getAttribute('data-filter')===view.filter));};
+  const matches=row=>{const needle=view.query.trim().toLowerCase();return (view.filter==='all'||row.status===view.filter)&&(!needle||[row.email,row.uid,memberStatus(row.status)].some(text=>String(text||'').toLowerCase().includes(needle)));};
+  // Client-side filter over the one list read. The selected member always stays in the drop-down.
+  function fill(){
+   const matching=view.rows.filter(matches).length,shown=view.rows.filter(row=>row.uid===view.selected||matches(row));
+   const label=!view.rows.length?'No member accounts yet':matching===view.rows.length?`Choose a member (${view.rows.length})`:`Choose a member (${matching} of ${view.rows.length} match)`;
+   picker.replaceChildren(memberOption('',label),...shown.map(row=>memberOption(row.uid,`${row.email||row.uid} · ${memberStatus(row.status)}`)));picker.value=view.selected;
+  }
+  function show(){
+   const row=view.rows.find(item=>item.uid===view.selected);
+   if(!row){membersUsage++;detail.replaceChildren(element('p',{class:'members-hint'},view.rows.length?'Choose a member above to see their details, usage and actions.':'No member accounts yet. Invite someone below.'));return;}
+   const facts=[['Role',row.role||'member'],['Joined',memberWhen(row.created)],['Last sign-in',memberWhen(row.last_login)],['Last active',memberWhen(row.last_seen)],['Active sessions',memberNumber(row.active_sessions)],['Sign-ins',memberNumber(row.login_count)],['Invited',row.via_invite===true?'Yes':'No']];
+   if(row.status==='banned')facts.push(['Banned',memberWhen(row.banned_at)]);
+   const decisions=row.status==='banned'?['unban']:[...(row.status==='pending'?['approve','deny']:[]),'kick','ban'];
+   const usage=element('article',{class:'workspace-card-content members-usage','aria-live':'polite'},element('h3',{},'Usage'),element('p',{class:'members-hint'},'Reading usage…'));
+   detail.replaceChildren(element('article',{class:'workspace-card-content members-detail'},element('h3',{},element('span',{class:'members-email'},row.email||row.uid),element('span',{class:'members-badge','data-status':row.status},memberStatus(row.status))),element('dl',{class:'members-facts'},...facts.map(([label,value])=>memberFact(label,value))),element('div',{class:'members-actions'},...decisions.map(name=>button(memberActions[name][0],()=>confirmMember(view,row,name),name==='ban'?'quiet-button members-danger':'quiet-button')))),usage);
+   if(view.usage?.uid===row.uid)renderUsage(usage,row,view.usage.usage,view.usage.uploads);else void loadUsage(view,row,usage);
+  }
+  function choose(uid){const next=view.rows.some(row=>row.uid===uid)?uid:'';if(next===view.selected)return;view.selected=next;view.notice='';notice.textContent='';notice.hidden=true;fill();show();}
+  search.addEventListener('input',()=>{if(!live())return;view.query=String(search.value||'').slice(0,200);fill();});
+  picker.addEventListener('change',()=>{if(live())choose(picker.value);});
+  // Invites: create (the backend returns an existing active invite for the same email), copy the link and message, revoke.
+  const inviteEmail=input('name@example.com','','email');inviteEmail.setAttribute('aria-label','Email to invite');inviteEmail.setAttribute('maxlength','254');
+  const inviteResult=element('div',{class:'members-invite-result',role:'status'});
+  async function copy(text,node,what){
+   const current=live;
+   try{if(typeof navigator==='undefined'||typeof navigator.clipboard?.writeText!=='function')throw new Error('Clipboard unavailable.');await navigator.clipboard.writeText(text);if(current())status(what+' copied.');}
+   catch{if(!current())return;try{node.focus();node.select();}catch{/* selection is best effort */}status(`Copy is unavailable here. The ${what.toLowerCase()} is selected; copy it yourself.`);}
+  }
+  function inviteOutput(){
+   const nodes=[];
+   if(view.inviteNotice)nodes.push(element('p',{},view.inviteNotice));
+   if(view.invite){
+    const email=String(view.invite.email||''),link=inviteLink(),message=`You're invited to Echo Prime. Create an account at ${link} with ${email}, then confirm the verification email. Google sign-in works only if you already have an Echo account.`;
+    const linkField=element('input',{type:'text',readonly:'readonly','aria-label':'Invite link',value:link}),text=element('textarea',{rows:4,readonly:'readonly','aria-label':'Invite message'});text.value=message;
+    nodes.push(element('p',{},view.invite.existing?`An active invite for ${email} already exists. Share the same link.`:`Invite created for ${email}. Share the link and message yourself.`),
+     element('div',{class:'workspace-field'},element('span',{},'Invite link'),element('div',{class:'members-copy'},linkField,button('Copy link',()=>copy(link,linkField,'Invite link')))),
+     element('div',{class:'workspace-field'},element('span',{},'Message to send'),text,element('div',{class:'members-copy'},button('Copy message',()=>copy(message,text,'Invite message')))));
+   }
+   if(view.inviteError){
+    nodes.push(element('p',{class:'members-error'},view.inviteError.message));
+    const match=view.rows.find(row=>row.uid===view.inviteError.uid);
+    if(match)nodes.push(element('div',{class:'members-copy'},button('Open member',()=>{view.inviteError=null;inviteOutput();choose(match.uid);picker.focus();})));
+   }
+   inviteResult.replaceChildren(...nodes);
+  }
+  const create=button('Create invite',async()=>{
+   const address=String(inviteEmail.value||'').trim();
+   if(address.length>254||!inviteEmailPattern.test(address))throw new Error('Enter a valid email address.');
+   let receipt;
+   try{receipt=await api('/auth/invite',{email:address});}
+   catch(error){
+    // Only a 409 means the email already has an account; it is offered as "Open member" when it is in the list read
+    // above. The uid the 409 names wins (the Workspace matches casefolded emails); the listed email is the fallback for
+    // a 409 without one (a banned email). Any other refusal or a transport failure offers nothing to open.
+    if(live()){const lower=address.toLowerCase(),match=error?.status!==409?null:view.rows.find(row=>typeof error.uid==='string'&&row.uid===error.uid)||view.rows.find(row=>String(row.email||'').toLowerCase()===lower);view.invite=null;view.inviteNotice='';view.inviteError={message:error instanceof Error?error.message:'The invite was not created.',uid:match?.uid||''};inviteOutput();}
+    throw error;
+   }
+   const invite=receipt?.invite&&typeof receipt.invite==='object'?receipt.invite:{};
+   membersCarry={select:view.selected,query:view.query,filter:view.filter,invite:{email:typeof invite.email==='string'?invite.email:address,existing:receipt?.existing===true}};
+   await open('members');
+  },'quiet-button members-primary');
+  const invites=view.invitesError?element('p',{class:'members-error'},'Invites are unavailable: '+view.invitesError):!view.invites.length?element('p',{class:'members-hint'},'No invites yet.'):
+   element('ul',{class:'members-invites'},...view.invites.map(item=>element('li',{class:'members-invite'},element('span',{class:'members-email'},String(item.email||'')),element('span',{class:'members-badge','data-status':item.status},memberStatus(item.status)),element('small',{},`Created ${memberWhen(item.created)} · ${item.status==='used'?'used '+memberWhen(item.used_at):'expires '+memberWhen(item.expires)}`),item.status==='active'?button('Revoke',()=>confirmRevoke(view,item),'quiet-button members-danger'):null)));
+  content.replaceChildren(
+   element('article',{class:'workspace-card-content members-card'},element('h3',{},'Members'),
+    element('div',{class:'members-counts'},...memberStatuses.map(name=>element('span',{class:'members-count','data-status':name},memberStatus(name)+' ',element('strong',{},memberNumber(view.counts[name]))))),
+    view.truncated?element('p',{class:'members-fine'},'Showing the newest 500 accounts.'):null,notice,
+    element('div',{class:'members-toolbar'},field('Search',search),element('div',{class:'members-chips',role:'group','aria-label':'Filter by status'},...chips)),
+    field('Member',picker)),
+   detail,
+   element('article',{class:'workspace-card-content members-invite-card'},element('h3',{},'Invite a member'),element('p',{},'An invite pre-approves one email address for 14 days. Nothing is emailed from here: copy the link and message and send them yourself.'),field('Email address',inviteEmail),element('div',{class:'members-copy'},create),inviteResult,element('h4',{class:'members-subhead'},'Invites'),invites));
+  press();fill();show();inviteOutput();
+ }
+ async function loadUsage(view,row,host){
+  const token=++membersUsage,epoch=state.epoch,panel=state.panel,accountEpoch=state.accountEpoch;
+  const [usage,uploads]=await Promise.allSettled([api('/auth/usage',{uid:row.uid}),memberUploads(row.uid)]);
+  if(token!==membersUsage||epoch!==state.epoch||panel!==state.panel||accountEpoch!==state.accountEpoch||view.selected!==row.uid)return;
+  view.usage={uid:row.uid,usage,uploads};renderUsage(host,row,usage,uploads);
+ }
+ function renderUsage(host,row,usage,uploads){
+  const up=uploads.status==='fulfilled'?uploads.value:null,reason=result=>result.reason instanceof Error?result.reason.message:'no response.';
+  const uploadText=!up?'Unavailable: '+reason(uploads):up.configured===false?'Not enabled on this host':`${memberPlural(up.count,'file','files')} · ${memberBytes(up.bytes)}`;
+  const nodes=[element('h3',{},'Usage')];
+  if(usage.status!=='fulfilled'){nodes.push(element('p',{},'Usage is unavailable: '+reason(usage)),element('dl',{class:'members-facts'},memberFact('Uploads',uploadText)));host.replaceChildren(...nodes);return;}
+  const value=usage.value&&typeof usage.value==='object'?usage.value:{},w=value.workspace&&typeof value.workspace==='object'?value.workspace:{};
+  if(w.exists===false)nodes.push(element('p',{},`${row.email||row.uid} has not opened their private Workspace yet.`),element('dl',{class:'members-facts'},memberFact('Storage',memberBytes(w.storage_bytes)),memberFact('Uploads',uploadText)));
+  else{
+   const tools=Object.entries(w.tool_calls&&typeof w.tool_calls==='object'?w.tool_calls:{}).filter(([,n])=>Number(n)>0).sort((a,b)=>Number(b[1])-Number(a[1])).slice(0,10).map(([name,n])=>`${name} ${memberNumber(n)}`).join(' · ');
+   nodes.push(element('dl',{class:'members-facts'},memberFact('Chats',memberNumber(w.chats)),memberFact('Messages sent',memberNumber(w.messages_sent)),memberFact('Replies',memberNumber(w.replies)),memberFact('Characters sent',memberNumber(w.chars_sent)),memberFact('Projects',memberNumber(w.projects)),memberFact('Library items',memberNumber(w.library_items)),memberFact('Top tools',tools||'None'),memberFact(w.tokens_approximate===false?'Model tokens':'Model tokens (approx.)',memberNumber((Number(w.model_prompt_tokens)||0)+(Number(w.model_completion_tokens)||0))),memberFact('Storage',memberBytes(w.storage_bytes)),memberFact('Uploads',uploadText)));
+  }
+  const unavailable=(Array.isArray(value.unavailable)?value.unavailable:[]).filter(item=>typeof item==='string').map(item=>memberFeatures[item]||item.replace(/_/g,' '));
+  if(unavailable.length)nodes.push(element('p',{class:'members-fine'},'Not available for members: '+unavailable.join(', ')));
+  nodes.push(element('p',{class:'members-fine'},`Counts only, read ${memberWhen(value.generated_at)}${value.cached===true?' (cached up to a minute)':''}.`));
+  host.replaceChildren(...nodes);
+ }
+ function confirmMember(view,row,name){
+  const [,title,consequence]=memberActions[name],email=row.email||row.uid;
+  content.replaceChildren(element('article',{class:'workspace-card-content members-confirm','data-decision':name},element('h3',{},title),element('p',{class:'members-confirm-who'},email),element('p',{},consequence),element('p',{class:'members-fine'},'Exact account: '+row.uid),element('div',{class:'members-actions'},
+   button('Confirm',async()=>{
+    const receipt=await api('/auth/decide',{uid:row.uid,decision:name}),revoked=Number.isFinite(receipt?.revoked)?receipt.revoked:0;
+    const notice=name==='kick'?signedOut(revoked):name==='ban'?`Banned ${email}. ${signedOut(revoked)}`:name==='unban'?`Unbanned ${email}.`:`Account decision returned: ${typeof receipt?.user?.status==='string'?receipt.user.status:'read the current status above'}.`;
+    membersCarry={select:row.uid,query:view.query,filter:view.filter,notice};await open('members');
+   },name==='ban'?'quiet-button members-danger':'quiet-button'),
+   button('Cancel',()=>renderMembers(view)))));
+ }
+ function confirmRevoke(view,item){
+  const email=String(item.email||'this email');
+  content.replaceChildren(element('article',{class:'workspace-card-content members-confirm','data-decision':'revoke'},element('h3',{},'Revoke this invite?'),element('p',{class:'members-confirm-who'},email),element('p',{},'The invite stops pre-approving this email now. Anyone who signs up with it afterwards waits for your approval.'),element('div',{class:'members-actions'},
+   button('Confirm',async()=>{await api('/auth/invite/revoke',{id:item.id});membersCarry={select:view.selected,query:view.query,filter:view.filter,inviteNotice:`Invite for ${email} revoked.`};await open('members');},'quiet-button members-danger'),
+   button('Cancel',()=>renderMembers(view)))));
+ }
  let authBusy=false;
  async function auth(operation,body){if(authBusy)throw new Error('Wait for the current account request.');authBusy=true;const epoch=state.epoch,panel=state.panel;try{const value=await transport.auth(operation,body,state.controller.signal);if(epoch!==state.epoch||panel!==state.panel)throw new Error('Account view changed; response discarded.');return value;}finally{authBusy=false;}}
  let logoutBusy=false;
@@ -630,7 +799,10 @@
    const identity=element('div',{class:'signin-identity'},element('span',{class:'signin-avatar','aria-hidden':'true'},initialsOf(session)),element('div',{},element('h3',{},name,element('span',{class:'signin-role-badge'},roleOf(session))),user.email&&user.email!==name?element('p',{class:'signin-email'},String(user.email)):null));
    const card=element('article',{class:'signin-card signed-in'},signinBrand(),identity,element('p',{class:'signin-lead'},user.status==='approved'?'Your private Workspace is available.':'Account status: '+user.status),user.status==='pending'?element('p',{class:'signin-fine'},'The primary owner approves new accounts. Your private Workspace opens once approved.'):null,button('Sign out',signOut));
    content.append(card);
-   if(session.ownerAccess){const value=await api('/auth/accounts');for(const member of (value.accounts||[]).slice(0,200)){if(member.role==='owner')continue;section(member.email||'Member account',element('p',{},'Status: '+member.status),button('Approve account',()=>decision(member,'approve')),button('Deny account',()=>decision(member,'deny')));}}
+   // Owner: Members manages every account (select, usage, kick, ban, invites); this view keeps the approvals exactly as
+   // before: Approve and Deny on every account, so a mistaken Deny is undone here. Only a banned account is left out
+   // (it must be unbanned in Members first); it is dropped before the 200 limit so it never hides an older account.
+   if(session.ownerAccess){section('Members',element('p',{},'Select a member to see their usage, sign them out, ban or unban them, and invite new members.'),button('Manage members',()=>open('members')));const value=await api('/auth/accounts');for(const member of (value.accounts||[]).filter(member=>member&&member.role!=='owner'&&member.status!=='banned').slice(0,200)){section(member.email||'Member account',element('p',{},'Status: '+member.status),button('Approve account',()=>decision(member,'approve')),button('Deny account',()=>decision(member,'deny')));}}
    return;
   }
   // Anonymous: one centred card. Google Identity Services renders its own button (an iframe) into `slot`; Prime only
@@ -639,8 +811,9 @@
   const slot=element('div',{class:'signin-google-slot'}),googleStatus=element('p',{class:'signin-google-status',role:'status'}),googleWrap=element('div',{class:'signin-google','data-state':'loading'},slot,googleStatus);
   const retry=button('Retry Google sign-in',()=>google());retry.hidden=true;googleWrap.append(retry);
   const alt=element('details',{class:'signin-alt'},element('summary',{},'Use email or an existing account instead'),field('Email / user ID',email),field('Password',password),button('Sign in',async()=>{const body={email:email.value.trim(),password:password.value};password.value='';try{await auth('login',body);await accountRefresh();}finally{body.password='';password.value='';}}),field('Display name · new accounts',name),button('Create account',async()=>{const body={email:email.value.trim(),password:password.value,display_name:name.value};password.value='';try{const result=await auth('signup',body);status(result.message||'Signup returned. Verify your email and wait for owner approval.');}finally{body.password='';password.value='';}}),button('Forgot password?',async()=>{const address=email.value.trim();if(!address.includes('@'))throw new Error('Enter your email address first.');status((await auth('reset',{email:address})).message||'Recovery request returned.');}));
-  const intent=accountIntent;accountIntent=null;const signup=intent==='signup';
-  const card=element('article',{class:'signin-card','data-intent':signup?'signup':false},signinBrand(),element('h3',{},signup?'Request access to Echo Prime':'Sign in to Echo Prime'),element('p',{class:'signin-lead'},signup?'Continue with Google or create an account below. The primary owner approves each new member before the private Workspace opens.':'One sign-in opens your private Workspace: saved conversations, projects, files and memories, on every device.'),googleWrap,
+  // 'invite' is the request-access path opened by an owner's `#invite` link, with a short note on top.
+  const intent=accountIntent;accountIntent=null;const invited=intent==='invite',signup=intent==='signup'||invited;
+  const card=element('article',{class:'signin-card','data-intent':signup?'signup':false},signinBrand(),element('h3',{},signup?'Request access to Echo Prime':'Sign in to Echo Prime'),invited?element('p',{class:'signin-invited',role:'note'},"You've been invited. Create an account below with the email address your invitation names and confirm the verification email; the invitation approves the account when you first sign in."):null,element('p',{class:'signin-lead'},signup?'Continue with Google or create an account below. The primary owner approves each new member before the private Workspace opens.':'One sign-in opens your private Workspace: saved conversations, projects, files and memories, on every device.'),googleWrap,
    element('div',{class:'signin-roles'},element('div',{class:'signin-role'},element('strong',{},'Members'),'A private Workspace of your own. Nothing is shared with other accounts.'),element('div',{class:'signin-role'},element('strong',{},'Primary owner'),'Also operates the fleet: SDK, Vault, ESH shell, logs and node Stewards.')),
    alt,element('p',{class:'signin-fine'},'New accounts wait for owner approval. ',element('a',{href:'/privacy.html'},'Privacy'),' · No password or token is kept in this browser.'));
   if(signup){alt.open=true;}
@@ -684,11 +857,12 @@
   const session=await transport.loadSession();if(session?.authenticated&&session.user.status==='approved')await refresh();await open('account');
  }
  async function open(view){
-  await ready;state.panel++;clearFields();endConversation();stopAudio();content.replaceChildren();status('');$('#workspace-panel-title').textContent=({projects:'Projects',library:'Files & journals',memory:'Memory',plugins:'MCP connections',voice:'Voice & personality',operations:'Tools & diagnostics',account:'Your account'})[view]||'Your Workspace';
+  await ready;state.panel++;clearFields();endConversation();stopAudio();content.replaceChildren();status('');$('#workspace-panel-title').textContent=({projects:'Projects',library:'Files & journals',memory:'Memory',plugins:'MCP connections',voice:'Voice & personality',operations:'Tools & diagnostics',account:'Your account',members:'Members'})[view]||'Your Workspace';
   if(!dialog.open)dialog.showModal();
   if(!state.enabled){status('A reviewed authenticated Workspace backend is not configured for this local Prime host.');return;}
   const epoch=state.epoch,panel=state.panel;
-  try{if(view!=='account'){await refresh();if(epoch!==state.epoch||panel!==state.panel)return;}await ({projects,library,memory,plugins,voice,operations,account}[view]||account)();}catch(error){if(epoch===state.epoch&&panel===state.panel)status(error.message);}
+  // Account and Members read only their own routes; neither needs (or may trigger) a private /state read.
+  try{if(view!=='account'&&view!=='members'){await refresh();if(epoch!==state.epoch||panel!==state.panel)return;}await ({projects,library,memory,plugins,voice,operations,account,members}[view]||account)();}catch(error){if(epoch===state.epoch&&panel===state.panel)status(error.message);}
  }
  async function ownerHeaders(){
   await ready;if(!state.enabled)return {};
@@ -719,6 +893,13 @@
    return state.enabled;
   }catch{status('Workspace connection is unavailable. No automatic retry or alternate account was used.');return false;}
  })();
+ // An owner's invitation link is `<origin>/#invite`. For a signed-out visitor it opens the request-access card with a
+ // short note. The fragment carries no data and leaves the address bar as soon as it is read.
+ void ready.then(enabled=>{
+  const here=typeof location==='object'&&location?location:null;if(here?.hash!=='#invite')return;
+  try{if(typeof history==='object'&&typeof history?.replaceState==='function')history.replaceState(null,'',String(here.pathname||'/')+String(here.search||''));}catch{/* the note still opens */}
+  if(enabled&&transport.session?.authenticated!==true)void openAccount('invite');
+ });
  // Narrow facade for the composer, voice bar and plugins view. It deliberately
  // omits the CSRF proof, transport and request headers.
  async function haltSpeech(){const speech=state.speech;stopAudio();if(speech?.session_id)await api('/voice/cancel',speech);}

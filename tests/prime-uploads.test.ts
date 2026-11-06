@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';
-import {mkdtempSync,readdirSync,rmSync,writeFileSync} from 'node:fs';
+import {mkdirSync,mkdtempSync,readdirSync,rmSync,writeFileSync} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, request as httpRequest, type Server } from 'node:http';
@@ -1024,5 +1024,95 @@ describe('Prime streaming uploads & hygiene', () => {
   const dl = await fetch(`${url}/api/prime/artifacts/${art.id}/file?download=1`, { headers: { cookie } });
   expect(dl.status).toBe(200);
   expect(await dl.text()).toContain('# Build Output');
+ });
+});
+
+// Members view (PRIME_MEMBERS_CONTRACT.md): the owner reads one account's upload count and bytes. The store derives the
+// account folder itself (safeAccountSegment), reads only meta.json, and returns no names, ids, tags or contents.
+describe('owner-only member upload usage', () => {
+ async function membersFixture() {
+  const root = makeTempDir('members-up-');
+  const uiDir = makeTempDir('members-ui-');
+  writeFileSync(join(uiDir, 'index.html'), '<html>Prime</html>');
+  const sessions: Record<string, { uid: string; role: string; status: string; csrf: string }> = {
+   owner_tok: { uid: 'owner-1', role: 'owner', status: 'approved', csrf: 'csrf-owner-1234' },
+   member_tok: { uid: 'member-2', role: 'member', status: 'approved', csrf: 'csrf-member-5678' },
+   oauth_tok: { uid: 'oauth:member@example.test', role: 'member', status: 'approved', csrf: 'csrf-oauth-0000' },
+  };
+  const wsBackend: Server = createServer((req, res) => {
+   const cookie = req.headers.cookie || '';
+   res.writeHead(req.url === '/api/auth/session' ? 200 : 404, { 'content-type': 'application/json' });
+   if (req.url !== '/api/auth/session') { res.end('{}'); return; }
+   const key = Object.keys(sessions).find(k => cookie.includes(k));
+   const s = key ? sessions[key] : undefined;
+   res.end(JSON.stringify(s ? { authenticated: true, user: { uid: s.uid, role: s.role, status: s.status }, csrf: s.csrf } : { authenticated: false, user: null, csrf: null }));
+  });
+  await new Promise<void>(r => wsBackend.listen(0, '127.0.0.1', () => r()));
+  closers.push(() => new Promise<void>(r => wsBackend.close(() => r())));
+  const baseUrl = `http://127.0.0.1:${(wsBackend.address() as { port: number }).port}`;
+  const store = new UploadStore(parseUploadsConfig({ root }));
+  const srv = await startPrimeServer(new PrimeHub({ capabilities: [], uploads: store }), uiDir, 0, { workspace: { baseUrl, ownerUid: 'owner-1' }, uploads: store });
+  closers.push(srv.close);
+  const primeCookie = (await fetch(srv.url)).headers.get('set-cookie')!.split(';')[0];
+  const as = (tok: string) => ({ cookie: `${primeCookie}; echo_workspace_session=${(tok + '_').padEnd(36, 'z')}`, origin: srv.url, 'x-prime-request': '1', 'x-echo-csrf': sessions[tok].csrf });
+  const upload = async (tok: string, type: string, name: string, body: Buffer | string) => {
+   const res = await fetch(`${srv.url}/api/prime/uploads`, { method: 'POST', headers: { ...as(tok), 'content-type': type, 'x-upload-filename': name }, body });
+   expect(res.status).toBe(201);
+   return res.json();
+  };
+  const members = (headers: Record<string, string>, body: unknown) => fetch(`${srv.url}/api/prime/members/uploads`, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' }, body: typeof body === 'string' ? body : JSON.stringify(body) });
+  return { srv, store, root, baseUrl, uiDir, primeCookie, as, upload, members };
+ }
+
+ it('counts one account’s uploads and bytes for the primary owner only, from metadata, without names or ids', async () => {
+  const f = await membersFixture();
+  const pdf = await f.upload('member_tok', 'application/pdf', 'PRIVATE-handbook.pdf', makeMinimalPdf(['Quarterly Revenue 42M']));
+  const png = await f.upload('member_tok', 'image/png', 'PRIVATE-chart.png', makeValidPng(16, 16));
+  const own = await f.upload('owner_tok', 'text/plain', 'owner-notes.txt', 'owner private notes');
+  const oauth = await f.upload('oauth_tok', 'text/plain', 'oauth.txt', 'hashed account folder');
+  // An artifact and an in-flight temp folder in the member's account folder are not uploads.
+  const art = await fetch(`${f.srv.url}/api/prime/artifacts`, { method: 'POST', headers: { ...f.as('member_tok'), 'content-type': 'application/json' }, body: JSON.stringify({ title: 'Summary', kind: 'code', type: 'text/markdown', content: '# x', provenance: { source: 'build' } }) });
+  expect(art.status).toBe(201);
+  expect(readdirSync(f.root)).toContain('member-2');
+  const tmp = join(f.root, 'member-2', '.tmp_in-flight');
+  mkdirSync(tmp);
+  writeFileSync(join(tmp, 'meta.json'), JSON.stringify({ id: 'upl_' + '0'.repeat(32), owner: 'member-2', bytes: 999999 }));
+
+  const res = await f.members(f.as('owner_tok'), { uid: 'member-2' });
+  expect(res.status).toBe(200);
+  const body = await res.json();
+  expect(body).toEqual({ count: 2, bytes: pdf.bytes + png.bytes });
+  expect(JSON.stringify(body)).not.toMatch(/PRIVATE|upl_|handbook|chart/);
+  expect(await (await f.members(f.as('owner_tok'), { uid: 'oauth:member@example.test' })).json()).toEqual({ count: 1, bytes: oauth.bytes });
+  expect(await (await f.members(f.as('owner_tok'), { uid: 'owner-1' })).json()).toEqual({ count: 1, bytes: own.bytes });
+  expect(await (await f.members(f.as('owner_tok'), { uid: 'never-uploaded' })).json()).toEqual({ count: 0, bytes: 0 });
+  expect(readdirSync(f.root)).not.toContain('never-uploaded');// counting never creates an account folder
+ });
+
+ it('refuses members, anonymous visitors, a missing CSRF, other methods and any body but one valid uid', async () => {
+  const f = await membersFixture();
+  await f.upload('member_tok', 'text/plain', 'm.txt', 'member doc');
+  const member = await f.members(f.as('member_tok'), { uid: 'member-2' });
+  expect(member.status).toBe(403);
+  expect(await member.json()).toEqual({ error: 'Primary owner admission required' });
+  expect((await f.members({ cookie: f.primeCookie, origin: f.srv.url, 'x-prime-request': '1' }, { uid: 'member-2' })).status).toBe(401);
+  const { 'x-echo-csrf': _csrf, ...noCsrf } = f.as('owner_tok');
+  expect((await f.members(noCsrf, { uid: 'member-2' })).status).toBe(403);
+  expect((await fetch(`${f.srv.url}/api/prime/members/uploads`, { headers: f.as('owner_tok') })).status).toBe(405);
+  for (const bad of [{}, { uid: '' }, { uid: 7 }, { uid: '../member-2' }, { uid: 'a/b' }, { uid: 'x'.repeat(201) }, { uid: 'member-2', name: 'x' }, { uids: ['member-2'] }]) {
+   const res = await f.members(f.as('owner_tok'), bad);
+   expect(res.status, JSON.stringify(bad)).toBe(400);
+  }
+  expect((await f.members(f.as('owner_tok'), '{not json')).status).toBe(400);
+ });
+
+ it('reports configured:false with zero counts when this Prime host has no uploads section', async () => {
+  const f = await membersFixture();
+  const bare = await startPrimeServer(new PrimeHub({ capabilities: [] }), f.uiDir, 0, { workspace: { baseUrl: f.baseUrl, ownerUid: 'owner-1' } });
+  closers.push(bare.close);
+  const cookie = (await fetch(bare.url)).headers.get('set-cookie')!.split(';')[0];
+  const res = await fetch(`${bare.url}/api/prime/members/uploads`, { method: 'POST', headers: { cookie: `${cookie}; echo_workspace_session=${'owner_tok_'.padEnd(36, 'z')}`, origin: bare.url, 'x-prime-request': '1', 'x-echo-csrf': 'csrf-owner-1234', 'content-type': 'application/json' }, body: JSON.stringify({ uid: 'member-2' }) });
+  expect(res.status).toBe(200);
+  expect(await res.json()).toEqual({ configured: false, count: 0, bytes: 0 });
  });
 });
