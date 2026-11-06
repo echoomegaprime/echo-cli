@@ -115,7 +115,10 @@
  $('#prepare-creative').addEventListener('click',async()=>{
   if(!selected){result.textContent='Select a capability first.';return;}
   const current=generation,version=revision;
-  try{const prepared=await api('prepare',{target:'sdk',name:selected.id,arguments:JSON.parse($('#creative-arguments').value)});if(current!==generation||version!==revision)return;ticket=prepared;$('#request-review').textContent=JSON.stringify(ticket.request,null,2);$('#request-cost').textContent=ticket.cost+' Required scope: '+(ticket.scope||'owner-defined');$('#execute-request').disabled=false;$('#review-dialog').showModal();debug('prepare','returned');}catch(e){if(current===generation&&version===revision){ticket=null;fail(e);}}
+  const preparing=selected.id;
+  try{const prepared=await api('prepare',{target:'sdk',name:selected.id,arguments:JSON.parse($('#creative-arguments').value)});if(current!==generation||version!==revision)return;ticket=prepared;$('#request-review').textContent=JSON.stringify(ticket.request,null,2);$('#request-cost').textContent=ticket.cost+' Required scope: '+(ticket.scope||'owner-defined');$('#execute-request').disabled=false;$('#review-dialog').showModal();debug('prepare','returned');}catch(e){if(current===generation&&version===revision){ticket=null;fail(e);
+   // The auto-router offers the next-best tool when the review refuses its pick; it never re-prepares by itself.
+   try{window.dispatchEvent(new CustomEvent('echo-studio-executed',{detail:{state:'refused',detail:String(e instanceof Error?e.message:'Review refused').slice(0,600),name:preparing,requestId:null}}));}catch{}}}
  });
  $('#execute-request').addEventListener('click',async()=>{
   if(!ticket||submitting)return;submitting=true;$('#execute-request').disabled=true;const current=ticket,epoch=generation;ticket=null;
@@ -123,7 +126,10 @@
   // The auto-router listens for this to offer the next-best tool after a failure; it never resubmits by itself.
   const executed=(state,detail)=>{try{window.dispatchEvent(new CustomEvent('echo-studio-executed',{detail:{state,detail:String(detail||'').slice(0,600),name:current.request.name,requestId:current.requestId}}));}catch{}};
   try{const r=await api('execute',{id:current.id,digest:current.digest});if(epoch===generation){
-   result.textContent=JSON.stringify(r,null,2);debug('execute','returned');executed(r.state,r.detail);
+   result.textContent=JSON.stringify(r,null,2);debug('execute','returned');
+    // A provider body that says it failed (ok:false or an error string) counts as a failure for the router's next-best offer.
+    const body=r&&r.result&&typeof r.result==='object'&&!Array.isArray(r.result)?r.result:null,failed=r?.state==='returned'&&!!body&&(body.ok===false||typeof body.error==='string');
+    executed(failed?'failed':r.state,failed?String(body.error||body.detail||'provider reported a failure'):r.detail);
    if(typeof window.EchoPrimeArtifacts?.register==='function'&&r?.state!=='blocked'&&r?.state!=='uncertain'){
     const reqArgs=current.request?.arguments||{},reqOpts=reqArgs.options||{},cat=selected?.category||'other';
     const artKind=['image','video','music','sound','voice'].includes(cat)?cat:'other';
@@ -148,7 +154,7 @@
  window.EchoPrimeStudio={open,addInput:addStudioInput,inputs:()=>studioInputs.map(i=>({...i})),
    /** Auto-router hooks: select a listed capability by id, or select it and set the exact request the router prepared. */
    select(id){const c=catalog.find(x=>x.id===id);if(c)choose(c);return !!c;},
-   apply(pick){const c=pick&&catalog.find(x=>x.id===pick.id);if(!c)return false;choose(c);if(pick.arguments&&typeof pick.arguments==='object'&&!Array.isArray(pick.arguments))$('#creative-arguments').value=JSON.stringify(pick.arguments,null,2);return true;},
+   apply(pick){const c=pick&&catalog.find(x=>x.id===pick.id);if(!c)return false;choose(c);if(pick.arguments&&typeof pick.arguments==='object'&&!Array.isArray(pick.arguments))$('#creative-arguments').value=JSON.stringify({...pick.arguments,...(studioInputs.length?{inputs:studioInputs.map(i=>({upload_id:i.upload_id,role:i.role}))}:{})},null,2);return true;},
    catalog(){return catalog.slice();},
    selected(){return selected?{id:selected.id,category:selected.category}:null;},
   };renderStudioInputs();models();render();

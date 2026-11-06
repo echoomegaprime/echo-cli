@@ -21,11 +21,14 @@
 .media-alternative small{grid-column:1/-1;font-size:11px;color:#8fa79d;line-height:1.5}
 .media-failure{border-top:1px solid #4a3030;padding-top:10px;font-size:12px;color:#e2b9b9;line-height:1.55;display:grid;gap:8px}
 .media-failure[hidden]{display:none}
+.media-failure .media-uncertain{color:#f0dd9d}
 .media-excluded{margin:0;padding:0;list-style:none;font-size:11px;color:#86a095;display:grid;gap:3px}
 .enhance-wrap{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
 .enhance-button{display:inline-flex;align-items:center;gap:6px;border:1px solid #456e5b;background:#172b22;border-radius:7px;padding:8px 11px;font-size:11px;color:#d5efdf;white-space:nowrap}
 .enhance-button:disabled{opacity:.55}
-.enhance-provider{max-width:160px;font-size:10px;padding:7px 8px}
+.enhance-spark{width:13px;height:13px;flex:none;fill:none;stroke:currentColor;stroke-width:1.8;color:#9df0c7}
+/* The provider chip: which model enhances (Claude, GPT, Gemini, Grok or Qwen); unavailable providers are listed but disabled. */
+.enhance-provider{max-width:160px;font-size:10px;padding:6px 10px;border:1px solid #31483e;border-radius:999px;background:#0e1f1a;color:#cfe7dc}
 .enhance-undo{display:inline-flex;border:1px solid #6b5a3a;background:#2b2419;border-radius:6px;padding:6px 9px;font-size:10px;color:#f0dd9d}
 .enhance-undo[hidden]{display:none}
 .enhance-note{display:block;width:100%;font-size:11px;color:#9fbfb3;line-height:1.55;margin:8px 0 0}

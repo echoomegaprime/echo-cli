@@ -34,12 +34,13 @@ export const MEDIA_MAX_TEXT=12000;
 type Rule=[RegExp,number,string];
 const KIND_RULES:Record<Exclude<MediaKind,'chat'>,Rule[]>={
  // An edit needs an existing image: edit verbs on "this/my photo", or a reference to the user's own picture, outweigh the bare image noun.
+ // The image verbs skip noun uses ("this rough sketch", "a paint"), so a reference to the user's own sketch is not also counted as a request to draw one.
  'image-edit':[[/\b(?:edit|retouch|inpaint|outpaint|remove the background|replace the (?:sky|background)|change the (?:colou?r|background) of (?:this|the|my) (?:image|photo|picture)|(?:this|my) (?:image|photo|picture|screenshot|scan)\b.*\b(?:make it|turn it|change|remove|replace|add|crop|sharper|cleaner)|upscale (?:this|the|my) (?:image|photo|picture)|img2img|image[- ]to[- ]image)\b/i,1.5,'edit-verb'],[/\b(?:this|my) (?:rough |old |existing )?(?:sketch|drawing|photo|image|picture|screenshot|scan|render)\b/i,1.2,'own-image']],
  video:[[/\b(?:video|clip|footage|b-roll|reels?|trailer|animate|animation|animated|timelapse|time-lapse|slow[- ]motion|camera (?:pans?|tracks?|dolly|orbits?|rises?|pushes?|pulls?)|dolly|drone shot|fps|frames?|text[- ]to[- ]video|t2v|i2v)\b/i,1,'video-noun'],[/\b(?:shot|sequence|loop)\b.*\b(?:rising|moving|flying|panning|tracking|zooming|orbiting|following|drifting|rolling|falling|gathering)\b|\b(?:seamless|cinematic|video) loop\b/i,0.9,'motion-shot'],[/\b(?:\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten|fifteen|twenty|thirty|forty-five|sixty)[- ]?(?:s|sec|secs|second|seconds)\b/i,0.6,'duration']],
  music:[[/\b(?:song|track|beat|melody|chorus|verse|bpm|instrumental|soundtrack|jingle|score|riff|bassline|synthwave|lo-?fi|hip[- ]?hop|techno|house music|jazz|orchestral|symphony|ballad|anthem|theme music|background music|compose (?:a|some|me)?\s*(?:music|song|track))\b/i,1,'music-noun'],[/\bmusic\b/i,0.8,'music']],
  sfx:[[/\b(?:sound effects?|sfx|foley|whoosh|swoosh|impact sound|explosion sound|ambien(?:ce|t)(?: (?:sound|noise|loop|bed))?|footsteps|door (?:creak|slam)|creak|rain sounds?|thunder sound|ui sound|notification sound|click sound|chimes?|the sound of)\b/i,1,'sfx-noun'],[/\b(?:sound|noise)\b(?!track)/i,0.5,'sound']],
  voice:[[/\b(?:say|read (?:this|it|the following|aloud)|read aloud|narrat(?:e|ion|or)|voice[- ]?over|text[- ]to[- ]speech|tts|speak|spoken|announce|in (?:a|the) (?:calm |warm |deep |soft )?voice|voice line)\b/i,1,'voice-verb'],[/\bvoice\b/i,0.6,'voice']],
- image:[[/\b(?:image|picture|photo(?:graph)?|illustration|poster|logo|portrait|render(?:ing)?|wallpaper|icon|painting|sketch|drawing|artwork|concept art|thumbnail|banner|mockup|packshot|product shot|headshot|avatar|emblem|infographic|comic panel|pixel art|watercolou?r|oil painting|digital art|still)\b/i,1,'image-noun'],[/\b(?:draw|paint|sketch|illustrate|depict|visuali[sz]e|design a logo|generate art)\b/i,0.8,'image-verb'],[/\b(?:4k|8k|dslr|35mm|50mm|85mm|bokeh|f\/\d|golden hour|studio lighting|rim light|wide[- ]angle|macro shot)\b/i,0.6,'photo-craft'],[/^(?:a|an|the|two|three|some)\s+\w+/i,0.45,'scene-phrase']],
+ image:[[/\b(?:image|picture|photo(?:graph)?|illustration|poster|logo|portrait|render(?:ing)?|wallpaper|icon|painting|sketch|drawing|artwork|concept art|thumbnail|banner|mockup|packshot|product shot|headshot|avatar|emblem|infographic|comic panel|pixel art|watercolou?r|oil painting|digital art|still)\b/i,1,'image-noun'],[/(?<!\b(?:this|my|the|a|an|your|our|rough|old|existing|pencil|quick)\s)\b(?:draw|paint|sketch|illustrate|depict|visuali[sz]e|design a logo|generate art)\b/i,0.8,'image-verb'],[/\b(?:4k|8k|dslr|35mm|50mm|85mm|bokeh|f\/\d|golden hour|studio lighting|rim light|wide[- ]angle|macro shot)\b/i,0.6,'photo-craft'],[/^(?:a|an|the|two|three|some)\s+\w+/i,0.45,'scene-phrase']],
 };
 const CHAT_RULES:Rule[]=[[/\b(?:explain|what is|what are|what's|who is|where is|when did|how do|how does|how to|how can|why (?:is|does|do|did)|summari[sz]e|compare|list the|tell me|write (?:a|an|the|me)?\s*(?:\w+\s){0,2}(?:function|code|script|email|essay|poem|story|summary|plan|regex|query|test)|debug|fix (?:this|the) (?:bug|error|code)|translate (?:this|the following)|calculate|define|does this|is this|can you (?:check|explain|review))\b/i,1,'chat-verb'],[/\?\s*$/,0.6,'question-mark']];
 /** Negated media words ("no music", "without vocals", "no titles") must not vote for the thing they exclude. */
@@ -329,7 +330,7 @@ export function describeCandidate(c:Capability):Candidate|null{
  if(c.registered===false)candidate.unavailable='not registered';
  else if((HEALTH_WEIGHT[health]??0.6)===0)candidate.unavailable='health '+health+' (the Studio refuses it at review)';
  else if(c.id==='echo.media.video_generate')candidate.unavailable='owner-disabled on TEMPER (RAM budget); this client never force-enables video';
- else if(/-(?:i2v|r2v)\b|I2V|kontext|imagen_edit/i.test(c.id))candidate.unavailable='needs a source image; the Studio has no upload path';
+ else if(/-(?:i2v|r2v)\b|I2V|kontext|imagen_edit/i.test(c.id))candidate.unavailable='needs a source image the capability reads itself; Auto never prepares it from a text-only brief (attach a reference in the Studio and pick it yourself)';
  return candidate;
 }
 export interface RankOptions {text:string;styles?:StyleCue[];aspect?:Aspect;durationSeconds?:number}
@@ -355,7 +356,9 @@ export function rankCandidates(kind:MediaKind,catalog:Capability[],options:RankO
 }
 
 // ---- router ----------------------------------------------------------------------------------------------------------
-export interface MediaPick {id:string;label:string;provider:string;reason:string;health:string;healthSource:Candidate['healthSource'];cost:CostTier;costNote:string;quality:number;speed:number;score:number;argumentShape:Candidate['argumentShape'];note:string;request:{target:'sdk';name:string;arguments:Json}}
+export interface MediaPick {id:string;
+ /** The SDK capability id (same as `id`; the contract name the UI and docs use). */
+ cap:string;label:string;provider:string;reason:string;health:string;healthSource:Candidate['healthSource'];cost:CostTier;costNote:string;quality:number;speed:number;score:number;argumentShape:Candidate['argumentShape'];note:string;request:{target:'sdk';name:string;arguments:Json}}
 export interface RouteResult {
  classification:Classification;picked:MediaPick|null;alternatives:MediaPick[];excluded:{id:string;label:string;reason:string}[];
  /** Why nothing was picked (chat, image-edit without a source, or no healthy generator for the kind). */
@@ -388,7 +391,7 @@ export class MediaRouter {
  }
  private toPick(c:Candidate,kind:MediaKind,text:string,classification:Classification):MediaPick{
   const built=buildArguments(c.id,kind,text,classification);
-  return {id:c.id,label:c.label,provider:c.provider,reason:'Picked '+c.label+' because '+c.reasons.join(' · '),health:c.health,healthSource:c.healthSource,cost:c.cost,costNote:c.costNote,quality:c.quality,speed:c.speed,score:c.score,argumentShape:c.argumentShape,note:c.note,request:{target:'sdk',name:c.id,arguments:built.arguments}};
+  return {id:c.id,cap:c.id,label:c.label,provider:c.provider,reason:'Picked '+c.label+' because '+c.reasons.join(' · '),health:c.health,healthSource:c.healthSource,cost:c.cost,costNote:c.costNote,quality:c.quality,speed:c.speed,score:c.score,argumentShape:c.argumentShape,note:c.note,request:{target:'sdk',name:c.id,arguments:built.arguments}};
  }
  /** The one entry point. `mode` is a Studio/composer tab ('auto' or a kind); `fallback` says what an unclassifiable prompt means (Studio: image, composer: chat). */
  async route(input:unknown,signal?:AbortSignal):Promise<RouteResult>{
@@ -425,7 +428,7 @@ export class MediaRouter {
   const picks=ranked.candidates.map(c=>this.toPick(c,kind,text,classification));
   const excluded=ranked.excluded.slice(0,8).map(c=>({id:c.id,label:c.label,reason:c.unavailable!}));
   let reason:string|undefined;
-  if(kind==='image-edit')reason='This asks to edit an existing image. The Studio has no image upload path yet, so nothing was prepared; the editing-capable tools are listed for reference.';
+  if(kind==='image-edit')reason='This asks to edit an existing image. Auto does not prepare edits: attach the source image in the Studio (Library → Use in Studio) and pick one of the editing-capable tools listed below yourself. Nothing was prepared.';
   else if(!picks.length)reason='No healthy '+kind+' generator is listed in the catalog right now; nothing was prepared and no other kind was substituted.';
   const picked=kind==='image-edit'?null:picks[0]??null;
   const alternatives=(kind==='image-edit'?picks:picks.slice(1)).slice(0,6);

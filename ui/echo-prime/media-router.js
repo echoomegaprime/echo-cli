@@ -7,6 +7,8 @@
  const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
  const MODE_OF={Chat:'chat',Image:'image',Video:'video',Music:'music','Sound FX':'sfx',Voice:'voice',Auto:'auto'};
  const CATEGORY_MODE={image:'image',video:'video',music:'music',sound:'sfx',voice:'voice',tools:'chat',all:'auto',auto:'auto'};
+ // A Studio medium the user chose becomes a routing hint: Echo still picks the best tool, but only of that kind.
+ const HINT_OF_CATEGORY={image:'image',video:'video',music:'music',sound:'sfx',voice:'voice'};
  const PREFERENCE=['claude','gpt','grok','argon','qwen'];
  const LABELS={qwen:'Qwen',claude:'Claude',gpt:'GPT',grok:'Grok',argon:'Gemini (Argon)'};
  let generation=0,autoMode=false,passthrough=false,composerMode='Chat',report=null,reportState='loading',provider=null,lastRoute=null,routing=null,busy=false;
@@ -15,6 +17,12 @@
   for(const [key,value] of Object.entries(attributes)){if(key==='class')node.className=value;else if(key==='value')node.value=value;else if(value!==false&&value!==undefined&&value!==null)node.setAttribute(key,String(value));}
   for(const child of children.flat(Infinity))if(child!==null&&child!==undefined)node.append(typeof child==='string'?document.createTextNode(child):child);
   return node;
+ }
+ // The sparkle is the page's own #i-spark symbol from the index.html sprite (no emoji font needed).
+ function spark(){
+  if(typeof document.createElementNS!=='function')return null;
+  const ns='http://www.w3.org/2000/svg',svg=document.createElementNS(ns,'svg'),use=document.createElementNS(ns,'use');
+  svg.setAttribute('aria-hidden','true');svg.setAttribute('class','enhance-spark');use.setAttribute('href','#i-spark');svg.append(use);return svg;
  }
  function debug(scope,event,detail){console.debug('[echo.'+scope+']',{schema_version:1,event,...(detail||{})});}
  async function headers(){try{return window.EchoPrimeWorkspace&&window.EchoPrimeWorkspace.ownerHeaders?await window.EchoPrimeWorkspace.ownerHeaders():{};}catch{return {};}}
@@ -59,12 +67,12 @@
    report=data;reportState='ready';
    const available=providers().filter(p=>p.available);
    if(!provider||!available.some(p=>p.id===provider))provider=(PREFERENCE.map(id=>available.find(p=>p.id===id)).find(Boolean)||available[0]||{id:null}).id;
-   debug('enhance','models_loaded',{routing:data.routing===true,available:available.map(p=>p.id),provider});
+   debug('enhance','models_loaded',{configured:data.configured===true,available:available.map(p=>p.id),provider});
   }catch{if(current!==generation)return;report=null;reportState='failed';}
   renderEnhance();
  }
  function providers(){
-  if(!report||report.routing!==true)return [];
+  if(!report||report.configured!==true)return [];
   return report.providers.filter(p=>p&&typeof p.id==='string'&&LABELS[p.id]).map(p=>({id:p.id,label:LABELS[p.id],available:p.available!==false,reason:typeof p.reason==='string'?p.reason:''}));
  }
  function enhanceGate(){
@@ -72,7 +80,7 @@
   if(reportState==='member')return 'Prompt enhancement is available to the primary owner only.';
   if(reportState==='failed')return 'Model status unavailable; nothing is sent to a model until it answers.';
   if(reportState==='loading')return 'Checking models…';
-  if(!report||report.routing!==true)return 'Prompt enhancement needs the reviewed models section of the Prime configuration.';
+  if(!report||report.configured!==true)return 'Prompt enhancement needs the reviewed models section of the Prime configuration.';
   if(!provider)return 'No enhancement provider is available right now; no other model is used.';
   return '';
  }
@@ -80,14 +88,14 @@
  // ---- Enhance control --------------------------------------------------------------------------------------------
  const enhancers=[];
  function mountEnhance(options){
-  const button=el('button',{type:'button',class:'quiet-button enhance-button','data-enhance':options.name,'aria-label':'Enhance prompt'},'✨ Enhance');
+  const label=el('span',{class:'enhance-label'},'Enhance'),button=el('button',{type:'button',class:'quiet-button enhance-button','data-enhance':options.name,'aria-label':'Enhance prompt'},spark(),label);
   const select=el('select',{class:'enhance-provider','data-enhance-provider':options.name,'aria-label':'Enhance with'});
   const undo=el('button',{type:'button',class:'enhance-undo','data-enhance-undo':options.name},'Undo enhance');undo.hidden=true;
   const note=el('small',{class:'enhance-note',role:'status','aria-live':'polite','data-enhance-note':options.name});note.hidden=true;
   const added=el('ul',{class:'enhance-added','data-enhance-added':options.name});added.hidden=true;
   const wrap=el('div',{class:'enhance-wrap'},button,select,undo);
   options.mount(wrap,note,added);
-  const state={options,button,select,undo,note,added,previous:null};
+  const state={options,button,label,select,undo,note,added,previous:null};
   select.addEventListener('change',()=>{if(providers().some(p=>p.id===select.value&&p.available)){provider=select.value;renderEnhance();}});
   button.addEventListener('click',()=>run(state));
   undo.addEventListener('click',()=>{
@@ -107,13 +115,14 @@
    s.select.hidden=!list.length;s.select.disabled=!!gate||busy;
    s.button.disabled=!!gate||busy;
    s.button.title=gate||'Improve this prompt with '+(LABELS[provider]||'the selected model')+'. The text is replaced; nothing is sent.';
-   s.button.textContent=busy&&s.busy?'✨ Enhancing…':'✨ Enhance';
-   if(gate&&!s.previous){s.note.hidden=false;s.note.textContent=gate;}
+   s.label.textContent=busy&&s.busy?'Enhancing…':'Enhance';
+   if(gate&&!s.previous){s.note.hidden=false;s.note.textContent=gate;s.gated=true;}
+   else if(!gate&&s.gated){s.gated=false;s.note.hidden=true;s.note.textContent='';}
   }
  }
  async function run(state){
   if(busy)return;
-  const gate=enhanceGate();if(gate){state.note.hidden=false;state.note.textContent=gate;return;}
+  const gate=enhanceGate();if(gate){state.note.hidden=false;state.note.textContent=gate;state.gated=true;return;}state.gated=false;
   const area=state.options.textarea(),text=area?area.value.trim():'';
   if(!text){state.note.hidden=false;state.note.textContent='Type a prompt first.';return;}
   if(text.length>4000){state.note.hidden=false;state.note.textContent='Enhance takes up to 4,000 characters; shorten the prompt first.';return;}
@@ -152,7 +161,11 @@
  if(tabs){
   tabs.prepend(autoTab);
   for(const b of $$('.mode-tabs button'))if(b!==autoTab)b.addEventListener('click',()=>{composerMode=b.dataset.mode||'Chat';setAuto(false);});
-  autoTab.addEventListener('click',()=>{setAuto(true);if(prompt)prompt.focus();});
+  autoTab.addEventListener('click',()=>{
+   // app.js keeps its own mode; selecting Chat first makes a chat passthrough a plain chat turn, never a Studio open.
+   const chat=$$('.mode-tabs button').find(b=>b.dataset.mode==='Chat');if(chat&&composerMode!=='Chat'&&composerMode!=='Auto')chat.click();
+   setAuto(true);if(prompt)prompt.focus();
+  });
  }
  function notice(text){composerNotice.hidden=!text;composerNotice.textContent=text||'';}
  async function routeFromComposer(form){
@@ -170,7 +183,7 @@
     return;
    }
    notice('');
-   if(window.EchoPrimeStudio&&typeof window.EchoPrimeStudio.open==='function')window.EchoPrimeStudio.open('auto',text,r);
+   r.text=text;r.mode='auto';if(window.EchoPrimeStudio&&typeof window.EchoPrimeStudio.open==='function')window.EchoPrimeStudio.open('auto',text,null,r);
   }catch(error){if(current===generation)notice((error instanceof Error?error.message:'Routing failed')+' Nothing was sent.');}
   finally{if(current===generation)routing=false;}
  }
@@ -195,7 +208,7 @@
  panel.append(status,pickBox,actions,alternatives,failure);
  if(tools)tools.before(panel);
  toggle.addEventListener('click',()=>{alternatives.hidden=!alternatives.hidden;toggle.setAttribute('aria-expanded',String(!alternatives.hidden));});
- repick.addEventListener('click',()=>{void routeInStudio(brief?brief.value.trim():'',null);});
+ repick.addEventListener('click',()=>{void routeInStudio(brief?brief.value.trim():'',null,HINT_OF_CATEGORY[category?category.value:'auto']);});
  const badge=(text,cls)=>el('span',{class:'media-badge'+(cls?' '+cls:'')},text);
  function applyPick(pick,how){
   if(!studio||typeof studio.apply!=='function')return false;
@@ -206,13 +219,14 @@
  function renderPick(r){
   pickBox.replaceChildren();alternatives.replaceChildren();failure.hidden=true;failure.replaceChildren();
   const c=r.classification||{},kind=c.kind||'unknown',sure=Math.round((c.confidence||0)*100);
+  repick.textContent=r.picked?'Pick again for this brief':'Pick the best tool';
   const alts=Array.isArray(r.alternatives)?r.alternatives:[],excluded=Array.isArray(r.excluded)?r.excluded:[];
   if(r.picked){
    const p=r.picked;
    pickBox.hidden=false;
    pickBox.append(el('strong',{},p.label+' · '+p.provider),el('p',{class:'media-reason'},p.reason),
     el('div',{class:'media-badges'},badge(kind+' · '+sure+'% sure'+(c.styles&&c.styles.length?' · '+c.styles.join(', '):'')),badge('health '+p.health+(p.healthSource==='probe'?' (probed)':p.healthSource==='snapshot'?' (snapshot)':''),'health-'+p.health),badge(p.costNote),badge('quality '+p.quality+'/10 · speed '+p.speed+'/10'),...(p.argumentShape==='unmodeled'?[badge('review request details','health-unknown')]:[])));
-   status.textContent='Auto picked a tool for this '+kind+' brief. Review the request below, then submit it yourself; nothing runs until you do.';
+   status.textContent='Echo picked a tool for this '+kind+' brief. Review the request below, then submit it yourself; nothing runs until you do.';
    if(!applyPick(p,'auto'))status.textContent+=' (The tool is not in this catalog view; search the live registry.)';
   }else{
    pickBox.hidden=true;
@@ -227,36 +241,68 @@
   }
   if(excluded.length)alternatives.append(el('ul',{class:'media-excluded'},...excluded.map(x=>el('li',{},x.label+': '+x.reason))));
  }
- async function routeInStudio(text,route){
+ async function routeInStudio(text,route,hint){
   const current=generation;
   panel.hidden=false;
-  if(!text){status.textContent='Type a brief above and Auto picks the best tool for it.';pickBox.hidden=true;alternatives.hidden=true;toggle.hidden=true;failure.hidden=true;return;}
+  if(!text){status.textContent='Type a brief above and Echo picks the best tool for it.';repick.textContent='Pick the best tool';pickBox.hidden=true;alternatives.hidden=true;toggle.hidden=true;failure.hidden=true;return;}
   if(routing&&!route)return;
   if(route){lastRoute=route;renderPick(route);return;}
-  routing=true;status.textContent='Choosing the best tool…';
+  const mode=hint||'auto';routing=true;status.textContent='Choosing the best '+(hint?hint+' ':'')+'tool…';
   try{
-   const r=await api('prime/media/route',{text,mode:'auto',fallback:'image'},45000);
+   const r=await api('prime/media/route',{text,mode,fallback:'image'},45000);
    if(current!==generation)return;
-   lastRoute=r;renderPick(r);
+   r.text=text;r.mode=mode;lastRoute=r;renderPick(r);
    debug('media','media_route',{surface:'studio',kind:r.classification&&r.classification.kind,picked:r.picked?r.picked.id:null,alternatives:(r.alternatives||[]).length,probed:r.probe?r.probe.probed.length:0});
   }catch(error){if(current===generation)status.textContent=(error instanceof Error?error.message:'Routing failed')+' Pick a tool from the list below instead.';}
   finally{if(current===generation)routing=false;}
  }
  if(studio&&typeof studio.open==='function'){
   const originalOpen=studio.open;
-  studio.open=function(cat='all',text='',route){
-   const auto=cat==='auto'||cat==='all';
-   originalOpen.call(studio,auto?'auto':cat,text);
-   if(auto)void routeInStudio(String(text||'').trim(),route||null);else panel.hidden=true;
+  // Same signature as integrations.js open(category,prompt,inputs), plus an optional route the composer's Auto turn already prepared.
+  studio.open=function(cat='all',text='',inputs=null,route=null){
+   const auto=cat==='auto'||cat==='all',prompted=String(text||'').trim(),hint=HINT_OF_CATEGORY[cat];
+   originalOpen.call(studio,auto?'auto':cat,text,inputs);
+   const prepared=route&&typeof route==='object'&&!Array.isArray(route)?route:null;
+   if(auto)void routeInStudio(prompted,prepared);
+   else if(hint&&prompted)void routeInStudio(prompted,null,hint);
+   else panel.hidden=true;
   };
  }
- if(category)category.addEventListener('change',()=>{panel.hidden=category.value!=='auto';if(category.value==='auto')void routeInStudio(brief?brief.value.trim():'',lastRoute&&brief&&lastRoute.text===brief.value.trim()?lastRoute:null);});
+ if(category)category.addEventListener('change',()=>{
+  const value=category.value,text=brief?brief.value.trim():'',hint=HINT_OF_CATEGORY[value];
+  if(value==='auto')void routeInStudio(text,lastRoute&&lastRoute.text===text&&lastRoute.mode==='auto'?lastRoute:null);
+  else if(hint&&text)void routeInStudio(text,null,hint);
+  else panel.hidden=true;
+ });
+ // The first brief typed in Auto is routed once the user pauses (1.2 s): a prompt is all it takes. Once a tool is picked,
+ // later edits never re-route by themselves; "Pick again for this brief" does that explicitly.
+ let autoTimer=null;
+ if(brief)brief.addEventListener('input',()=>{
+  if(autoTimer){clearTimeout(autoTimer);autoTimer=null;}
+  if(!category||category.value!=='auto'||(lastRoute&&lastRoute.picked))return;
+  const current=generation;
+  autoTimer=setTimeout(()=>{autoTimer=null;const text=brief.value.trim();if(current!==generation||category.value!=='auto'||text.length<3||(lastRoute&&lastRoute.picked))return;void routeInStudio(text,null);},1200);
+ });
+ // Editing the brief (typing or Enhance) makes integrations.js rebuild the request from the brief alone. For the tool the
+ // router applied, keep the router's exact request shape (style, size, duration) and only swap in the new brief text.
+ if(brief)brief.addEventListener('input',()=>{
+  const applied=lastRoute&&lastRoute.applied,sel=studio&&typeof studio.selected==='function'?studio.selected():null,area=$('#creative-arguments');
+  if(!applied||!sel||sel.id!==applied.id||!area||!applied.request||!applied.request.arguments)return;
+  let current;try{current=JSON.parse(area.value);}catch{return;}
+  const next=JSON.parse(JSON.stringify(applied.request.arguments)),text=brief.value.trim(),options=next.options&&typeof next.options==='object'?next.options:null;
+  if(!options)return;
+  for(const key of ['prompt','text'])if(typeof options[key]==='string')options[key]=text;
+  if(current&&Array.isArray(current.inputs))next.inputs=current.inputs;
+  area.value=JSON.stringify(next,null,2);
+ });
  // A failed or uncertain submission of the auto pick: show it and offer the next best as an explicit choice. No automatic switch.
  window.addEventListener('echo-studio-executed',event=>{
   const d=event&&event.detail||{};
-  if(!lastRoute||!lastRoute.picked||d.name!==lastRoute.picked.id||!['blocked','uncertain'].includes(d.state))return;
-  const next=(lastRoute.alternatives||[]).find(a=>a.id!==lastRoute.picked.id);
+  if(!lastRoute||!lastRoute.picked||d.name!==lastRoute.picked.id||!['blocked','uncertain','refused','failed'].includes(d.state))return;
+  lastRoute.failed=[...(lastRoute.failed||[]),d.name];
+  const next=(lastRoute.alternatives||[]).find(a=>a.id!==lastRoute.picked.id&&!lastRoute.failed.includes(a.id));
   failure.hidden=false;failure.replaceChildren(el('p',{},lastRoute.picked.label+' did not complete ('+d.state+'): '+(d.detail||'no detail')+'. Nothing was retried.'));
+  if(d.state==='uncertain')failure.append(el('p',{class:'media-uncertain'},'The outcome is unknown: check the original request (ID '+(d.requestId||'not reported')+') before spending on another tool.'));
   if(next){
    const use=el('button',{type:'button',class:'quiet-button','data-media-next':next.id},'Use '+next.label+' instead');
    use.addEventListener('click',()=>{if(applyPick(next,'after-failure')){lastRoute.picked=next;lastRoute.alternatives=lastRoute.alternatives.filter(a=>a.id!==next.id);failure.hidden=true;status.textContent='Switched to '+next.label+' at your request. Review the request below, then submit it yourself.';}});
@@ -275,7 +321,7 @@
   mountEnhance({name:'studio',textarea:()=>$('#creative-prompt'),mode:()=>{const cat=category?category.value:'auto';if(cat==='auto'||cat==='all'){const k=lastRoute&&lastRoute.classification&&lastRoute.classification.kind;return k&&k!=='chat'&&k!=='image-edit'?k:k==='image-edit'?'image':'auto';}return CATEGORY_MODE[cat]||'auto';},
    mount(wrap,note,added){const row=$('.creative-actions');if(row)row.append(wrap);else brief.after(wrap);(row||brief).after(note,added);}});
  }
- window.addEventListener('echo-account-changed',()=>{generation++;busy=false;routing=false;lastRoute=null;setAuto(false);notice('');panel.hidden=true;pickBox.replaceChildren();alternatives.replaceChildren();failure.replaceChildren();for(const s of enhancers){s.previous=null;s.undo.hidden=true;s.added.replaceChildren();s.added.hidden=true;s.note.hidden=true;s.busy=false;}report=null;reportState='loading';renderEnhance();void loadModels();});
+ window.addEventListener('echo-account-changed',()=>{generation++;if(autoTimer){clearTimeout(autoTimer);autoTimer=null;}busy=false;routing=false;lastRoute=null;setAuto(false);notice('');panel.hidden=true;pickBox.replaceChildren();alternatives.replaceChildren();failure.replaceChildren();for(const s of enhancers){s.previous=null;s.undo.hidden=true;s.added.replaceChildren();s.added.hidden=true;s.note.hidden=true;s.busy=false;}report=null;reportState='loading';renderEnhance();void loadModels();});
  renderEnhance();
  const ready=loadModels();
  window.EchoPrimeMediaRouter={ready,refresh:loadModels,route:routeInStudio,isAuto:()=>autoMode,setAuto,provider:()=>provider,lastRoute:()=>lastRoute};
