@@ -183,6 +183,20 @@
   dialog.addEventListener('close',()=>dialogBody.replaceChildren());
   doc.body.append(dialog);
  }
+ // "Fleet nodes" in the side panel (nav.js declares it under Echo; live test 2026-11-06 found it missing): every node with
+ // its live state and reason in one dialog; each opens its own evidence.
+ function openOverview(){
+  ensureDialog();dialogTitle.textContent='Fleet nodes';
+  const list=el('ul',{class:'fleet-overview'},...nodes.map(node=>{const open=el('button',{type:'button',class:'quiet-button','data-node':node.id},node.id.toUpperCase());open.addEventListener('click',()=>openEvidence(node.id));
+   return el('li',{class:'fleet-overview-row '+node.connection},open,el('span',{class:'fleet-evidence-state '+node.connection},STATE_LABEL[node.connection]||'Unknown'),typeof node.reason==='string'&&node.reason?el('small',{},node.reason):null);}));
+  dialogBody.replaceChildren(el('p',{},access==='owner'?'Live state from the Workspace fleet probe. Dormant is a node policy, not a fault.':REASONS[access]||REASONS.checking),list);
+  if(!dialog.open)dialog.showModal();
+ }
+ function mountNav(){
+  const item=el('button',{type:'button',class:'nav-item',id:'open-fleet','data-owner-only':''},'Fleet nodes');item.hidden=true;
+  item.addEventListener('click',()=>openOverview());
+  (doc.querySelector('#prime-nav')||doc.querySelector('#sidebar'))?.append(item);
+ }
  function openEvidence(id){
   const node=nodes.find(n=>n.id===id);if(!node)return;
   ensureDialog();
@@ -205,7 +219,7 @@
 
  // ---- lifecycle -------------------------------------------------------------
  function start(){
-  mount();render();
+  mount();mountNav();render();
   setInterval(()=>{if(!doc.hidden)void pollFleet();},FLEET_MS);
   setInterval(()=>{if(!doc.hidden)void pollHealth();},HEALTH_MS);
   window.addEventListener('echo-account-changed',()=>{

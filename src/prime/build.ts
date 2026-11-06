@@ -29,6 +29,12 @@ const debug = debuglog('echo-prime');
 const stamp = () => new Date().toISOString();
 const trace = (event: string, detail: Record<string, unknown> = {}) => debug('%j', {schemaVersion: 1, event: 'prime_build_'+event, ...detail});
 const BIN: Record<BuildEngine,string> = {gpt:'codex', grok:'grok', gemini:'agy', claude:'claude'};
+/** The availability check per engine: `claude auth status` (exit 0 = logged in, code.claude.com/docs/en/cli-reference), `codex login status` (exit 0 = logged in); grok and agy document no status command. */
+export function probeCommand(engine:BuildEngine):{cmd:string;args:string[];check:'signed-in'|'installed'} {
+ if(engine==='claude')return {cmd:BIN.claude,args:['auth','status'],check:'signed-in'};
+ if(engine==='gpt')return {cmd:BIN.gpt,args:['login','status'],check:'signed-in'};
+ return {cmd:BIN[engine],args:['--version'],check:'installed'};
+}
 const STATUSES = new Set<BuildStatus>(['queued','scaffolding','building','qa','running','deployed','hibernated','failed']);
 function object(value: unknown, keys: string[], what: string): Record<string,unknown> {
  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new BuildError(400, what+' must be an object');
@@ -381,10 +387,11 @@ export class BuildRunner {
   this.initialized=false;
  }
  private async probeOne(engine:BuildEngine) {
-  const check=engine==='gpt'?'signed-in':'installed',checkedAt=stamp();
-  // A CLI version check proves installation only. No provider inference, credential inspection or automatic login.
+  const probe=probeCommand(engine),check=probe.check,checkedAt=stamp();
+  // Claude and GPT report sign-in through their own status command (exit code only; output is never read). Grok and agy
+  // document no status command, so their version check proves installation only. No credential inspection or automatic login.
   const temporary:Entry={build:{workspace:this.root,build_id:'0'.repeat(32),engine,preview:{port:0,url:''},status:'hibernated',log:[],created_at:checkedAt,updated_at:checkedAt,title:'probe',prompt:''},seq:0,bytes:0,children:new Set(),mode:'revive',nextPrompt:'',transient:true};
-  try {const r=this.start(temporary,{cmd:BIN[engine],args:engine==='gpt'?['login','status']:['--version']},AbortSignal.timeout(8000));const result=await r.done;return {id:engine==='gemini'?'argon':engine,engine,available:result.code===0,check,checkedAt,reason:result.code===0?undefined:'CLI check failed; no fallback'};}
+  try {const r=this.start(temporary,{cmd:probe.cmd,args:probe.args},AbortSignal.timeout(8000));const result=await r.done;return {id:engine==='gemini'?'argon':engine,engine,available:result.code===0,check,checkedAt,reason:result.code===0?undefined:check==='signed-in'?'not signed in ("'+probe.cmd+' '+probe.args.join(' ')+'" exited with code '+result.code+'); no fallback':'CLI check failed (exit code '+result.code+'); no fallback'};}
   catch{return {id:engine==='gemini'?'argon':engine,engine,available:false,check,checkedAt,reason:'CLI unavailable or check timed out; no fallback'};}
   finally{clearTimeout(temporary.dirty);for(const child of temporary.children)await killTree(child);}
  }

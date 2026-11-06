@@ -142,9 +142,12 @@ export class PrimeHub {
  /** Per-provider availability (cached 60 s) and the model that answered last. Never falls back or substitutes. */
  async models(){
   const router=this.options.models;
-  const buildInfo=this.options.build?{buildProviders:await this.options.build.models()}:{};
-  if(!router)return {configured:false,routing:false,default:null,contextTokens:null,providers:[],...buildInfo};
-  return {configured:true,routing:this.options.chat?.status().routing===true,...await bounded(()=>router.report(),30000),...buildInfo};
+  const builds=this.options.build?await this.options.build.models():undefined;
+  if(!router)return {configured:false,routing:false,default:null,contextTokens:null,providers:[],...(builds?{buildProviders:builds}:{})};
+  const report=await bounded(()=>router.report(),30000);
+  // Echo Build runs the same CLIs under the same login: a sign-in failure the router saw on its last call makes that engine unavailable too.
+  const buildProviders=builds?.map(row=>{const seen=report.providers.find(p=>p.id===row.id);return row.available&&seen&&!seen.available&&seen.lastFailure?.signedOut?{...row,available:false,reason:seen.reason}:row;});
+  return {configured:true,routing:this.options.chat?.status().routing===true,...report,...(buildProviders?{buildProviders}:{})};
  }
  buildHealth(){return this.options.build?.health()??{configured:false,available:false,reason:'Echo Build is off: add a reviewed build section with root and engines to the Prime config'};}
  private buildRunner(){if(!this.options.build)throw new BuildError(503,'Echo Build is off: add a build section to the Prime config');return this.options.build;}

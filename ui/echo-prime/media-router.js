@@ -110,7 +110,7 @@
  function renderEnhance(){
   const gate=enhanceGate(),list=providers();
   for(const s of enhancers){
-   s.select.replaceChildren(...list.map(p=>{const option=el('option',{value:p.id},p.label+(p.available?'':' (unavailable)'));option.disabled=!p.available;return option;}));
+   s.select.replaceChildren(...list.map(p=>{const option=el('option',{value:p.id},p.label+(p.available?'':' (unavailable'+(p.reason?': '+p.reason:'')+')'));option.disabled=!p.available;return option;}));
    if(provider)s.select.value=provider;
    s.select.hidden=!list.length;s.select.disabled=!!gate||busy;
    s.button.disabled=!!gate||busy;

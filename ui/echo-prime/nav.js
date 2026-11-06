@@ -20,11 +20,14 @@
   {id:'talk',label:'Talk',items:[
    {id:'conversation',label:'Conversation',icon:'i-chat',match:{view:'conversation'}},
    {id:'projects',label:'Projects',icon:'i-folder',workspace:true,match:{workspaceView:'projects',primeView:'projects'}},
-   {id:'library',label:'Library',icon:'i-library',workspace:true,match:{workspaceView:'library',primeView:'library',label:'Library'}},
+   // #open-library (index.html) is the one Library entry; the Workspace inbox's Library button opens the same dialog and folds into it.
+   {id:'library',label:'Library & Artifacts',icon:'i-library',match:{id:['open-library'],workspaceView:'library',primeView:'library',label:'Library'}},
+   {id:'artifacts',label:'Artifact Center',icon:'i-library',workspace:true,match:{id:['open-artifacts']}},
   ]},
   {id:'create',label:'Create',items:[
    {id:'studio',label:'Creative studio',icon:'i-spark',match:{view:'studio'}},
    {id:'code-review',label:'Code review',icon:'i-code',workspace:true,match:{workspaceView:'library',primeView:'review',label:'Code review'}},
+   {id:'build',label:'Echo Build',icon:'i-code',ownerOnly:true,match:{id:['open-build']}},
   ]},
   {id:'agents',label:'Agents',items:[
    {id:'agents',label:'Agents (Echo ADK)',icon:'i-agents',match:{id:['open-agents','agents-open'],view:'agents',label:/^Agents\b/i}},

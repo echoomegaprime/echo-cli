@@ -107,10 +107,12 @@ it('offers Forgot password? on the sign-in card and only requests recovery with 
  const w=workspaceWorld({session:anonymous});await w.window.EchoPrimeWorkspace.ready;await w.window.EchoPrimeWorkspace.open('account');
  const button=w.find('Forgot password?');expect(button).toBeDefined();expect(w.panel().some(n=>n.tagName==='BUTTON'&&/recovery/i.test(n.textContent))).toBe(false);
  const email=w.panel().find(n=>n.tagName==='INPUT'&&n.attributes.placeholder==='Email or existing supported user ID')!;
+ // The answer sits next to the button (role=status), not in the panel status line above the fold (live test 2026-11-06).
+ const result=()=>w.panel().filter(n=>n.className==='signin-result').at(-1)!;
  email.value='commander';await button.fire('click');
- expect(w.get('#workspace-panel-status').textContent).toBe('Enter your email address first.');expect(w.auth.mock.calls.some(c=>c[0]==='reset')).toBe(false);
+ expect(result().textContent).toBe('Enter your email address first.');expect(result().attributes.role).toBe('status');expect(w.auth.mock.calls.some(c=>c[0]==='reset')).toBe(false);
  email.value='  owner@example.test ';await button.fire('click');
- expect(w.auth.mock.calls.filter(c=>c[0]==='reset').map(c=>c[1])).toEqual([{email:'owner@example.test'}]);expect(w.get('#workspace-panel-status').textContent).toBe('Recovery email requested.');
+ expect(w.auth.mock.calls.filter(c=>c[0]==='reset').map(c=>c[1])).toEqual([{email:'owner@example.test'}]);expect(result().textContent).toBe('Recovery email requested.');
 });
 
 // ---------- branding ----------

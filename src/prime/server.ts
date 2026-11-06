@@ -35,7 +35,13 @@ async function body(req:IncomingMessage,maxBytes=131072){
  for await(const part of req){size+=part.length;if(size>maxBytes)throw new Error('Request exceeds size limit');chunks.push(part);}
  return object(JSON.parse(Buffer.concat(chunks).toString('utf8')));
 }
-export interface PrimeServerOptions {workspace?:WorkspaceConfig;publicOrigin?:string;uploads?:UploadsConfig|UploadStore|unknown}
+/** `admission.waitMs`: how long a request that finds no free slot waits for one before 429 (default 3000; tests shorten it). */
+export interface PrimeServerOptions {workspace?:WorkspaceConfig;publicOrigin?:string;uploads?:UploadsConfig|UploadStore|unknown;admission?:{waitMs?:number}}
+// Admission (live test 2026-11-06): the process-wide cap stays 8 concurrent non-media requests, but one client may hold at
+// most 6 of them and the last slot is kept for the /api/session admission read, so one page's long turns or boot burst can
+// never lock another visitor out of booting. A request that finds no slot waits briefly for one (first come, first served,
+// skipping a client already at its cap) before the 429. A client is its Workspace session (hashed), else its edge address.
+const MAX_ACTIVE=8,PER_CLIENT=6,SESSION_RESERVE=1,MAX_WAITING=64;
 function publicOrigin(value:string|undefined):string|undefined{
  if(value===undefined)return undefined;
  let origin:URL;try{origin=new URL(value);}catch{throw new Error('Invalid public HTTPS origin');}
@@ -50,6 +56,19 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
  const workspace=options.workspace?new WorkspaceBridge(options.workspace,!!externalOrigin,uploadStore):undefined;
  if(workspace)await workspace.validateBackend();
  const token=randomBytes(32).toString('hex');let url='',active=0,mediaActive=0;
+ const waitMs=Math.max(0,Math.min(10000,Number(options.admission?.waitMs??3000)||0));
+ const perClient=new Map<string,number>(),waiting:{key:string;session:boolean;resolve:(ok:boolean)=>void;timer:NodeJS.Timeout}[]=[];
+ const fits=(key:string,session:boolean)=>active<(session?MAX_ACTIVE:MAX_ACTIVE-SESSION_RESERVE)&&(perClient.get(key)??0)<PER_CLIENT;
+ const take=(key:string)=>{active++;perClient.set(key,(perClient.get(key)??0)+1);};
+ const release=(key:string)=>{
+  active--;const left=(perClient.get(key)??1)-1;if(left>0)perClient.set(key,left);else perClient.delete(key);
+  for(let i=0;i<waiting.length;){const next=waiting[i];if(fits(next.key,next.session)){waiting.splice(i,1);clearTimeout(next.timer);take(next.key);next.resolve(true);}else i++;}
+ };
+ const admit=(key:string,session:boolean)=>{
+  if(fits(key,session)){take(key);return Promise.resolve(true);}
+  if(!waitMs||waiting.length>=MAX_WAITING)return Promise.resolve(false);
+  return new Promise<boolean>(resolve=>{const entry={key,session,resolve,timer:setTimeout(()=>{const at=waiting.indexOf(entry);if(at>=0)waiting.splice(at,1);resolve(false);},waitMs)};waiting.push(entry);});
+ };
  // Opaque-origin sandbox frames cannot send owner headers or SameSite cookies. A short-lived, build-only read ticket is
  // minted by an authenticated JSON POST. Its captured session is revalidated on every resource; never sent to the app.
  const previews=new Map<string,{id:string;expires:number;headers:IncomingMessage['headers']}>();
@@ -75,8 +94,15 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
    const mediaFileGet=req.method==='GET'&&(/^\/api\/prime\/uploads\/upl_[0-9a-f]{32}\/file$/.test(path)||/^\/api\/prime\/artifacts\/art_[0-9a-f]{32}\/file$/.test(path));
    const fetchSite=req.headers['sec-fetch-site'];
    if(!previewRead&&(!allowed||(!mediaFileGet&&req.headers['x-prime-request']!=='1')||fetchSite==='cross-site'||(mediaFileGet&&fetchSite==='same-site')||(req.headers.origin!==undefined&&req.headers.origin!==expectedOrigin)||(req.method==='POST'&&req.headers.origin!==expectedOrigin))){send(403,{error:'Same-origin Prime session required'});return;}
+   let admitted:string|null=null;
    if(mediaFileGet){if(mediaActive>=24){send(429,{error:'Too many requests'});return;}mediaActive++;}
-   else{if(active>=8){send(429,{error:'Too many requests'});return;}active++;}
+   else{
+    const workspaceSession=/(?:^|;\s*)echo_workspace_session=([A-Za-z0-9_-]{32,128})(?:;|$)/.exec(req.headers.cookie??'')?.[1],edge=req.headers['cf-connecting-ip'];
+    const key=workspaceSession?'s:'+createHash('sha256').update(workspaceSession).digest('hex').slice(0,32):'a:'+(externalOrigin&&typeof edge==='string'&&edge.length<=64?edge:req.socket.remoteAddress??'local');
+    if(!await admit(key,path==='/api/session'&&req.method==='GET')){res.setHeader('Retry-After','1');send(429,{error:'Too many requests'});return;}
+    admitted=key;
+    if(res.destroyed||res.writableEnded){release(key);return;}// the client left while it waited
+   }
    const abort=new AbortController();const disconnected=()=>{if(!res.writableEnded)abort.abort();};res.once('close',disconnected);
    try{
     if(previewRoute){
@@ -262,7 +288,7 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     else if(path==='/api/prime/enhance')send(200,await hub.enhance(data,createHash('sha256').update(supplied).digest('hex'),abort.signal));
     else send(404,{error:'Unknown route'});
    }catch(e){if(res.headersSent)res.destroy();else send(e instanceof WorkspaceHttpError?e.status:400,{error:redact(e instanceof Error?e.message:'Request failed').slice(0,600)});}
-   finally{res.removeListener('close',disconnected);if(mediaFileGet)mediaActive--;else active--;}
+   finally{res.removeListener('close',disconnected);if(mediaFileGet)mediaActive--;else if(admitted!==null)release(admitted);}
    return;
   }
   // HEAD mirrors GET for a static asset (status, type, length and the session cookie on the page) without a body; the

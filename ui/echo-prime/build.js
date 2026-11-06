@@ -92,7 +92,7 @@
    providers=(health.engines||[]).map(id=>{const p=rows.find(r=>(r.engine||r.id)===id||id==='gemini'&&r.id==='argon');return {engine:id,available:p?.available===true,check:p?.check||'not checked',reason:p?.reason};});
    engine.replaceChildren(...providers.map(p=>{const option=el('option',p.engine+' · '+(p.available?p.check:p.reason||'unavailable'));option.value=p.engine;option.disabled=!p.available;return option;}));
    engine.value=providers.find(p=>p.available)?.engine||'';
-   status.textContent='Real apps and programs · '+health.maxConcurrent+' concurrent build'+(health.maxConcurrent===1?'':'s')+' · '+Math.round(health.wallMs/60000)+' minute wall budget. CLI installation checks do not prove sign-in.';
+   status.textContent='Real apps and programs · '+health.maxConcurrent+' concurrent build'+(health.maxConcurrent===1?'':'s')+' · '+Math.round(health.wallMs/60000)+' minute wall budget. Claude and GPT are checked for sign-in; Grok and Gemini (agy) document no sign-in check, so only their installation is checked.';
    controls();debug('health',{available:true});await refresh(mine);
   }catch(error){if(mine===generation&&error.name!=='AbortError'){status.textContent=error.message;health=null;controls();debug('health_failed');}}
  }

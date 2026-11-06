@@ -228,7 +228,7 @@ const owner = (): Session => ({ workspaceConfigured: true, authenticated: true, 
 const member = (): Session => ({ workspaceConfigured: true, authenticated: true, ownerAccess: false, csrf: 'csrf-member', user: { uid: 'm', role: 'member', status: 'approved' } });
 function workspaceStub(session: Session | null, chat: unknown = null) {
   const bridgeApi = vi.fn(async () => ({}));
-  return { ready: Promise.resolve(true), enabled: true, session, ownerHeaders: vi.fn(async () => ({ 'x-echo-csrf': session?.csrf ?? '' })), bridge: () => ({ state: { chat }, api: bridgeApi }), bridgeApi };
+  return { ready: Promise.resolve(true), enabled: true, session, ownerHeaders: vi.fn(async () => ({ 'x-echo-csrf': session?.csrf ?? '' })), bridge: Object.freeze({ state: { chat }, api: bridgeApi }), bridgeApi };// workspace.js exposes the bridge as a frozen object
 }
 const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
 async function brainFixture(opts: { workspace?: ReturnType<typeof workspaceStub>; status?: Record<string, unknown>; verify?: Record<string, unknown>; select?: Record<string, unknown> } = {}) {

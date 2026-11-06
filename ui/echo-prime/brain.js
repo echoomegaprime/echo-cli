@@ -84,7 +84,8 @@
  /** When auto-selection is switched off, give the current Workspace chat back to the Workspace's own auto mode once. */
  async function handBack(){
   if(!settings||settings.enabled!==false)return;
-  const ws=workspace(),b=ws&&typeof ws.bridge==='function'?ws.bridge():null,chat=b&&b.state?b.state.chat:null;
+  // EchoPrimeWorkspace.bridge is a frozen object (workspace.js), not a function: the old function check never handed back.
+  const ws=workspace(),b=ws&&ws.bridge&&typeof ws.bridge==='object'?ws.bridge:null,chat=b&&b.state?b.state.chat:null;
   if(!chat||typeof chat.id!=='string'||!applied.has(chat.id)||typeof b.api!=='function')return;
   try{await b.api('/action',{action:'personality_select',chat_id:chat.id,profile:AUTO});applied.delete(chat.id);debug('workspace_personality_released',{chat:chat.id});}catch{/* the Workspace keeps the last pick; the next owner turn will not touch it */}
  }

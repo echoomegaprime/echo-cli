@@ -92,7 +92,7 @@ async function ollama(options: { installed?: boolean; classify?: string | null; 
 function runner(handler: (cmd: string, args: string[]) => RunResult | Error) {
   const calls: { cmd: string; args: string[] }[] = [];
   const run: Runner = async (cmd, args) => { calls.push({ cmd, args }); const r = handler(cmd, args); if (r instanceof Error) throw r; return r; };
-  return { calls, run, turns: () => calls.filter(c => !['--version', 'login', 'models'].includes(c.args[0])).map(c => c.cmd) };
+  return { calls, run, turns: () => calls.filter(c => !['--version', 'login', 'auth', 'models'].includes(c.args[0])).map(c => c.cmd) };
 }
 const allUp = runner(cmd => cmd === 'claude' ? ok(claudeJson(final('claude answer'))) : cmd === 'codex' ? ok(codexEvents(final('gpt answer'))) : cmd === 'grok' ? ok(grokJson(final('grok answer'))) : ok(JSON.stringify({ status: 'SUCCESS', response: final('argon answer') })));
 const router = (url: string, run: Runner, auto: Record<string, unknown> = {}) => new ModelRouter(parseModelsConfig({ endpoint: url, auto }), { runner: run });

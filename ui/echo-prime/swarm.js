@@ -215,7 +215,8 @@
    r.timer=setTimeout(()=>tick(r),0);
   });
  }
- chat.send=async text=>models.swarm()?sendSwarm(String(text)):original.send.call(chat,text);
+ // Options ride through untouched: an Echo conversation hands chat.js its prepared prompt and session (workspace.js).
+ chat.send=async(text,options)=>models.swarm()?sendSwarm(String(text)):original.send.call(chat,text,options);
  chat.cancel=()=>{if(run)stopWatching(run,false);else original.cancel.call(chat);};
  chat.reset=()=>{generation++;if(run)stopWatching(run,true);original.reset.call(chat);};
  document.addEventListener('visibilitychange',()=>{if(run){run.lastPoll=0;if(!document.hidden){if(run.timer)clearTimeout(run.timer);tick(run);}else status(run);}});
@@ -223,5 +224,19 @@
  // finish() re-reads health), whether or not the chat reset reaches here first.
  window.addEventListener('echo-account-changed',()=>{if(run)stopWatching(run,true);else refreshHealth();});
  window.addEventListener('pagehide',()=>{if(run)stopWatching(run,true);});
+ // "Swarm brain" in the side panel (nav.js declares it under Agents; live test 2026-11-06 found it missing). The swarm
+ // answers through ECHO Code, so the item switches the conversation to ECHO Code and picks the Swarm for the next message.
+ // It is owner-only like every /api/prime/swarm route; workspace.js applies the [data-owner-only] rule on each identity.
+ (()=>{
+  const item=document.createElement('button');item.setAttribute('type','button');item.className='nav-item';item.setAttribute('id','open-swarm');item.setAttribute('data-owner-only','');item.hidden=true;item.textContent='Swarm brain';
+  item.addEventListener('click',()=>{
+   if(typeof models.choose==='function'&&!models.choose('swarm'))return;
+   const kind=$('#workspace-chat-kind');
+   if(kind&&kind.value!=='coding'){kind.value='coding';kind.dispatchEvent(new Event('change'));}
+   const notice=$('#draft-notice');if(notice){notice.textContent='Swarm (40-seat brain) picked for your next ECHO Code message. A run can take many minutes and spends up to its budget; its result says so.';notice.hidden=false;}
+   $('#prompt')?.focus();
+  });
+  ($('#prime-nav')||$('#sidebar'))?.append(item);
+ })();
  window.EchoPrimeSwarm={ready:refreshHealth(),refresh:refreshHealth,active(){return run?run.runId:null;}};
 })();

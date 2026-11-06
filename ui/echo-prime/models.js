@@ -15,7 +15,7 @@
  const wrap=document.createElement('div'),label=document.createElement('label'),select=document.createElement('select'),note=document.createElement('small');
  wrap.className='model-picker';wrap.setAttribute('style','display:flex;flex-direction:column;gap:2px;min-width:0');
  label.className='sr-only';label.textContent='Model';
- select.id='model-select';select.setAttribute('aria-label','Model for ECHO Code');select.setAttribute('style','max-width:100%');
+ select.id='model-select';select.setAttribute('aria-label','Model');select.setAttribute('style','max-width:100%');
  note.className='connection-note';note.setAttribute('role','status');note.setAttribute('aria-live','polite');
  label.append(select);
  // Second select: the Gemini variants agy offers, shown only while Argon is selected.
@@ -56,8 +56,11 @@
   if(!list.length)return undefined;
   return list.some(v=>v.id===chosenVariant)?chosenVariant:list[0].id;
  }
+ /** True while the composer is in an Echo conversation (the Workspace chat), where Qwen answers through the Workspace and a vendor pick through Prime. */
+ function conversation(){const ws=workspace();return !!ws&&ws.generalMode===true;}
+ function labelOf(id){const row=entries().find(e=>e.id===id);return row?row.label:fallbackLabels[id]||String(id||'');}
  function render(){
-  const list=entries(),selected=current();
+  const list=entries(),selected=current(),chat=conversation();
   select.replaceChildren(...list.map(e=>{const option=document.createElement('option');option.value=e.id;option.textContent=e.label+(e.available?'':' (unavailable)');return option;}));
   select.value=selected;
   const gemini=selected==='argon'?variants():[],shown=currentVariant();
@@ -71,8 +74,11 @@
   else if(failed)note.textContent='Model status unavailable. Nothing will be sent to a model until the status route answers.';
   else if(!report)note.textContent='Checking models…';
   else if(!report.routing)note.textContent='Model choice is not enabled on this host.';
-  else if(selected==='auto')note.textContent=autoNote();
+  else if(selected==='auto')note.textContent=chat?'Auto in an Echo conversation keeps Qwen on your private Workspace, with its memory and tools. Pick Claude, GPT, Grok or Argon to have that model answer here instead.':autoNote();
   else if(row&&!row.available)note.textContent=row.label+' is unavailable: '+(row.reason||'no reason given')+'. No other model will be used.';
+  else if(chat&&selected==='qwen'&&row)note.textContent='Echo conversation: '+row.label+' answers through your private Workspace, with its memory and tools; each reply names the model.';
+  else if(chat&&selected==='swarm'&&row)note.textContent=row.label+' runs in ECHO Code conversations. Switch Conversation to ECHO Code to use it; nothing is sent to it from an Echo conversation.';
+  else if(chat&&row&&!(selected==='argon'&&!gemini.length))note.textContent=row.label+' answers this Echo conversation through Prime; its replies are labelled and not saved to the Workspace. If it fails, the turn fails; no other model is used.';
   else if(selected==='argon'&&row&&!gemini.length){const why=argonRow()&&typeof argonRow().variantsReason==='string'?argonRow().variantsReason:'no Gemini models were listed';note.textContent=row.label+' selected. '+why+'; the agy default model is used. If it fails, the turn fails; no other model is used.';}
   else if(selected==='swarm')note.textContent=row.label+' selected. Runs can take many minutes and spend the shown budget; the worker has no cancel. If it fails the turn fails; no other model is used.';
   else note.textContent=row?row.label+' selected. If it fails, the turn fails; no other model is used.':'';
@@ -126,6 +132,7 @@
   render();
  });
  window.addEventListener('echo-account-changed',()=>{refresh();});
+ window.addEventListener('echo-chat-kind',()=>render());// workspace.js: Echo conversation <-> ECHO Code changes what the note must say
  render();
  const ready=refresh();
  window.EchoPrimeModels={
@@ -138,6 +145,24 @@
   provider(){return report&&report.routing===true&&!failed?current():undefined;},
   /** The Gemini model id to send with an Argon turn (validated by the server against agy's list), else undefined. */
   model(){return report&&report.routing===true&&!failed?currentVariant():undefined;},
+  /** Who answers the next Echo conversation turn: {} = Qwen through the Workspace (also Auto, a member, or a host without
+   *  routing); {vendor:{id,label,model?}} = that vendor through Prime; {blocked} = the pick cannot be honoured, with why. */
+  conversationRoute(){
+   const id=current(),label=labelOf(id);
+   if(gate)return {};
+   if(failed)return id==='qwen'||id==='auto'?{}:{blocked:'Model status is unavailable, so '+label+' could not be confirmed. Nothing was sent: pick Qwen to answer through your Workspace, or try again in a moment.'};
+   if(!report||report.routing!==true||id==='qwen'||id==='auto')return {};
+   if(id==='swarm')return {blocked:label+' runs in ECHO Code conversations. Switch Conversation to ECHO Code to use it; nothing was sent.'};
+   const variant=currentVariant();
+   return {vendor:{id,label,...(variant?{model:variant}:{})}};
+  },
+  /** Picks a model for the next message (the Swarm brain sidebar item uses this); false for an id the picker does not offer. */
+  choose(id){
+   if(!ids.includes(id)||(id==='auto'&&!autoEnabled()))return false;
+   chosen=id;try{localStorage.setItem(storageKey,chosen);}catch{}render();return true;
+  },
+  /** The picker's label for a provider id (the current pick when omitted). */
+  label(id){return labelOf(id===undefined?current():id);},
   /** Per-reply note. Plain: "answered by <model>". Auto: "routed to Claude (coding) · answered by …". Decline re-route: "Claude declined; answered by Qwen (FORGE, 256K) · <model>". */
   describe(model){
    if(!model||typeof model!=='object')return '';
