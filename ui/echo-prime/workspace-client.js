@@ -2,6 +2,9 @@
  'use strict';
  const eventTypes=new Set(['status','token','tool_started','tool_result','tool_evidence','answer_grounding','memory_saved','done','error']);
  const ordinaryEventBytes=256*1024,terminalEventBytes=8*1024*1024,terminalPrefix=/^\s*\{\s*"type"\s*:\s*"done"\s*,/;
+ const isTypeError=error=>Boolean(error)&&(error instanceof TypeError||error.name==='TypeError');
+ const protocolError=/^(?:Conversation (?:event exceeds limit|stream exceeds limit|interrupted|receipt does not match this chat|failed\.)|Malformed conversation event\.|Contradictory events after conversation completion\.|The connection closed before Echo confirmed the reply\.|Workspace (?:did not return a conversation stream|response exceeds limit|request exceeds limit|request failed\.)|Invalid Workspace route\.|Account (?:session changed|changed\.)|Sign in to an approved account first\.|Session read interrupted\.)/;
+ const tagTransport=(error,signal)=>{if(isTypeError(error)&&!signal?.aborted&&error.name!=='AbortError')try{error.transport=true;}catch{}return error;};
  async function readText(response){
   const reader=response.body?.getReader();let text='',bytes=0;const decoder=new TextDecoder('utf-8',{fatal:true});
   if(!reader)throw new Error('Empty Workspace response.');
@@ -23,7 +26,7 @@
   // No caller signal reaches the shared request: an aborted joiner must not interrupt the others. The read is small and
   // bounded by the host's own timeouts. A readback that arrives after forget() is returned but not kept.
   memo.inflight=(async()=>{
-   const response=await fetchImpl('/api/session',{credentials:'same-origin',cache:'no-store',headers:{'x-prime-request':'1'}});
+   let response;try{response=await fetchImpl('/api/session',{credentials:'same-origin',cache:'no-store',headers:{'x-prime-request':'1'}});}catch(error){throw tagTransport(error);}
    const value=await readJson(response);
    if(!response.ok||typeof value.workspaceConfigured!=='boolean'||typeof value.authenticated!=='boolean')throw new Error('Account admission unavailable.');
    if(value.authenticated&&(!value.user||typeof value.user.uid!=='string'||typeof value.csrf!=='string'))throw new Error('Invalid account admission.');
@@ -34,6 +37,7 @@
  window.EchoPrimeWorkspaceTransport=class {
   static now=Date.now;// clock seam for the shared session memo (tests move it; the page uses Date.now)
   static SESSION_MEMO_MS=SESSION_MEMO_MS;
+  static isTransportError(error,signal){return !signal?.aborted&&isTypeError(error)&&error.name!=='AbortError'&&error.transport!==false&&!error.incomplete&&!protocolError.test(String(error.message||''))&&!/encoded data|utf-8/i.test(String(error.message||''));}
   #logoutProof=null;
   constructor(options={}){this.fetch=options.fetch||window.fetch.bind(window);this.onIdentityChange=options.onIdentityChange||(()=>{});this.session=null;this.generation=0;this.sessionEpoch=0;this.responses=new WeakMap();}
   headers(){return {'x-prime-request':'1',...(this.session?.csrf?{'x-echo-csrf':this.session.csrf}:{})};}
@@ -49,7 +53,7 @@
    const changed=(this.session?.user?.uid??null)!==(value.user?.uid??null)||!!this.session?.authenticated!==!!value.authenticated||this.session?.user?.status!==value.user?.status||!!this.session?.ownerAccess!==!!value.ownerAccess;
    this.session=value;this.#logoutProof=value.authenticated?value.csrf:null;if(changed){this.generation++;this.onIdentityChange(value);}
    return value;
-   }catch(error){if(epoch===this.sessionEpoch&&!signal?.aborted){const proof=this.#logoutProof||this.session?.csrf;this.clear();this.#logoutProof=proof;}throw error;}
+   }catch(error){if(epoch===this.sessionEpoch&&!signal?.aborted&&!(signal?.recovering&&error?.transport===true)){const proof=this.#logoutProof||this.session?.csrf;this.clear();this.#logoutProof=proof;}throw error;}
   }
   async _response(path,body,signal,auth=false){
    if(typeof path!=='string'||path.length>1200||!/^\/[a-z0-9_/?=&%.+-]+$/i.test(path)||path.includes('..'))throw new Error('Invalid Workspace route.');
@@ -67,7 +71,7 @@
    const generation=this.generation;
    let response;
    try{response=await this.fetch('/api/workspace'+path,{method:body===undefined?'GET':'POST',credentials:'same-origin',cache:'no-store',headers,body:text,signal});}
-   catch(error){if(logout&&generation===this.generation)this.clear();throw error;}
+   catch(error){if(logout&&generation===this.generation)this.clear();throw tagTransport(error,signal);}
    if(generation!==this.generation){await response.body?.cancel().catch(()=>{});throw new Error('Account session changed; response discarded.');}
    if(!response.ok){
     let value;try{value=await readJson(response);}finally{if(logout||response.status===401||response.status===403&&!auth)this.clear();}
@@ -106,6 +110,7 @@
     const event=JSON.parse(line);
     if(!event||typeof event!=='object'||Array.isArray(event)||typeof event.type!=='string')throw new Error('Malformed conversation event.');
     if(lineBytes>ordinaryEventBytes&&event.type!=='done')throw new Error('Conversation event exceeds limit.');
+    if(event.type==='keepalive')return;
     if(result)throw new Error('Contradictory events after conversation completion.');
     if(!eventTypes.has(event.type))return;
     if(event.type==='error')throw new Error(typeof event.error==='string'?event.error.slice(0,600):'Conversation failed. Saved messages may remain.');
@@ -117,7 +122,8 @@
    };
    try{
     for(;;){
-     const {done,value}=await reader.read();if(done)break;
+     let chunk;try{chunk=await reader.read();}catch(error){throw tagTransport(error,signal);}
+     const {done,value}=chunk;if(done)break;
      bytes+=value.byteLength;if(bytes>32*1024*1024)throw new Error('Conversation stream exceeds limit.');
      pending+=decoder.decode(value,{stream:true});let index;
      while((index=pending.indexOf('\n'))>=0){accept(pending.slice(0,index));pending=pending.slice(index+1);}
@@ -127,7 +133,7 @@
     if(signal?.aborted||generation!==this.generation)throw new Error('Account session changed or conversation interrupted.');
     if(!result){const incomplete=new Error('The connection closed before Echo confirmed the reply.');incomplete.incomplete=true;throw incomplete;}
     return result;
-   }finally{await reader.cancel().catch(()=>{});}
+   }catch(error){if(error&&typeof error==='object'&&error.transport!==true)try{error.transport=false;}catch{}throw error;}finally{await reader.cancel().catch(()=>{});}
   }
  };
 })();
