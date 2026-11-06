@@ -53,7 +53,7 @@ describe('Prime is a superset of the router v2 term lists (policy_terms.json 202
 });
 
 describe('minor terms refused locally, wherever they hide (review #3)',()=>{
- it.each(['a teenage girl','a teenaged girl','an underaged girl','a tween','a fifteen year old','a sixteen-year-old','twelve years old','a 16yo','a 16 y/o girl','a girl of 15','a boy of ten','a high school student','a childlike woman','a preschooler','in kindergarten','her daughter','a stepdaughter','a 17 y.o. woman','a junior high student','an elementary school classroom','a girl aged 14','a lolita','a middle school girl','under 18','below the age of eighteen','a pubescent boy','a baby sitter','a babysitter','a 10 yr old','a 9-year-old','she looks 12','a young-looking girl','a tiny girl'])
+ it.each(['a teenage girl','a teenaged girl','an underaged girl','a tween','a fifteen year old','a sixteen-year-old','twelve years old','a 16yo','a 16 y/o girl','a girl of 15','a boy of ten','a high school student','a childlike woman','a preschooler','in kindergarten','her daughter','a stepdaughter','a 17 y.o. woman','a junior high student','an elementary school classroom','a girl aged 14','a lolita','a middle school girl','under 18','below the age of eighteen','a pubescent boy','a babysitter','a baby girl','newborn babies','a 10 yr old','a 9-year-old','she looks 12','a young-looking girl','a tiny girl'])
   ('refuses "%s" in an adult request',text=>{expect(adultPolicy({text:'nsfw '+text,...ok}).refusal?.code,text).toBe('minor');});
  it.each(['a woman of 25','a 30 year old woman','an 18 year old woman','an eighteen-year-old woman','a nineteen year old','a woman in her twenties','a 118 year old tortoise','aged 25','a 40yo man','a girl of 21'])
   ('lets "%s" through the minor check',text=>{expect(adultPolicy({text:'nsfw '+text,...ok}).refusal?.code,text).not.toBe('minor');});
@@ -68,8 +68,14 @@ describe('real-person pre-route (review #4)',()=>{
  it.each(['Emma Watson naked','nude Scarlett Johansson','Taylor Swift topless','Joe Biden nude','nude Margot Robbie','nude Zendaya','a nude woman that looks like emma watson','nude my sister','a topless woman who resembles my boss','nude, the face of a famous singer','nude mom on a beach','nude brother and sister','nude emma watson','nude version of myself','a selfie of her nude','nude with a face modeled on a real person','topless elon musk','nude Rihanna','nude Elon','naked Beyoncé','nude AOC','nude Trump'])
   ('refuses "%s" as a real person',text=>{expect(adultPolicy({text,...ok}).refusal?.code,text).toBe('real_person');});
  it('keeps an invented adult character through',()=>{
-  for(const text of ['a nude figure study in charcoal','an invented elven queen in a gothic cathedral, topless','nude woman on a beach at sunset, oil painting','invented adult woman, lingerie, studio photo'])
+  for(const text of ['a nude figure study in charcoal','an invented elven queen in a gothic cathedral, topless','nude woman on a beach at sunset, oil painting','invented adult woman, lingerie, studio photo','a sexy teacher in a classroom, invented adult','two friends on a beach, topless, invented adults','a wife and husband in lingerie, invented adults','baby blue lingerie on an invented adult woman','nsfw invented woman in Paris\nIllustrious'])
    expect(adultPolicy({text,...ok}).refusal,text).toBeUndefined();
+ });
+ it('refuses an acquaintance only when the brief says it is somebody the user knows (my, your, her ...)',()=>{
+  for(const text of ['nude my teacher','my wife naked','topless, her boss','nude our neighbor','nude your friend'])expect(adultPolicy({text,...ok}).refusal?.code,text).toBe('real_person');
+ });
+ it('still refuses a name split over two fields of the request (the leaves are joined)',()=>{
+  expect(adultPolicy({text:textOfArguments({prompt:'nsfw invented woman Emma',note:'Watson'}),...ok}).refusal?.code).toBe('real_person');
  });
 });
 
@@ -190,6 +196,13 @@ describe('real keywords through the route and the gate, no markers (review #1, #
   const plain=await prepare(hub,SEEDREAM,{command:'call',prompt:'a red fox in the snow',negative_prompt:'nsfw, nude, lowres'});
   expect(plain.request.arguments).toEqual({command:'call',prompt:'a red fox in the snow',negative_prompt:'nsfw, nude, lowres'});
   expect((await prepare(hub,'echo.cartesia.tts',{text:'Good morning, here is the weather.'})).request.arguments).toEqual({text:'Good morning, here is the weather.'});
+ });
+ it('an attested adult request keeps its model, sampler and capitalised values: they are not a name',async()=>{
+  const {hub}=realHub();
+  const t=await prepare(hub,ROUTER,{prompt:'nsfw invented woman in Paris',model:'Illustrious',sampler:'Euler Ancestral',scheduler:'Karras Normal',nsfw:true,subjects_fictional:true,style:'photoreal',wait:false});
+  expect(t.request.arguments).toMatchObject({model:'Illustrious',sampler:'Euler Ancestral',node:'temper'});
+  const text=textOfArguments({prompt:'a',model:'Illustrious',sampler:'Euler Ancestral',backend:'comfyui',input:{checkpoint:'Pony Diffusion',prompt:'b'}});
+  expect(text).toBe('a\nb');
  });
  it('prepare issues the ticket for an attested adult request on the router with a real keyword and no marker',async()=>{
   const {hub}=realHub();

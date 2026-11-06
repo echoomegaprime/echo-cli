@@ -410,7 +410,11 @@ Request:
 
 `mode` is `"chat" | "image" | "video" | "music" | "sfx" | "voice" | "auto"` (`"auto"` runs the rules classifier
 on the text and maps `image-edit` to `image`). `provider` is one of `"claude" | "gpt" | "grok" | "argon" |
-"qwen"`; omitted, it uses the configured `ModelRouter` default.
+"qwen"`; omitted, it uses the configured `ModelRouter` default. `adult` (optional boolean) is the Studio's Adult mode:
+`true` makes every mode but `chat` answer 400 "Enhance sends the text to a cloud model, so it is off for adult briefs"
+before the rate limiter and any model turn (the page sends it from every surface while Adult mode is on); without it, an
+`image`/`video` brief (or an `auto` brief that classifies as one) with an adult keyword is refused the same way, and
+ordinary chat text that merely contains such a word is enhanced as chat.
 
 Response:
 
@@ -770,16 +774,18 @@ on the way: if the router has no live adult-capable model for it, the router's o
 **Pre-route refusals** mirror the router (`mediarouter/policy.py`) and are wider than its regexes, which miss "teenage",
 "underaged", spelled-out ages and every name that no naming word introduces. They apply to an adult brief only:
 
-- *Minors*: child (and childlike, childhood), kid, baby, babysitter, toddler, infant, teen (teenage, teenaged, teenager),
+- *Minors*: child (and childlike, childhood), kid, babies, "baby girl/boy", babysitter, toddler, infant, teen (teenage, teenaged, teenager),
   tween, pre-teen, adolescent, juvenile, school girl/boy, young/little/small/tiny girl or boy, "young-looking", high
   school, middle school, junior high, elementary, kindergarten, preschool, school uniform, daughter, niece, nephew,
   underage/underaged, "under 18", lolita, ages (digits or words, "16yo", "16 y/o", "sixteen-year-old", "a girl of 15",
   "aged 14", "looks 12") from 0 to 17. 18 and over pass ("an eighteen-year-old", "a 118 year old tortoise").
 - *Real people*: likeness words (deepfake, face swap, look-alike, "looks like", "resembles", "face of", "modeled on a real
-  person", real person, celebrity, famous), people the user knows (sister, brother, mom, dad, wife, girlfriend, friend,
-  boss, teacher, coworker, "my ex" and the like), self-portraits ("myself", selfie), social-network names, `@handle`,
-  links, **any two adjacent Capitalised words anywhere in the brief** (a full name; two-letter words like "An" do not
-  count), and a short reviewed deny-list of public figures matched in any case (`DENIED_NAMES` in `adult.ts`; a seed that
+  person", real person, celebrity, famous), family nouns (sister, brother, mom, dad, aunt, cousin ...), acquaintances when
+  the brief says they are somebody the user knows ("my wife", "her boss", "your friend", "our neighbor"; a bare "sexy
+  teacher" or "two friends" is an invented character and passes), self-portraits ("myself", selfie), social-network names,
+  `@handle`, links, **any two adjacent Capitalised words on one line** (a full name; two-letter words like "An" do not
+  count, and words in two different fields of a request never join into a name; `model`, `backend`, `sampler` and similar
+  identifiers are not read at all), and a short reviewed deny-list of public figures matched in any case (`DENIED_NAMES` in `adult.ts`; a seed that
   an operator extends, because the router's own `named_persons` list is empty today). The Capitalised-pair rule is blunt on
   purpose: "Gothic Cathedral", "Studio Ghibli" or "in the style of Frank Frazetta" in an adult request is refused as
   `real_person`; the user writes it in lower case, rewords ("in a painterly 1970s fantasy style") or drops the name.

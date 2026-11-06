@@ -22,7 +22,7 @@
  * Which tools are checked: every capability that makes media (the ranking table, the catalog category, or an
  * image/video/voice/music id) and every other capability unless it is on a short read-only list (search, list, status,
  * voices, backends...). The arguments are scanned wherever the brief sits (`prompt`, `input.prompt`, `items[].text`...)
- * except a negative prompt, which names what to avoid.
+ * except a negative prompt, which names what to avoid, and model/backend/sampler identifiers, which the router looks up by name.
  *
  * `markers` is the test-only seam: literal strings that count as an adult brief. Production never supplies any.
  */
@@ -61,7 +61,7 @@ export const ADULT_TERM_EXAMPLES:readonly string[]=[
 // Minor-indicating terms: the router's minor_regex plus the spellings it leaves out (teenage, underaged, tween, schools, ages in words).
 const NUM_WORD='(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen)';
 const MINOR_TERMS=[
- 'loli(?:con|ta)?','shota(?:con)?','child\\w*','kids?','kiddo','toddlers?','infants?','bab(?:y|ies|ysit\\w*)','newborns?','pre-?teen\\w*','pre-?pubescent','pubescent','puberty','teen\\w*','tweens?','adolescen\\w*',
+ 'loli(?:con|ta)?','shota(?:con)?','child\\w*','kids?','kiddo','toddlers?','infants?','babies','baby[- ]?(?:girl|boy)s?','babysit\\w*','newborns?','pre-?teen\\w*','pre-?pubescent','pubescent','puberty','teen\\w*','tweens?','adolescen\\w*',
  'juveniles?','jailbait','barely legal','youngsters?','under-?aged?','minors?','school ?(?:girl|boy|child|children|kid)s?','schoolchild\\w*','(?:little|young|small|tiny) (?:girl|boy)s?','(?:young|youthful|child|kid|baby)[- ]?(?:looking|faced?)',
  'high ?school\\w*','middle ?school\\w*','junior ?high','elementary','grade ?school\\w*','primary school','kindergarten\\w*','pre-?school\\w*','nursery school','school ?uniforms?',
  'daughters?','step-?daughters?','nieces?','nephews?','pedo\\w*','paedo\\w*','(?:under|below) (?:the age of )?(?:18|eighteen)','younger than (?:18|eighteen)',
@@ -77,10 +77,14 @@ const MINOR_AGES=[
 ];
 const hasMinor=(text:string):boolean=>MINOR_WORDS.test(text)||MINOR_AGES.some(rx=>rx.test(text));
 // Real-person cues: the router's likeness_regex widened to resemblance words, people the user knows, self-portraits and social networks.
-const KNOWN_PEOPLE='(?:ex-?(?:girlfriend|boyfriend|wife|husband)|my ex|sisters?|brothers?|siblings?|mom|mum|mother|mama|dad|father|papa|aunt|auntie|uncle|cousin|grand(?:ma|mother|pa|father)|wife|husband|girlfriend|boyfriend|fianc[eé]e?|neighbou?rs?|co-?workers?|colleagues?|classmates?|teachers?|boss|roommates?|friends?|crush|step-?(?:mom|dad|mother|father|sister|brother))';
-const LIKENESS=new RegExp('\\b(?:deep ?fakes?|face ?swap\\w*|faceswap\\w*|look-?alikes?|look(?:s|ed|ing)? like|resembl\\w*|likeness|face of|(?:same|identical) face|modell?ed (?:on|after)|based on (?:a |an )?(?:real|actual)|real (?:person|people|woman|man|girl|boy)|actual person|celebrit(?:y|ies)|famous|someone i know|myself|selfie\\w*|(?:photos?|pictures?|images?|portraits?) of (?:me|him|her|them|us)|'+KNOWN_PEOPLE+'|instagram|tiktok|onlyfans|facebook|snapchat|twitter|youtube)\\b|@\\w{3,}|https?:\\/\\/','i');
-// Two adjacent Capitalised words anywhere read as a full name (case-sensitive on purpose). Two-letter words (An, In) do not count.
-const NAMED=/\b[A-Z][a-z]{2,}\s+[A-Z][a-z]{2,}\b/;
+// Family nouns are refused bare (a real relative, and an incest cue besides); acquaintances only when the brief says they are somebody the user
+// knows ("my teacher", "her boss"), because "a sexy teacher" or "two friends on a beach" is an invented character, not a person.
+const FAMILY='(?:sisters?|brothers?|siblings?|mom|mum|mother|mama|dad|father|papa|aunt|auntie|uncle|cousin|grand(?:ma|mother|pa|father)|step-?(?:mom|dad|mother|father|sister|brother))';
+const ACQUAINTANCE='(?:(?:my|our|your|his|her|their)\\s+(?:own\\s+)?(?:ex|ex-?(?:girlfriend|boyfriend|wife|husband)|wife|husband|girlfriend|boyfriend|fianc[eé]e?|neighbou?rs?|co-?workers?|colleagues?|classmates?|teachers?|boss|roommates?|friends?|crush))';
+const LIKENESS=new RegExp('\\b(?:deep ?fakes?|face ?swap\\w*|faceswap\\w*|look-?alikes?|look(?:s|ed|ing)? like|resembl\\w*|likeness|face of|(?:same|identical) face|modell?ed (?:on|after)|based on (?:a |an )?(?:real|actual)|real (?:person|people|woman|man|girl|boy)|actual person|celebrit(?:y|ies)|famous|someone i know|myself|selfie\\w*|(?:photos?|pictures?|images?|portraits?) of (?:me|him|her|them|us)|'+FAMILY+'|'+ACQUAINTANCE+'|instagram|tiktok|onlyfans|facebook|snapchat|twitter|youtube)\\b|@\\w{3,}|https?:\\/\\/','i');
+// Two adjacent Capitalised words on one line read as a full name (case-sensitive on purpose; spaces and tabs only, because the fields of a
+// request are joined by newlines and "Paris" + "Illustrious" in two fields is not a name). Two-letter words (An, In) do not count.
+const NAMED=/\b[A-Z][a-z]{2,}[ \t]+[A-Z][a-z]{2,}\b/;
 /** A short reviewed deny-list of public figures, matched in any case. It is a seed, not a census: the Capitalised-pair rule and
  * the likeness words do the general work, and an operator extends this list when a name must be refused in lower case or as
  * one word (the router's own `named_persons` list is empty today). */
@@ -122,8 +126,10 @@ export function promptOfArguments(args:unknown):string{
  for(const v of [a.prompt,a.text,o.prompt,o.text])if(typeof v==='string'&&v.trim())return v.trim();
  return '';
 }
-// A negative prompt names what the picture must NOT show ("nsfw, nude, lowres" is what a safe prompt carries).
-const NEGATIVE_KEYS=new Set(['negativeprompt','negativeprompts','negprompt','negative']);
+// Not read as the brief: a negative prompt names what the picture must NOT show ("nsfw, nude, lowres" is what a safe prompt carries), and
+// the model, backend, sampler and similar identifiers are looked up by name by the router (an unknown one is a 404), so a Capitalised
+// "Euler Ancestral" or "Illustrious" there is never a person's name and never a brief.
+const SKIPPED_KEYS=new Set(['negativeprompt','negativeprompts','negprompt','negative','model','modelid','node','backend','sampler','scheduler','checkpoint','lora','vae','workflow']);
 /** Every string in a request, at any depth and in any field (`input.prompt`, `items[].text`, `brief`...), joined by newlines and
  * bounded in size, so a brief cannot hide in a field the gate did not know to read. Negative prompts are skipped. */
 export function textOfArguments(args:unknown,maxChars=MAX_TEXT):string{
@@ -133,7 +139,7 @@ export function textOfArguments(args:unknown,maxChars=MAX_TEXT):string{
   const v=stack.pop();nodes++;
   if(typeof v==='string'){const t=v.trim();if(t){parts.push(t.slice(0,maxChars-chars));chars+=Math.min(t.length,maxChars-chars)+1;}}
   else if(Array.isArray(v)){for(let i=v.length-1;i>=0;i--)stack.push(v[i]);}
-  else if(v&&typeof v==='object'){const e=Object.entries(v as Record<string,unknown>);for(let i=e.length-1;i>=0;i--)if(!NEGATIVE_KEYS.has(e[i][0].toLowerCase().replace(/[^a-z]/g,'')))stack.push(e[i][1]);}
+  else if(v&&typeof v==='object'){const e=Object.entries(v as Record<string,unknown>);for(let i=e.length-1;i>=0;i--)if(!SKIPPED_KEYS.has(e[i][0].toLowerCase().replace(/[^a-z]/g,'')))stack.push(e[i][1]);}
  }
  return parts.join('\n').slice(0,maxChars);
 }
