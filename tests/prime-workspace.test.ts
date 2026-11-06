@@ -481,7 +481,7 @@ describe('canonical Workspace boundary in the existing Prime host',()=>{
   expect(upstream.calls.filter(c=>['/api/auth/usage','/api/auth/invites'].includes(c.path))).toHaveLength(2);
  });
  // Emailed invitations (PRIME_MEMBERS_CONTRACT.md): Prime passes the request and the Workspace's `email` result through
- // untouched, adds nothing of its own, and relays a rate limit's wait to the browser as Retry-After.
+ // untouched and adds nothing of its own.
  it('passes send_email, invite_id and the email result through the owner invite and resend routes untouched',async()=>{
   const upstream=await ownerFixture(),owner=await login(await prime(upstream.baseUrl),'owner');
   const post=(path:string,body:unknown)=>fetch(owner.url+'/api/workspace/auth/'+path,{method:'POST',headers:headers(owner),body:JSON.stringify(body)});
@@ -491,15 +491,16 @@ describe('canonical Workspace boundary in the existing Prime host',()=>{
   expect(resent.status).toBe(200);expect(await resent.json()).toMatchObject({email:{sent:true,message_id:'msg-1'}});
   expect(upstream.bodies.map(b=>[b.path,JSON.parse(b.body)])).toEqual([['/api/auth/invite',{email:'new@example.test',send_email:true}],['/api/auth/invite/resend',{invite_id:'invite-id'}]]);
  });
- it('relays the wait of a rate-limited resend as Retry-After, and only when it is a number of seconds',async()=>{
+ // The real Workspace never answers a resend with 429 (a rate-limited mail is reported inside a 200), and a Retry-After
+ // relay would change every Workspace 429, the sign-in ones included. So the status and body pass through, no header is added.
+ it('passes a Workspace 429 through untouched and adds no Retry-After header',async()=>{
   const upstream=await ownerFixture(),owner=await login(await prime(upstream.baseUrl),'owner');
   const resend=()=>fetch(owner.url+'/api/workspace/auth/invite/resend',{method:'POST',headers:headers(owner),body:JSON.stringify({invite_id:'invite-id'})});
-  upstream.behavior.resendLimitedHeader='600';
-  const limited=await resend();
-  expect(limited.status).toBe(429);expect(limited.headers.get('retry-after')).toBe('600');expect(await limited.json()).toEqual({error:'Too many attempts.',retry_after:600});
-  upstream.behavior.resendLimitedHeader='Wed, 21 Oct 2026 07:28:00 GMT';
-  const dated=await resend();
-  expect(dated.status).toBe(429);expect(dated.headers.get('retry-after')).toBeNull();expect(await dated.json()).toEqual({error:'Too many attempts.',retry_after:600});
+  for(const header of ['600','Wed, 21 Oct 2026 07:28:00 GMT']){
+   upstream.behavior.resendLimitedHeader=header;
+   const limited=await resend();
+   expect(limited.status).toBe(429);expect(limited.headers.get('retry-after')).toBeNull();expect(await limited.json()).toEqual({error:'Too many attempts.',retry_after:600});
+  }
  });
  it('rejects invalid UTF-8 request bytes before any upstream write',async()=>{
   const upstream=await ownerFixture(),p=await login(await prime(upstream.baseUrl),'owner');

@@ -7,7 +7,7 @@
  const esh={generation:0,rows:new Map(),review:null,busy:false,floating:false,rect:{x:280,y:90,width:640,height:430}};
  // Members view (owner only): what the next render keeps after an action (null on a fresh open) and the usage token
  // that discards a late usage readback for a member who is no longer selected.
- let membersCarry=null,membersUsage=0;
+ let membersCarry=null,membersUsage=0,membersSendEmail=true;// the last choice of "Email the invitation": opening Members again rebuilds the view, and mail cannot be recalled
  const transport=new window.EchoPrimeWorkspaceTransport({onIdentityChange:identityChanged});
  // Vendor turns in an Echo conversation (live test 2026-11-06: Claude was picked, Qwen answered, nothing said so). The
  // Workspace has no route that appends a message to a saved chat (/api/import always creates a new chat), so a vendor
@@ -76,7 +76,7 @@
   identity=key;
   if(!first&&!changed){log('identity','unchanged');return;}
   log('identity',first?'observed':'changed');
-  state.accountEpoch++;membersCarry=null;membersUsage++;// the next account starts Members with nothing selected
+  state.accountEpoch++;membersCarry=null;membersUsage++;membersSendEmail=true;// the next account starts Members with nothing selected and the box ticked
   state.controller.abort();state.controller=new AbortController();clearFields();content.replaceChildren();status('');state.data=null;clearConversation();
   voiceOptions.spoken=false;voiceOptions.brief=false;voiceOptions.autoSend=false;
   $('#workspace-chat-search').value='';$('#workspace-project').replaceChildren(element('option',{value:''},'No project'));
@@ -733,13 +733,25 @@
  const inviteEmailPattern=/^[^\s@]{1,64}@[^\s@]+\.[^\s@]{2,}$/;
  // Emailed invitations (PRIME_MEMBERS_CONTRACT.md): when asked (send_email) the Workspace answers with
  // `email:{sent,message_id?,error?,retry_after?}`. These turn that result, or a refused resend, into the one line the
- // owner reads. Codes the contract names get plain words; any other text (a provider message) is shown as given, capped.
- const mailCodes={mail_unavailable:'Mail is not set up',invalid_recipient:'That email address cannot receive an invitation',invalid_invite_url:'The invite link is not allowed in email'};
+ // owner reads. The four echo-auth codes and the codes the Workspace adds itself (http_<status>, session_unavailable,
+ // identity_unreachable, invite_url_unavailable) get plain words; any other text (a provider message) is shown as given,
+ // capped. A Map, so a code named like an Object member (constructor, __proto__) is never read as one.
+ const mailCodes=new Map([
+  ['mail_unavailable','Mail is not set up'],
+  ['invalid_recipient','That email address cannot receive an invitation'],
+  ['invalid_invite_url','The invite link is not allowed in email'],
+  ['invite_url_unavailable','The Workspace has no invite link set up for email'],
+  ['session_unavailable','Sign out and back in, then try again'],
+  ['http_401','Sign out and back in, then try again'],
+  ['http_403','Your account is not allowed to send invitations'],
+  ['identity_unreachable','The identity service did not answer; the invitation may not have been sent']]);
  function mailWait(seconds){const value=Number(seconds);return Number.isFinite(value)&&value>0&&value<=604800?`Too many invitations, try again in ${Math.max(1,Math.ceil(value/60))} min`:'Too many invitations, try again later';}
  function mailFailure(error,retryAfter){
   const code=typeof error==='string'?error.trim().slice(0,300):'';
-  if(code==='too_many_attempts')return mailWait(retryAfter);
-  if(mailCodes[code])return mailCodes[code];
+  if(code==='too_many_attempts'||code==='http_429')return mailWait(retryAfter);
+  if(mailCodes.has(code))return mailCodes.get(code);
+  const http=/^http_([1-5]\d\d)$/.exec(code);
+  if(http)return Number(http[1])>=500?`The identity service had a problem (HTTP ${http[1]}); the invitation may not have been sent`:`The identity service refused the request (HTTP ${http[1]}); the invitation was not sent`;
   if(/^[a-z][a-z0-9_]*$/.test(code))return `Invitation email failed (${code})`;
   return code||'The email was not sent';
  }
@@ -835,11 +847,12 @@
    inviteResult.replaceChildren(...nodes);
   }
   // "Email the invitation" is on by default: the Workspace sends the mail server-side with this owner's session.
-  const emailIt=element('input',{type:'checkbox','aria-label':'Email the invitation'});emailIt.checked=true;
+  const emailIt=element('input',{type:'checkbox','aria-label':'Email the invitation'});emailIt.checked=membersSendEmail;
+  emailIt.addEventListener('change',()=>{membersSendEmail=emailIt.checked===true;});
   const create=button('Create invite',async()=>{
    const address=String(inviteEmail.value||'').trim();
    if(address.length>254||!inviteEmailPattern.test(address))throw new Error('Enter a valid email address.');
-   const send=emailIt.checked===true;
+   const send=emailIt.checked===true;membersSendEmail=send;
    let receipt;
    try{receipt=await api('/auth/invite',{email:address,send_email:send});}
    catch(error){
@@ -854,13 +867,19 @@
    await open('members');
   },'quiet-button members-primary');
   // Resend: same rate limits as a new invite, no confirm card (nothing is destroyed). The list is unchanged by a resend, so the
-  // answer is shown in place, with the copy-link fallback whenever the mail did not go.
+  // answer is shown in place, with the copy-link fallback whenever the mail did not go. A refusal (404/409) reloads the list instead.
   async function resendInvite(item){
    const email=String(item.email||'');
-   let receipt=null,failure='';
+   let receipt=null,failure='',refused=false;
    try{receipt=await api('/auth/invite/resend',{invite_id:item.id});}
-   catch(error){failure=error?.status===429?mailWait(error.retryAfter):error instanceof Error?error.message:'The invitation was not re-sent.';}
+   catch(error){
+    failure=error?.status===429?mailWait(error.retryAfter):error instanceof Error?error.message:'The invitation was not re-sent.';
+    // 404 and 409 are the Workspace's own refusals: the invite is unknown, used, revoked or expired, or its address is now banned or has an account.
+    // That link no longer works, so there is nothing to share; every other failure leaves the invite as it was.
+    refused=error?.status===404||error?.status===409;
+   }
    if(!live())return;
+   if(refused){membersCarry={select:view.selected,query:view.query,filter:view.filter,inviteNotice:`Nothing was sent to ${email}. ${failure}`};await open('members');status(failure);return;}
    const mail=failure?{state:'failed',text:failure}:mailOutcome(receipt?.email);
    view.inviteNotice='';view.inviteError=null;view.invite={email,existing:true,kind:'resend',mail};
    inviteOutput();status(mailLine(mail,email));

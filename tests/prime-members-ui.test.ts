@@ -442,6 +442,14 @@ describe('Invitation email',()=>{
   ['an invite link the mailer refuses',{sent:false,error:'invalid_invite_url'},'The invite link is not allowed in email'],
   ['the provider text',{sent:false,error:'Mail provider refused the message (550).'},'Mail provider refused the message (550).'],
   ['a code the view does not know',{sent:false,error:'forbidden'},'Invitation email failed (forbidden)'],
+  ['an owner who is not on the sender list (the Workspace reports http_403)',{sent:false,error:'http_403'},'Your account is not allowed to send invitations'],
+  ['a sign-in the identity service no longer accepts (http_401)',{sent:false,error:'http_401'},'Sign out and back in, then try again'],
+  ['a session that holds no mail token (session_unavailable)',{sent:false,error:'session_unavailable'},'Sign out and back in, then try again'],
+  ['an identity service that did not answer',{sent:false,error:'identity_unreachable'},'The identity service did not answer; the invitation may not have been sent'],
+  ['a Workspace without an invite link',{sent:false,error:'invite_url_unavailable'},'The Workspace has no invite link set up for email'],
+  ['an identity service client error (http_404)',{sent:false,error:'http_404'},'The identity service refused the request (HTTP 404); the invitation was not sent'],
+  ['an identity service server error (http_502)',{sent:false,error:'http_502'},'The identity service had a problem (HTTP 502); the invitation may not have been sent'],
+  ['a rate limit the Workspace reports as http_429',{sent:false,error:'http_429',retry_after:900},'Too many invitations, try again in 15 min'],
   ['no reason at all',{sent:false},'The email was not sent'],
  ] as const)('shows the exact failure for %s and keeps the invite and the copy-link fallback',async(_name,mail,expected)=>{
   const h=membersHarness({request:(path,body)=>path==='/auth/invite'?created(body,{email:mail}):undefined});await h.open();
@@ -450,6 +458,12 @@ describe('Invitation email',()=>{
   expect(errorLine(h,expected)).toBe(true);expect(h.text()).not.toContain('Invitation emailed');
   expect(h.text()).toContain('share the link and message yourself');
   expect(linkField(h)!.value).toBe('https://echoomegaprime.com/#invite');expect(messageField(h)).toBeDefined();
+ });
+ it.each(['constructor','toString','hasOwnProperty','valueOf','__proto__'])('shows a mail code named "%s" as text, never as an inherited Object member',async code=>{
+  const h=membersHarness({request:(path,body)=>path==='/auth/invite'?created(body,{email:{sent:false,error:code}}):undefined});await h.open();
+  await create(h);
+  const line=h.all().find(n=>n.className==='members-error')!;
+  expect(text(line)).toBe(/^[a-z][a-z0-9_]*$/.test(code)?`Invitation email failed (${code})`:code);
  });
  it('says so when the Workspace reports no email result at all (one that predates send_email)',async()=>{
   const h=membersHarness({request:(path,body)=>path==='/auth/invite'?created(body):undefined});await h.open();
@@ -478,7 +492,10 @@ describe('Invitation email',()=>{
   ['a rate limit without a wait',()=>Promise.reject(refusal('Too many attempts.',{status:429})),'Too many invitations, try again later'],
   ['mail that is not set up',()=>({invite:activeInvite,email:{sent:false,error:'mail_unavailable'}}),'Mail is not set up'],
   ['a rate limit reported in the email result',()=>({invite:activeInvite,email:{sent:false,error:'too_many_attempts',retry_after:3600}}),'Too many invitations, try again in 60 min'],
-  ['an invite that is no longer active',()=>Promise.reject(refusal('That invite is no longer active.',{status:409})),'That invite is no longer active.'],
+  ['an owner who is not on the sender list',()=>({invite:activeInvite,email:{sent:false,error:'http_403'}}),'Your account is not allowed to send invitations'],
+  ['a session that holds no mail token',()=>({invite:activeInvite,email:{sent:false,error:'session_unavailable'}}),'Sign out and back in, then try again'],
+  ['an identity service that did not answer',()=>({invite:activeInvite,email:{sent:false,error:'identity_unreachable'}}),'the invitation may not have been sent'],
+  ['the Workspace being unavailable (the invite may still be good)',()=>Promise.reject(refusal('Workspace unavailable.',{status:502})),'Workspace unavailable.'],
   ['a missing email result',()=>({invite:activeInvite}),'did not report an email result'],
  ] as const)('shows the exact failure for a resend that hits %s, with the copy-link fallback',async(_name,answer,expected)=>{
   const h=membersHarness({request:path=>path==='/auth/invite/resend'?answer():undefined});await h.open();
@@ -486,6 +503,30 @@ describe('Invitation email',()=>{
   expect(h.text()).toContain(expected);expect(h.text()).not.toContain('Invitation emailed');
   expect(h.status.textContent).toContain(expected);
   expect(linkField(h)!.value).toBe('https://echoomegaprime.com/#invite');expect(messageField(h)!.value).toContain('old@example.test');
+ });
+ // The Workspace refuses a resend (accounts.py resendable_invite) with 404 for an unknown invite and 409 for one that is
+ // used, revoked or expired, or whose address is now banned or has an account. None of those links works, so the card
+ // shows the refusal only, never the link or the message to send, and the list is read again so a stale Resend goes.
+ it.each([
+  ['an invite that was already used',409,'This invite was already used.'],
+  ['an invite that has expired',409,'This invite has expired. Create a new invite.'],
+  ['an address that now has an account',409,'That email already has an account (approved).'],
+  ['an address that is banned',409,'That email is banned. Unban the account first.'],
+  ['an invite that does not exist',404,'Invite not found.'],
+ ] as const)('shows only the refusal for a resend that hits %s, reloads the invites and offers no link',async(_name,status,message)=>{
+  let reads=0;
+  const h=membersHarness({request:path=>{
+   if(path==='/auth/invite/resend')return Promise.reject(refusal(message,{status}));
+   if(path==='/auth/invites'){reads++;return {invites:[reads>1?{...activeInvite,status:'used',used_at:1730000600}:activeInvite]};}
+   return undefined;
+  }});await h.open();
+  expect(resendButtons(h)).toHaveLength(1);
+  await resendButtons(h)[0].fire('click');await flush();
+  expect(h.text()).toContain(message);expect(h.text()).not.toContain('Invitation emailed');
+  expect(h.calls('/auth/invites')).toHaveLength(2);// the invite list was read again
+  expect(resendButtons(h)).toHaveLength(0);// ... so the invite that can no longer be sent has no Resend button
+  expect(linkField(h)).toBeUndefined();expect(messageField(h)).toBeUndefined();
+  expect(h.text()).not.toContain('share the link and message');
  });
  it('does not send twice while a resend is in flight',async()=>{
   const pending=deferred();
@@ -503,6 +544,33 @@ describe('Invitation email',()=>{
   h.change();// the same page now belongs to a member
   pending.resolve({invite:activeInvite,email:{sent:true}});await first;await flush();
   expect(h.content.children).toHaveLength(0);expect(h.text()).not.toContain('Invitation emailed');
+  expect(h.status.textContent).toBe('');// a stray "Workspace view changed" line would mean the live() guard was lost
+ });
+ // Opening Members again (after a create, a member action or a revoke) rebuilds the whole view. An owner who unticked the
+ // box to create several invites without mail must not have it silently ticked again, because mail cannot be recalled.
+ it('keeps "Email the invitation" unticked across a create, a member action, a revoke and a Cancel',async()=>{
+  const h=membersHarness();await h.open();
+  const untick=async()=>{mailBox(h)!.checked=false;await mailBox(h)!.fire('change');};
+  await untick();
+  await create(h);
+  expect(mailBox(h)!.checked).toBe(false);// after a create
+  await create(h,'second@example.test');
+  expect(h.calls('/auth/invite').map(c=>c[1])).toEqual([{email:'new@example.test',send_email:false},{email:'second@example.test',send_email:false}]);
+  await h.choose('m-pending');await h.find('Approve')!.fire('click');await flush();// a member action: confirm card, then Confirm
+  await h.find('Confirm')!.fire('click');await flush();
+  expect(h.calls('/auth/decide')).toHaveLength(1);expect(mailBox(h)!.checked).toBe(false);// after a member action
+  await h.find('Revoke')!.fire('click');await flush();await h.find('Confirm')!.fire('click');await flush();
+  expect(h.calls('/auth/invite/revoke')).toHaveLength(1);expect(mailBox(h)!.checked).toBe(false);// after a revoke
+  await h.find('Revoke')!.fire('click');await flush();await h.find('Cancel')!.fire('click');await flush();
+  expect(h.calls('/auth/invite/revoke')).toHaveLength(1);expect(mailBox(h)!.checked).toBe(false);// after Cancel
+  mailBox(h)!.checked=true;await mailBox(h)!.fire('change');await create(h,'third@example.test');
+  expect(h.calls('/auth/invite').at(-1)![1]).toEqual({email:'third@example.test',send_email:true});expect(mailBox(h)!.checked).toBe(true);
+ });
+ it('starts the next account with the box ticked again',async()=>{
+  const h=membersHarness();await h.open();
+  mailBox(h)!.checked=false;await mailBox(h)!.fire('change');
+  h.change(()=>({...ownerSession(),user:{...ownerSession().user,uid:'owner-2',email:'second-owner@example.test'}}));await h.open();// another account signs in on the same page
+  expect(mailBox(h)!.checked).toBe(true);
  });
  it('lets a member or an anonymous visitor reach no invite or resend route',async()=>{
   for(const session of [memberSession,anonymousSession]){
@@ -540,8 +608,9 @@ describe('Workspace transport refusals (the shipped workspace-client.js)',()=>{
 });
 
 describe('Workspace transport refusals: how long to wait',()=>{
- // The Workspace answers a rate-limited invite or resend with a 429 that names the wait in its JSON (`retry_after`,
- // seconds) and, through Prime, in a Retry-After header. The transport puts the wait on the error as `retryAfter`.
+ // A 429 names its wait in the JSON body (`retry_after`, seconds), at the top or inside an `email` result. The transport
+ // puts it on the error as `retryAfter`. Prime does not relay a Retry-After header (the Workspace reports a rate-limited
+ // mail inside a normal answer), so a header is never read.
  async function refusedWith(status:number,payload:Record<string,unknown>,extraHeaders:Record<string,string>={}){
   const json=(value:unknown,code=200,headers:Record<string,string>={})=>new Response(JSON.stringify(value),{status:code,headers:{'content-type':'application/json',...headers}});
   const fetch=vi.fn(async(url:string)=>url==='/api/session'?json(ownerSession()):json(payload,status,extraHeaders));
@@ -554,20 +623,21 @@ describe('Workspace transport refusals: how long to wait',()=>{
   const error=await refusedWith(429,{error:'Too many attempts.',retry_after:600});
   expect(error?.status).toBe(429);expect(error?.message).toBe('Too many attempts.');expect(error?.retryAfter).toBe(600);
  });
- it('falls back to the Retry-After header',async()=>{
-  const error=await refusedWith(429,{error:'Too many attempts.'},{'retry-after':'120'});
-  expect(error?.retryAfter).toBe(120);
+ it('reads the wait from an email result inside the body',async()=>{
+  const error=await refusedWith(429,{error:'Too many attempts.',email:{sent:false,error:'too_many_attempts',retry_after:90}});
+  expect(error?.retryAfter).toBe(90);
  });
- it('prefers the body over the header',async()=>{
-  const error=await refusedWith(429,{error:'Too many attempts.',retry_after:30},{'retry-after':'120'});
-  expect(error?.retryAfter).toBe(30);
+ it('never reads a Retry-After header, because Prime does not relay one',async()=>{
+  const error=await refusedWith(429,{error:'Too many attempts.'},{'retry-after':'120'});
+  expect(error?.status).toBe(429);expect('retryAfter' in error).toBe(false);
+  const withBody=await refusedWith(429,{error:'Too many attempts.',retry_after:30},{'retry-after':'120'});
+  expect(withBody?.retryAfter).toBe(30);
  });
  it.each([
   ['a negative wait',{retry_after:-5},{}],
   ['a zero wait',{retry_after:0},{}],
   ['a text wait',{retry_after:'soon'},{}],
   ['a wait over a week',{retry_after:1e9},{}],
-  ['a header that is not a number of seconds',{},{'retry-after':'Wed, 21 Oct 2026 07:28:00 GMT'}],
  ] as const)('carries no wait for %s',async(_name,payload,headers)=>{
   const error=await refusedWith(429,{error:'Too many attempts.',...payload},headers);
   expect(error?.status).toBe(429);expect('retryAfter' in error).toBe(false);
