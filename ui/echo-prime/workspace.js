@@ -862,7 +862,7 @@
    const session=await transport.loadSession();state.enabled=session?.workspaceConfigured===true;identityChanged(session);
    if(state.enabled){$('#workspace-navigation').hidden=false;$('#workspace-search-label').hidden=false;$('#clear-history').hidden=true;$('#workspace-conversation-controls').hidden=false;$('#composer').before($('#workspace-conversation-controls'));if(session.authenticated&&session.user.status==='approved')await refresh();else{$('#draft-notice').textContent='Sign in to your private Workspace to converse with Echo.';$('#draft-notice').hidden=false;}}
    return state.enabled;
-  }catch(error){status(error?.status===429?'Prime is busy right now (too many requests at once); the sign-in check was retried with backoff and still refused. Reload the page in a moment.':'Workspace connection is unavailable. No automatic retry or alternate account was used.');return false;}
+  }catch(error){status(error?.status===429?'Prime is busy right now (too many requests at once), so the Workspace could not load. Reload the page in a moment.':'Workspace connection is unavailable. No automatic retry or alternate account was used.');return false;}
  })();
  // Narrow facade for the composer, voice bar and plugins view. It deliberately
  // omits the CSRF proof, transport and request headers.
