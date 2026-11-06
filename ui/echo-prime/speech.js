@@ -7,8 +7,12 @@
  // window.EchoPrimeWorkspace.bridge (/api/voice/start|next|cancel|transcribe plus governed WAV
  // artifacts). The backend synthesises saved assistant replies, so Echo's own voice starts the
  // moment a reply is saved ("done"), chunk by chunk with the next chunk prefetched while the
- // current one plays. A device voice (speechSynthesis) is never a silent fallback: it speaks only
- // behind the explicit toggle "Device voice (not Echo's)". Spoken replies default ON for signed-in
+ // current one plays. Every other reply path (ECHO Code replies, Swarm and Agents results, Steward
+ // advice) speaks in the same voice through the owner-only Prime route POST /api/prime/voice/speak,
+ // which calls the same loopback voice gateway, persona and model (Prime holds no provider token).
+ // A device voice (speechSynthesis) is never a silent fallback: it speaks only behind the explicit
+ // toggle "Device voice (not Echo's)" and only when Echo's voice cannot reach that text at all; a
+ // failed synthesis shows its reason and is never substituted. Spoken replies default ON for signed-in
  // approved accounts and OFF for anonymous visitors. The only browser storage is the mute and
  // device-voice preference, read and written inside try/catch. Debug events never carry text.
  const $=selector=>document.querySelector(selector);
@@ -252,7 +256,7 @@
  const shouldAutoSpeak=()=>{const b=bridge();return !!b&&b.voiceOptions.spoken===true&&!prefs.muted&&signedIn();};
 
  // ---------------------------------------------------------------- runtime state
- const S={appliedEpoch:null,turns:0,spoken:new Map(),current:null,device:null,deferred:null,blocked:null,ctx:null,unlocked:false,stream:null,closedStreams:new Map(),reasonShown:false,hidden:false,levelTimer:null};
+ const S={appliedEpoch:null,turns:0,spoken:new Map(),current:null,device:null,deferred:null,blocked:null,ctx:null,unlocked:false,stream:null,closedStreams:new Map(),reasonShown:false,hidden:false,levelTimer:null,prime:null,primeLoading:null,autoSpoken:new Map()};
  let ui=null,conversation=null;
  const liveCurrent=current=>!!current&&S.current===current&&current.epoch===bridge()?.state.accountEpoch;
  function setStatus(text){if(ui)ui.status.textContent=String(text||'').slice(0,400);}
@@ -324,6 +328,7 @@
     if(error&&(error.name==='NotAllowedError'||/not allowed|gesture/i.test(String(error?.message)))){
      S.blocked={message:current.message,chatId:current.chatId};debug('autoplay_blocked',{message_id:current.message.id});setStatus('Tap to hear Echo.');
     }else setStatus('Audio playback was blocked by the browser.');
+    if(S.blocked&&current.replay)S.blocked={replay:current.replay};// a Prime-route reply replays its own text, not a saved message
     finish(false);
    });
   });
@@ -378,6 +383,136 @@
   }
  }
 
+ // ---------------------------------------------------------------- Echo's voice for every other reply path
+ // ECHO Code replies (chat.js `echo-code-reply`), Swarm and Agents results and Steward advice are not saved
+ // Workspace messages, so the backend's /api/voice/start cannot reach them. They speak through the owner-only
+ // Prime route POST /api/prime/voice/speak {text} (one bounded section per call, audio/mpeg or audio/wav back),
+ // which calls the same loopback voice gateway with the same persona and model. The route status
+ // (GET /api/prime/voice/status) is read once per identity and cached, so a Speak click answers at once.
+ const PRIME_FIRST=220,PRIME_CHUNK=400,PRIME_BRIEF=600,PRIME_MAX_TEXT=30000,PRIME_MAX_AUDIO=5*1024*1024;
+ const SOURCE_LABEL={code:'ECHO Code reply',swarm:'Swarm result',agents:'Agents result',steward:'Steward advice'};
+ const sourceLabel=source=>SOURCE_LABEL[source]||'text';
+ const ownerSession=()=>signedIn()&&session()?.ownerAccess===true;
+ async function primeHeaders(extra={}){const ws=window.EchoPrimeWorkspace;const owner=typeof ws?.ownerHeaders==='function'?await ws.ownerHeaders():{};return {'x-prime-request':'1',...owner,...extra};}
+ const primeOff=reason=>({configured:false,available:false,reason});
+ const primeVoiceNow=()=>{const p=S.prime;return p&&p.epoch===bridge()?.state?.accountEpoch&&p.owner===ownerSession()?p:null;};
+ function refreshPrimeVoice(){
+  const epoch=bridge()?.state?.accountEpoch,owner=ownerSession(),keep=value=>{S.prime={epoch,owner,...value};return S.prime;};
+  if(!owner)return Promise.resolve(keep(primeOff(signedIn()?"Echo's voice for these replies is owner-only":'sign in to an approved account')));
+  if(typeof fetch!=='function')return Promise.resolve(keep(primeOff('this browser cannot reach the Prime voice route')));
+  if(S.primeLoading&&S.primeLoading.epoch===epoch)return S.primeLoading.promise;
+  const promise=(async()=>{
+   let value;
+   try{
+    const response=await fetch('/api/prime/voice/status',{method:'GET',credentials:'same-origin',headers:await primeHeaders()});
+    let data=null;try{data=await response.json();}catch{}
+    if(!response.ok)value=primeOff(typeof data?.error==='string'&&data.error.trim()?data.error.trim().slice(0,300):'the Prime voice route answered HTTP '+response.status);
+    else if(!data||typeof data!=='object')value=primeOff('the Prime voice route returned an unrecognized status');
+    else{
+     const text=v=>typeof v==='string'&&v.trim()?v.trim().slice(0,120):null;
+     value={configured:data.configured===true,available:data.configured===true&&data.available!==false,label:text(data.label),provider:text(data.provider),reason:text(data.reason)||(data.configured===true?null:"Echo's voice route is off on this host")};
+    }
+   }catch{value=primeOff('the Prime voice status check failed');}
+   debug('prime_voice_status',{configured:value.configured,available:value.available});
+   if(S.primeLoading?.promise===promise)S.primeLoading=null;
+   if(bridge()?.state?.accountEpoch!==epoch)return {epoch,owner,...value};// a newer identity owns the cache
+   const kept=keep(value);sync();return kept;
+  })();
+  S.primeLoading={epoch,promise};return promise;
+ }
+ function primeChunks(text,brief){
+  const out=[];let current='';
+  for(const sentence of chunkSentences(text,{max:PRIME_CHUNK})){
+   const limit=out.length?PRIME_CHUNK:PRIME_FIRST;// a short first section keeps time-to-first-audio low
+   if(current&&(current+' '+sentence).length>limit){out.push(current);current=sentence;}else current=current?current+' '+sentence:sentence;
+  }
+  if(current)out.push(current);
+  if(!brief)return out;
+  const kept=[];let total=0;for(const chunk of out){if(kept.length&&total+chunk.length>PRIME_BRIEF)break;kept.push(chunk);total+=chunk.length;}
+  return kept;
+ }
+ async function primeSpeak(text,current,index){
+  const started=clock();
+  const response=await fetch('/api/prime/voice/speak',{method:'POST',credentials:'same-origin',headers:await primeHeaders({'content-type':'application/json'}),body:JSON.stringify({text}),signal:current.controller.signal});
+  const header=name=>{try{return String(response.headers?.get?.(name)||'');}catch{return '';}};
+  if(!response.ok){
+   let data=null;try{data=await response.json();}catch{}
+   debug('prime_chunk_failed',{origin:current.source,index,status:response.status});
+   throw new Error(typeof data?.error==='string'&&data.error.trim()?data.error.trim().slice(0,300):'the Prime voice route answered HTTP '+response.status+'.');
+  }
+  if(!/^audio\/(?:mpeg|wav)\b/i.test(header('content-type')))throw new Error("the Prime voice route did not return Echo's audio.");
+  const blob=await response.blob();
+  if(!blob||!blob.size)throw new Error('the Prime voice route returned empty audio.');
+  if(blob.size>PRIME_MAX_AUDIO)throw new Error('the speech audio exceeds the 5 MiB limit.');
+  let label='';try{label=decodeURIComponent(header('x-echo-voice-label'));}catch{label='';}
+  if(label.trim())current.voice=label.trim().slice(0,60);
+  if(header('x-echo-voice-provider'))current.provider=providerName(header('x-echo-voice-provider'));
+  debug('prime_chunk_ready',{origin:current.source,index,bytes:blob.size,ms:Math.round(clock()-started)});
+  return blob;
+ }
+ async function speakEcho(text,options={}){
+  const b=bridge(),source=options.source||'text',key=options.key||null,label=sourceLabel(source);
+  if(!b)return false;
+  if(typeof text!=='string'||!text.trim()){setStatus('Nothing to speak yet.');return false;}
+  const pv=primeVoiceNow()||await refreshPrimeVoice();
+  if(!pv.configured||pv.available===false){
+   // Device voice only behind its explicit toggle, and only because Echo's voice cannot reach this text at all.
+   if(prefs.device)return speakText(text,{source,key});
+   debug('prime_voice_unavailable',{origin:source,configured:pv.configured});
+   if(options.auto){if(S.reasonShown)return false;S.reasonShown=true;}// explain once per identity for automatic replies
+   setStatus("Echo's voice is unavailable for this "+label+': '+(pv.reason||"the Prime voice route is off")+'. Turn on "Device voice (not Echo\'s)" to hear this '+label+'.');
+   return false;
+  }
+  const normalised=normalizeForSpeech(text);
+  if(!normalised){setStatus('Nothing to speak after screen-only details are removed.');return false;}
+  if(normalised.length>PRIME_MAX_TEXT){setStatus('This '+label+' is too long for speech. Ask for a shorter spoken version.');return false;}
+  const brief=b.voiceOptions?.brief===true,chunks=primeChunks(normalised,brief);
+  if(!chunks.length){setStatus('Nothing to speak after screen-only details are removed.');return false;}
+  stop('replace',{quiet:true});
+  const current={kind:'prime',source,key,message:{id:'prime:'+(key||uuid())},chatId:null,requestId:null,session:{chat_id:null,session_id:null},epoch:b.state.accountEpoch,startedAt:clock(),ttfa:null,chunks:0,
+   voice:pv.label||voiceLabel(),provider:providerName(pv.provider),lang:detectLanguage(text),queue:null,controller:new AbortController(),replay:()=>speakEcho(text,{source,key})};
+  S.current=current;S.blocked=null;S.deferred=null;
+  setStatus('Preparing '+current.voice+'…');sync();
+  debug('speech_requested',{source:'echo',route:'prime',origin:source,sections:chunks.length,lang:current.lang,mode:brief?'summary':'full'});
+  try{
+   const section=async index=>({blob:await primeSpeak(chunks[index],current,index),index,hasMore:index<chunks.length-1});
+   const first=await section(0);if(!liveCurrent(current))return false;
+   const queue=createQueue({
+    fetchNext:item=>section(item.index+1),
+    play:(item,signal,index)=>playBlob(item.blob,signal,current,index),
+    onEvent:(event,detail)=>debug('queue_'+event,{source:'echo',route:'prime',origin:source,...detail}),
+   });
+   current.queue=queue;
+   const complete=await queue.run(first);
+   if(liveCurrent(current)){
+    if(complete){setStatus('Spoke the '+label+' with '+current.voice+'. Microphone '+(conversation?.active?'listening':'off')+'.');debug('speech_finished',{source:'echo',route:'prime',origin:source,chunks:current.chunks,ttfa_ms:current.ttfa,duration_ms:Math.round(clock()-current.startedAt)});}
+    else if(!S.blocked)debug('speech_interrupted',{source:'echo',route:'prime',origin:source,chunks:current.chunks});
+   }
+   return complete;
+  }catch(error){
+   if(!liveCurrent(current))return false;
+   if(quietError(error)){debug('speech_cancelled',{source:'echo',route:'prime',origin:source});return false;}
+   const raw=error instanceof Error&&error.message.trim()?error.message.trim():'no audio was returned.',reason=/[.!?]$/.test(raw)?raw:raw+'.';
+   setStatus('Echo could not speak this '+label+': '+reason+' No automatic retry was made.');debug('speech_failed',{source:'echo',route:'prime',origin:source,chunks:current.chunks});
+   return false;
+  }finally{
+   if(S.current===current){S.current=null;stopLevelLoop();emitState();sync();}
+  }
+ }
+ // Automatic speech when spoken replies is on, deferred to "Resume Echo" while the tab is hidden. Every ECHO Code
+ // reply is its own turn; a Swarm, Agents or Steward result re-rendered with the same text speaks once (ten minutes).
+ function autoSpeak(text,source,key){
+  if(!shouldAutoSpeak()||typeof text!=='string'||!text.trim())return;
+  if(source!=='code'){
+   const fingerprint=source+':'+text.length+':'+text.slice(0,80),now=Date.now();
+   for(const [entry,at] of S.autoSpoken)if(now-at>600000)S.autoSpoken.delete(entry);
+   if(S.autoSpoken.has(fingerprint)){debug('duplicate_suppressed',{origin:source});return;}
+   S.autoSpoken.set(fingerprint,now);while(S.autoSpoken.size>200)S.autoSpoken.delete(S.autoSpoken.keys().next().value);
+  }
+  if(document.hidden){S.deferred={replay:()=>speakEcho(text,{source,key})};sync();return;}
+  void speakEcho(text,{source,key,auto:true});
+ }
+
  // ---------------------------------------------------------------- device voice (explicit)
  const deviceAvailable=()=>typeof speechSynthesis!=='undefined'&&typeof SpeechSynthesisUtterance!=='undefined';
  function deviceVoiceFor(lang){
@@ -399,7 +534,7 @@
  }
  async function speakText(text,options={}){
   const source=options.source||'text';
-  if(!prefs.device){setStatus("Echo's voice speaks saved Workspace replies only. Turn on \"Device voice (not Echo's)\" to hear this "+(source==='code'?'ECHO Code reply':source==='swarm'?'Swarm result':source==='steward'?'Steward advice':'text')+'.');debug('device_voice_off',{source});return false;}
+  if(!prefs.device){setStatus("Device voice (not Echo's) is off. Turn on \"Device voice (not Echo's)\" to hear this "+sourceLabel(source)+'.');debug('device_voice_off',{source});return false;}
   if(!deviceAvailable()){setStatus('Device voice is unavailable in this browser.');return false;}
   let first,fetchNext,count=null;
   if(options.first&&options.fetchNext){first=options.first;fetchNext=options.fetchNext;}// an open stream feeds sentences as they arrive
@@ -423,7 +558,7 @@
  // ---------------------------------------------------------------- stop / barge-in
  function stop(reason,options={}){
   const b=bridge(),current=S.current,device=S.device;let stopped=false;
-  if(current){S.current=null;stopped=true;try{current.queue?.cancel(reason);}catch{}
+  if(current){S.current=null;stopped=true;try{current.queue?.cancel(reason);}catch{}try{current.controller?.abort();}catch{}// drops an in-flight Prime-route section too
    // The backend caches start() per request id. Once a session is cancelled (or its start was abandoned in
    // flight) a replay must mint a fresh id, otherwise /voice/next answers "session ended".
    const record=S.spoken.get(current.message.id);if(record)record.cancelled=true;
@@ -436,6 +571,8 @@
   emitState();sync();return stopped;
  }
  const speakingKey=()=>S.current?.key||S.device?.key||null;
+ // What "Resume Echo" offers back: a Prime-route reply replays its own text, a Workspace reply its saved message.
+ const deferOf=current=>typeof current.replay==='function'?{replay:current.replay}:{message:current.message,chatId:current.chatId};
 
  // ---------------------------------------------------------------- reply hooks
  // Streamed replies: one open device-voice queue per stream. Sentences are pushed as they complete and the
@@ -489,10 +626,11 @@
   let host=/\bmessage-actions\b/.test(String(article.className||''))?article:null;
   if(!host)try{host=article.querySelector?.('.message-actions')||null;}catch{host=null;}
   if(!host){host=el('div',{class:'message-actions speech-actions'});try{article.append(host);}catch{return null;}}
-  const label=source==='swarm'?'Speak result':source==='steward'?'Speak advice':'Speak';
+  const label=source==='swarm'||source==='agents'?'Speak result':source==='steward'?'Speak advice':'Speak';
   const button=el('button',{type:'button',class:'quiet-button','data-speech-speak':source},'🔊 '+label);
   // Speak/stop toggle: playback runs in the background so the same button can stop it.
-  button.addEventListener('click',()=>{if(speakingKey()===key)stop('user');else void speakText(text,{source,key});sync();});
+  // Echo's own voice through the Prime route; the device voice only behind its toggle when that route is unavailable.
+  button.addEventListener('click',()=>{if(speakingKey()===key)stop('user');else void speakEcho(text,{source,key});sync();});
   host.append(button);
   (ui?.speakButtons||(ui.speakButtons=new Map())).set(button,{key,label:'🔊 '+label});
   return button;
@@ -501,9 +639,7 @@
   if(!detail||typeof detail.text!=='string')return;
   const key='code:'+(detail.sessionId||'')+':'+S.turns+':'+detail.text.length;
   registerSpeakButton(detail.article,detail.text,'code',key);
-  if(!shouldAutoSpeak()||document.hidden)return;
-  if(!prefs.device){if(S.reasonShown)return;S.reasonShown=true;}// explain once per identity why Echo's voice cannot speak this
-  void speakText(detail.text,{source:'code',key});
+  autoSpeak(detail.text,'code',key);// Commander 2026-11-05: "It should speak them when spoken replies is selected."
  }
  function onResultRendered(detail){
   if(!detail||typeof detail.text!=='string')return;
@@ -515,9 +651,11 @@
    if(!row){row=el('div',{class:'message-actions speech-actions','data-speech-result-row':String(detail.source||'result')});try{if(typeof target.after==='function')target.after(row);else target.parentNode?.append(row);}catch{return;}}
    else row.replaceChildren();
    registerSpeakButton(row,detail.text,detail.source,key);
+   autoSpeak(detail.text,String(detail.source||'result'),key);
    return;
   }
   registerSpeakButton(target,detail.text,detail.source,key);
+  autoSpeak(detail.text,String(detail.source||'result'),key);
  }
 
  // ---------------------------------------------------------------- conversation mode (continuous)
@@ -657,8 +795,10 @@
   ui.device.addEventListener('change',()=>{prefs.device=ui.device.checked===true;savePrefs();if(!prefs.device&&S.device)stop('device-off',{quiet:true});debug('device_voice_changed',{enabled:prefs.device});setStatus(prefs.device?"Device voice (not Echo's) will speak text Echo's voice cannot reach.":'Device voice off.');sync();});
   ui.deviceLabel=el('label',{class:'check speech-device'},ui.device,"Device voice (not Echo's)");
   ui.conversation=control('◉ Conversation mode',async()=>{await conversationApi.toggle();},{'data-speech-conversation':'','aria-pressed':'false',title:'Continuous voice conversation: the microphone stays open, each pause sends your words, Echo speaks the reply, and speaking over Echo interrupts it.'});
-  ui.tap=control('Tap to hear Echo',async()=>{const blocked=S.blocked;S.blocked=null;await unlock();if(blocked)void speakMessage(blocked.message,blocked.chatId,{force:true});},{class:'speech-chip','data-speech-tap':''});
-  ui.resume=control('Resume Echo',async()=>{const deferred=S.deferred;S.deferred=null;await unlock();if(deferred)void speakMessage(deferred.message,deferred.chatId,{force:true});},{class:'speech-chip','data-speech-resume':''});
+  // A Prime-route reply (ECHO Code, Swarm, Agents, Steward) carries its own replay; a Workspace reply replays its saved message.
+  const replay=item=>{if(!item)return;if(typeof item.replay==='function')void item.replay();else void speakMessage(item.message,item.chatId,{force:true});};
+  ui.tap=control('Tap to hear Echo',async()=>{const blocked=S.blocked;S.blocked=null;await unlock();replay(blocked);},{class:'speech-chip','data-speech-tap':''});
+  ui.resume=control('Resume Echo',async()=>{const deferred=S.deferred;S.deferred=null;await unlock();replay(deferred);},{class:'speech-chip','data-speech-resume':''});
   ui.status=el('small',{class:'speech-status','data-speech-status':'',role:'status'});
   ui.root=el('div',{class:'speech-dock','data-speech-dock':'','aria-label':'Spoken replies'},
    el('div',{class:'speech-row'},ui.voice,ui.mute,ui.stop,ui.count),
@@ -673,11 +813,11 @@
   window.addEventListener('echo-result-rendered',event=>onResultRendered(event?.detail));
   // workspace.js calls stopAudio() from its own visibilitychange handler before ours runs; keep the hidden-tab
   // reply so "Resume Echo" can offer it back.
-  window.addEventListener('echo-voice-stop',()=>{if(!(S.current||S.device))return;if(document.hidden&&S.current)S.deferred={message:S.current.message,chatId:S.current.chatId};stop(document.hidden?'hidden':'workspace',{quiet:!document.hidden});});
+  window.addEventListener('echo-voice-stop',()=>{if(!(S.current||S.device))return;if(document.hidden&&S.current)S.deferred=deferOf(S.current);stop(document.hidden?'hidden':'workspace',{quiet:!document.hidden});});
   window.addEventListener('pagehide',()=>{stop('pagehide',{quiet:true});stopConversation('pagehide');});
   for(const name of ['pointerdown','keydown','touchstart'])window.addEventListener(name,()=>{void unlock();},{once:true,capture:true,passive:true});
   document.addEventListener('visibilitychange',()=>{
-   if(document.hidden){const current=S.current;if(current){S.deferred={message:current.message,chatId:current.chatId};}stop('hidden',{quiet:false});if(conversation)conversation.paused=true;}
+   if(document.hidden){const current=S.current;if(current){S.deferred=deferOf(current);}stop('hidden',{quiet:false});if(conversation)conversation.paused=true;}
    else{if(conversation){conversation.paused=false;conversation.vad.reset();}emitState();}
    sync();
   });
@@ -689,7 +829,7 @@
   applyDefault();sync();
  }
  function onAccountChanged(){
-  S.spoken.clear();S.closedStreams.clear();S.turns=0;S.deferred=null;S.blocked=null;S.stream=null;S.reasonShown=false;S.appliedEpoch=null;
+  S.spoken.clear();S.closedStreams.clear();S.turns=0;S.deferred=null;S.blocked=null;S.stream=null;S.reasonShown=false;S.appliedEpoch=null;S.prime=null;S.primeLoading=null;S.autoSpoken.clear();
   stop('account',{quiet:true,cancelBackend:false});stopConversation('account');setStatus('');
  }
  function applyDefault(){
@@ -701,6 +841,7 @@
   const before=b.voiceOptions.spoken;b.voiceOptions.spoken=signedIn()&&!prefs.muted;
   debug('default_applied',{signed_in:signedIn(),spoken:b.voiceOptions.spoken,muted:prefs.muted});
   if(before!==b.voiceOptions.spoken)try{b.updateContext();}catch{}// the voice bar checkbox rendered before this default landed
+  void refreshPrimeVoice();// Echo's voice for ECHO Code, Swarm, Agents and Steward: read once per identity
  }
  function attachBarControl(){
   const bar=$('[data-voice-bar]');if(!bar||ui.barMute)return;
@@ -730,11 +871,11 @@
  // ---------------------------------------------------------------- public surface
  window.EchoPrimeSpeech={
   normalizeForSpeech,chunkSentences,createChunker,detectLanguage,createQueue,createVad,encodeWav,resample,numberWords,cardinal,ordinal,
-  speakMessage,speakText,stop,unlock,conversation:conversationApi,
+  speakMessage,speakText,speakEcho,primeChunks,refreshPrimeVoice,get primeVoice(){return primeVoiceNow();},stop,unlock,conversation:conversationApi,
   setMuted,get muted(){return prefs.muted;},get deviceVoice(){return prefs.device;},
   get turns(){return S.turns;},get speaking(){return !!S.current||!!S.device;},get blocked(){return !!S.blocked;},get deferred(){return !!S.deferred;},
   get handlesReplies(){return !!ui;},
-  snapshot(){return {turns:S.turns,speaking:!!S.current,deviceSpeaking:!!S.device,muted:prefs.muted,device:prefs.device,blocked:!!S.blocked,deferred:!!S.deferred,conversation:!!conversation?.active,spoken:[...S.spoken.keys()]};},
+  snapshot(){const p=primeVoiceNow();return {turns:S.turns,speaking:!!S.current,deviceSpeaking:!!S.device,muted:prefs.muted,device:prefs.device,blocked:!!S.blocked,deferred:!!S.deferred,conversation:!!conversation?.active,spoken:[...S.spoken.keys()],primeVoice:p?{configured:p.configured,available:p.available}:null};},
  };
  (async()=>{
   try{

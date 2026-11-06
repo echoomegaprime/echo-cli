@@ -62,7 +62,7 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
   const path=new URL(req.url??'/',url).pathname;
   if(path.startsWith('/api/')){
    const started=Date.now(),requestId=randomUUID();
-   const operation=path.startsWith('/api/workspace/')?'workspace':path.startsWith('/api/steward/')?'steward':path.startsWith('/api/prime/swarm/')?'swarm':path.startsWith('/api/prime/adk/')?'adk':path.startsWith('/api/prime/bots/')?'bots':path.startsWith('/api/prime/browser/')?'browser':path.startsWith('/api/prime/build/')?'build':path==='/api/prime/uploads'||path.startsWith('/api/prime/uploads/')?'uploads':path==='/api/prime/artifacts'||path.startsWith('/api/prime/artifacts/')?'artifacts':path==='/api/session'?'session':'owner';
+   const operation=path.startsWith('/api/workspace/')?'workspace':path.startsWith('/api/steward/')?'steward':path.startsWith('/api/prime/swarm/')?'swarm':path.startsWith('/api/prime/voice/')?'voice':path.startsWith('/api/prime/adk/')?'adk':path.startsWith('/api/prime/bots/')?'bots':path.startsWith('/api/prime/browser/')?'browser':path.startsWith('/api/prime/build/')?'build':path==='/api/prime/uploads'||path.startsWith('/api/prime/uploads/')?'uploads':path==='/api/prime/artifacts'||path.startsWith('/api/prime/artifacts/')?'artifacts':path==='/api/session'?'session':'owner';
    const record=(outcome:string)=>debug('%j',{schemaVersion:1,event:'prime_api_request',operation,requestId,status:res.statusCode,outcome,durationMs:Date.now()-started});
    res.once('finish',()=>record('returned'));res.once('close',()=>{if(!res.writableEnded)record('disconnected');});
    const supplied=(req.headers.cookie??'').split(';').map(c=>c.trim()).find(c=>c.startsWith('echo_prime='))?.slice(11)??'';
@@ -152,6 +152,7 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
      send(404,{error:'Unknown uploads or artifacts route'});return;
     }
     if(workspace)await workspace.requireOwner(req,abort.signal);
+    if(path==='/api/prime/voice/status'&&req.method==='GET'){send(200,await hub.voiceStatus(abort.signal));return;}
     // Personality catalog loader bound to this owner request's Workspace cookie; the forge caches it 60 s. Absent without a Workspace (built-in catalog).
     const personalities=workspace?()=>workspace.personalities(req,abort.signal):undefined;
     if(path==='/api/status'&&req.method==='GET'){send(200,await hub.status());return;}
@@ -204,6 +205,7 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     if(path==='/api/steward/status'&&req.method==='GET'){send(200,await hub.stewardStatus());return;}
     if(req.method!=='POST'||!req.headers['content-type']?.startsWith('application/json')){send(405,{error:'JSON POST required'});return;}
     const data=await body(req);
+    if(path==='/api/prime/voice/speak'){const out=await hub.voiceSpeak(data,abort.signal);res.writeHead(200,{'Content-Type':out.contentType,'Content-Length':out.bytes,'X-Echo-Voice-Provider':out.provider,'X-Echo-Voice-Label':encodeURIComponent(out.label),'X-Echo-Voice-Model':out.model,'X-Echo-Voice-Chars':String(out.chars)});res.end(out.audio);return;}
     if(path==='/api/prime/build/create'){send(202,await hub.buildCreate(data));return;}
     if(buildAction){
      const id=decodeURIComponent(buildAction[1]),action=buildAction[2];

@@ -197,7 +197,8 @@
   else if(e.code==='budget_exceeded'){const box=el('div',undefined,'adk-stopbox');box.append(el('strong','Budget stop: the run stopped at its budget.'),el('p',(typeof e.message==='string'&&e.message?clip(e.message,600)+' ':'')+spentText(data.spent)+'.'));nodes.push(box);}
   else if(runStatus==='failed'){const box=el('div',undefined,'adk-stopbox');box.append(el('strong','The run failed'+(typeof e.code==='string'?' ('+clip(e.code,40)+')':'')+'.'),el('p',typeof e.message==='string'&&e.message?clip(e.message,600):'Echo ADK gave no reason.'));nodes.push(box);}
   const text=finalText(steps);
-  if(text!==null)nodes.push(el('h3','Final text'),el('p',clip(text,20000),'adk-final'));
+  r.finalNode=null;
+  if(text!==null){r.finalNode=el('p',clip(text,20000),'adk-final');nodes.push(el('h3','Final text'),r.finalNode);}
   else if(runStatus==='done')nodes.push(el('p','The run finished without a final text.','adk-muted'));
   const stepsBox=el('section',undefined,'adk-steps');stepsBox.append(el('h3','Steps ('+steps.length+')'));
   if(steps.length){const ol=el('ol');steps.slice(0,500).forEach((s,i)=>ol.append(stepRow(s,i)));stepsBox.append(ol);}else stepsBox.append(el('p',runStatus==='queued'?'Queued; no step has run yet.':'No steps reported yet.','adk-muted'));
@@ -234,6 +235,9 @@
    if(data.done===true){
     renderRun(r,data);r.note='Finished after '+clock(Date.now()-r.startedAt)+'.';statusLine(r);
     debug('adk_run',data.status==='done'?'completed':'failed',{runId:r.runId,steps:Array.isArray(data.steps)?data.steps.length:0});
+    // Hook for speech.js (additive): Echo speaks the final text and offers "Speak result" beside it, once per finished run.
+    const spoken=finalText(Array.isArray(data.steps)?data.steps:[]);
+    if(spoken&&r.finalNode&&!r.resultAnnounced){r.resultAnnounced=true;try{window.dispatchEvent(Object.assign(new Event('echo-result-rendered'),{detail:{source:'agents',text:spoken,container:r.finalNode}}));}catch{}}
     if(typeof window.EchoPrimeArtifacts?.register==='function'&&!r.artifactRegistered){
      r.artifactRegistered=true;
      const p=obj(data.proof),ft=finalText(Array.isArray(data.steps)?data.steps:[]);
