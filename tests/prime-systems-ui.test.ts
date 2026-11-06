@@ -29,7 +29,7 @@ describe('Echo systems panel verdicts',()=>{
   for(const name of ['CONTINUITY','CRYSTAL','ESH','PERSONALITY','SWARM','AGENTS','CREATIVE'])expect(v[name].state,name).toBe('connected');
   expect(v.CRYSTAL.reason).toBe('12 crystals');expect(v.ESH.reason).toBe('v0.2.0 · strict policy');expect(v.AGENTS.reason).toContain('echoBots on');
   expect(v.SHADOWGLASS).toMatchObject({state:'degraded'});expect(v.SHADOWGLASS.reason).toContain('side panel');
-  expect(v.NEXUS).toMatchObject({state:'degraded',text:'2 of 3 nodes connected'});expect(v.NEXUS.reason).toContain('crucible: security node');
+  expect(v.NEXUS).toMatchObject({state:'connected',text:'2 of 3 nodes connected · 1 dormant (policy)'});expect(v.NEXUS.reason).toContain('crucible: security node');// dormant is the node's policy, not a fault
  });
  it('names the failure instead of hiding it',()=>{
   const v=load()({...healthy,health:ok({model:{ok:false,error:'FORGE must have only the configured model loaded'}}),plugins:ok({ecf:{ok:false,error:'No SOL mission scope'},crystal:{ok:true,status:{}},esh:{ok:true,status:{}}}),swarm:fail('No answer within 12 s'),adk:ok({configured:false,reason:'Echo ADK is off'})});

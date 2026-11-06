@@ -390,3 +390,26 @@ describe('shipped markup and delivery',()=>{
   }finally{await server.close();}
  });
 });
+
+// Live test 2026-11-06: Echo Build and Library & Artifacts fell into "More", Talk > Library duplicated Library & Artifacts,
+// and the declared Swarm brain / Fleet nodes items never appeared (swarm.js and fleet.js now add real #open-swarm and
+// #open-fleet buttons; their own tests live in prime-chatfix-ui.test.ts).
+describe('index.html items land in their declared groups',()=>{
+ const loose:Spec[]=[['button',{class:'nav-item',id:'open-library'},'Library & Artifacts'],['button',{class:'nav-item',id:'open-build','data-owner-only':''},'Echo Build'],
+  ['button',{class:'nav-item',id:'open-swarm','data-owner-only':''},'Swarm brain'],['button',{class:'nav-item',id:'open-fleet','data-owner-only':''},'Fleet nodes']];
+ const inboxExtra:Spec[]=[['button',{class:'nav-item','data-prime-view':'library'},'Library'],['button',{class:'nav-item',id:'open-artifacts'},'Artifact Center']];
+ it('puts Library & Artifacts under Talk once, Echo Build under Create, and Swarm brain and Fleet nodes in their groups',()=>{
+  const h=boot({loose,inboxExtra});
+  expect(h.groupOf(h.byLabel('Library & Artifacts'))).toBe('talk');expect(h.groupOf(h.byLabel('Echo Build'))).toBe('create');
+  expect(h.groupOf(h.byLabel('Swarm brain'))).toBe('agents');expect(h.groupOf(h.byLabel('Fleet nodes'))).toBe('echo');
+  expect(h.group('more')).toBeUndefined();
+  const visible=(id:string)=>h.group(id).items.filter((i:any)=>!i.duplicate).map((i:any)=>i.id);
+  expect(visible('talk')).toEqual(['conversation','projects','library','artifacts']);
+  expect(h.nav.item('library').id).toBe('open-library');
+  const libraries=h.doc.querySelectorAll('.nav-item').filter((n:FakeNode)=>n.textContent.trim()==='Library');
+  expect(libraries).toHaveLength(2);for(const node of libraries)expect(node.parentNode!.hidden).toBe(true);// same dialog as Library & Artifacts, so one entry
+  expect(h.groupOf(h.byLabel('Artifact Center'))).toBe('talk');
+  expect(h.byLabel('Library & Artifacts').parentNode!.hidden).toBe(false);// the Prime library works without the Workspace too
+  expect(visible('create')).toEqual(['studio','code-review','build']);
+ });
+});

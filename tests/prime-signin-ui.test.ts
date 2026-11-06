@@ -286,3 +286,124 @@ describe('signed-in card',()=>{
   expect(text(descendants(h.card()).find(n=>n.className==='signin-avatar')!)).toBe('NP');
  });
 });
+
+// Live test 2026-11-06: a friend of the owner could not create an account on a phone. The panel status line sits above
+// the fold, so every result was invisible. Each action now answers next to its own button (role=status, aria-live) and
+// scrolls that answer into view; the sign-up intent renders Google's own "Sign up with Google" text (GIS `signup_with`).
+describe('sign-up intent and inline action results',()=>{
+ const field=(h:ReturnType<typeof boot>,name:string)=>descendants(h.content).find(n=>n.tagName==='INPUT'&&n.dataset.signinField===name)!;
+ const labels=(h:ReturnType<typeof boot>)=>descendants(h.content).filter(n=>n.className==='workspace-field').map(n=>text(n.children[0]));
+ const resultOf=(h:ReturnType<typeof boot>,label:string)=>{const button=h.find(label)!,siblings=button.parent!.children,index=siblings.indexOf(button);return siblings[index+1];};
+ const withScroll=()=>{const scrolled:Node[]=[];(Node.prototype as any).scrollIntoView=function(this:Node,options:any){scrolled.push(this);(this as any).scrolledWith=options;};return {scrolled,restore:()=>{delete (Node.prototype as any).scrollIntoView;}};};
+ it('renders the official GIS sign-up text on the sign-up intent and keeps continue_with for sign-in',async()=>{
+  const h=boot({session:anonymous(),config:enabled()},{slotWidth:320});
+  await h.get('#sidebar-signup').fire('click');await flush();
+  const api=h.gis();await h.script().fire('load');await flush();
+  expect(api.renderButton.mock.calls[0][1]).toEqual({type:'standard',theme:'filled_black',size:'large',shape:'pill',text:'signup_with',logo_alignment:'left',width:320});
+  const signin=boot({session:anonymous(),config:enabled()},{slotWidth:320});await signin.open();
+  const other=signin.gis();await signin.script().fire('load');await flush();
+  expect(other.renderButton.mock.calls[0][1].text).toBe('continue_with');
+ });
+ it('labels the address field Email on the sign-up intent and keeps Email / user ID for sign-in',async()=>{
+  const h=boot({session:anonymous(),config:enabled()});await h.get('#sidebar-signup').fire('click');await flush();
+  expect(labels(h)).toContain('Email');expect(labels(h)).not.toContain('Email / user ID');
+  expect(field(h,'email').attributes.type).toBe('email');
+  const signin=boot({session:anonymous(),config:enabled()});await signin.open();
+  expect(labels(signin)).toContain('Email / user ID');
+ });
+ it('refuses an address without @ before sending and says so next to Create account',async()=>{
+  const view=withScroll();
+  try{
+   const h=boot({session:anonymous(),config:enabled()});await h.get('#sidebar-signup').fire('click');await flush();
+   field(h,'email').value='friend.example.com';field(h,'password').value='a long password';
+   await h.find('Create account')!.fire('click');await flush();
+   expect(h.auth.mock.calls.map(c=>c[0])).not.toContain('signup');
+   const result=resultOf(h,'Create account');
+   expect(result.attributes.role).toBe('status');expect(result.attributes['aria-live']).toBe('polite');
+   expect(result.textContent).toMatch(/email address/i);expect(result.dataset.state).toBe('error');
+   expect(view.scrolled).toContain(result);expect(field(h,'password').value).toBe('a long password');// nothing was sent, so nothing to retype
+  }finally{view.restore();}
+ });
+ it('shows the server sign-up message verbatim next to Create account and scrolls it into view',async()=>{
+  const view=withScroll();
+  try{
+   const h=boot({session:anonymous(),config:enabled()});await h.get('#sidebar-signup').fire('click');await flush();
+   h.auth.mockImplementation(async(operation:string)=>operation==='config'?enabled():operation==='signup'?{message:'Account created. Verify friend@example.test, then wait for the owner to approve it.'}:{});
+   field(h,'email').value=' friend@example.test ';field(h,'password').value='a long password';field(h,'name').value='Friend';
+   await h.find('Create account')!.fire('click');await flush();
+   expect(h.auth.mock.calls.find(c=>c[0]==='signup')![1]).toMatchObject({email:'friend@example.test',display_name:'Friend'});// the password is cleared from the sent body afterwards
+   const result=resultOf(h,'Create account');
+   expect(result.textContent).toBe('Account created. Verify friend@example.test, then wait for the owner to approve it.');expect(result.dataset.state).toBe('ok');
+   expect(view.scrolled).toContain(result);expect(field(h,'password').value).toBe('');
+  }finally{view.restore();}
+ });
+ it('shows a server sign-up refusal verbatim inline, not only in the status line above the fold',async()=>{
+  const h=boot({session:anonymous(),config:enabled()});await h.get('#sidebar-signup').fire('click');await flush();
+  h.auth.mockImplementation(async(operation:string)=>{if(operation==='signup')throw new Error('An account already exists for this email. Sign in, or use Forgot password.');return enabled();});
+  field(h,'email').value='friend@example.test';field(h,'password').value='a long password';
+  await h.find('Create account')!.fire('click');await flush();
+  const result=resultOf(h,'Create account');
+  expect(result.textContent).toBe('An account already exists for this email. Sign in, or use Forgot password.');expect(result.dataset.state).toBe('error');
+ });
+ it('answers Sign in and Forgot password next to their own buttons',async()=>{
+  const h=boot({session:anonymous(),config:enabled(),loginError:'Email or password is incorrect.'});await h.open();
+  field(h,'email').value='friend@example.test';field(h,'password').value='wrong';
+  await h.find('Sign in')!.fire('click');await flush();
+  expect(resultOf(h,'Sign in').textContent).toBe('Email or password is incorrect.');
+  await h.find('Forgot password?')!.fire('click');await flush();
+  expect(resultOf(h,'Forgot password?').textContent).toMatch(/Recovery request returned|reset/i);
+  field(h,'email').value='no-at-sign';await h.find('Forgot password?')!.fire('click');await flush();
+  expect(resultOf(h,'Forgot password?').textContent).toBe('Enter your email address first.');
+ });
+});
+
+// Review 2026-11-06: "Sign up with Google" calls the same Google login route (Google's credential is the same for sign-in
+// and sign-up; echo-auth decides). Until echo-auth creates accounts from Google sign-in, the Workspace answers a Google
+// address with no account with a bare "Sign-in failed." (401). On the sign-up intent that refusal now says, next to the
+// button, what to do next; any other answer is shown verbatim and alone.
+describe('Google sign-up refusal on the sign-up intent',()=>{
+ const withScroll=()=>{const scrolled:Node[]=[];(Node.prototype as any).scrollIntoView=function(this:Node){scrolled.push(this);};return {scrolled,restore:()=>{delete (Node.prototype as any).scrollIntoView;}};};
+ const googleStatus=(h:ReturnType<typeof boot>)=>descendants(h.google()).find(n=>n.className==='signin-google-status')!;
+ const details=(h:ReturnType<typeof boot>)=>descendants(h.content).find(n=>n.tagName==='DETAILS')!;
+ async function signupCallback(error:Error){
+  const h=boot({session:anonymous(),config:enabled()});await h.get('#sidebar-signup').fire('click');await flush();
+  const api=h.gis();await h.script().fire('load');await flush();
+  h.auth.mockImplementation(async(operation:string)=>{if(operation==='login')throw error;return enabled();});
+  details(h).open=false;
+  const result={credential:'eyJ.fixture.token'};
+  await api.initialize.mock.calls[0][0].callback(result);await flush();
+  return {h,result};
+ }
+ it('keeps the Workspace message verbatim and says how to get an account, next to the button and in view',async()=>{
+  const view=withScroll();
+  try{
+   const {h,result}=await signupCallback(Object.assign(new Error('Sign-in failed.'),{status:401}));
+   expect(h.auth.mock.calls.filter(c=>c[0]==='login').map(c=>c[1])).toEqual([{provider:'google',id_token:'eyJ.fixture.token'}]);
+   expect(h.auth.mock.calls.some(c=>c[0]==='signup')).toBe(false);// sign-up with Google is the Google login route, never the password sign-up
+   expect(result.credential).toBe('');
+   const status=googleStatus(h);
+   expect(status.textContent.startsWith('Sign-in failed. ')).toBe(true);
+   expect(status.textContent).toMatch(/no Echo account uses this Google address yet/i);
+   expect(status.textContent).toMatch(/create an account below with the same email address/i);
+   expect(h.google().attributes['data-state']).toBe('error');expect(details(h).open).toBe(true);
+   expect(view.scrolled).toContain(status);
+  }finally{view.restore();}
+ });
+ it('shows any other answer verbatim and alone',async()=>{
+  const view=withScroll();
+  try{
+   const {h}=await signupCallback(Object.assign(new Error('Identity service is unavailable.'),{status:503}));
+   expect(googleStatus(h).textContent).toBe('Identity service is unavailable.');
+   expect(view.scrolled).toContain(googleStatus(h));
+   const precise=await signupCallback(Object.assign(new Error('Google cannot confirm this address is still yours.'),{status:403}));
+   expect(googleStatus(precise.h).textContent).toBe('Google cannot confirm this address is still yours.');
+  }finally{view.restore();}
+ });
+ it('adds no sign-up guidance to a refused Google sign-in',async()=>{
+  const h=boot({session:anonymous(),config:enabled()});await h.open();
+  const api=h.gis();await h.script().fire('load');await flush();
+  h.auth.mockImplementation(async(operation:string)=>{if(operation==='login')throw Object.assign(new Error('Sign-in failed.'),{status:401});return enabled();});
+  await api.initialize.mock.calls[0][0].callback({credential:'eyJ.fixture.token'});await flush();
+  expect(googleStatus(h).textContent).toBe('Sign-in failed.');
+ });
+});

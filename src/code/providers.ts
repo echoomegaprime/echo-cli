@@ -19,7 +19,7 @@ export type Runner = (cmd: string, args: string[], options: RunOptions) => Promi
 /** `declinedBy` is set by the Prime chat when a vendor declined and the turn was re-run on Qwen (Commander directive 2026-11-04). */
 export interface Answered { provider: ProviderId; requested: string | null; model: string | null; reported: boolean; declinedBy?: ProviderId }
 export class ProviderUnavailableError extends Error {
-  constructor(readonly provider: ProviderId, detail: string) { super(`${PROVIDER_LABEL[provider]} is unavailable: ${detail}; no fallback was used`); this.name = 'ProviderUnavailableError'; }
+  constructor(readonly provider: ProviderId, readonly detail: string) { super(`${PROVIDER_LABEL[provider]} is unavailable: ${detail}; no fallback was used`); this.name = 'ProviderUnavailableError'; }
 }
 /**
  * The vendor answered, but with a refusal instead of an action (its classifier declined the request).

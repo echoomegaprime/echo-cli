@@ -98,11 +98,11 @@ describe('availability report', () => {
     const by = Object.fromEntries(report.providers.map(p => [p.id, p]));
     expect(report.default).toBe('qwen'); expect(report.contextTokens).toBe(262144);
     expect(by.qwen).toMatchObject({ available: true, kind: 'local', check: 'model-listed', requested: 'c3po-code:echo-qwen38-abliterated-256k' });
-    expect(by.claude).toMatchObject({ available: true, kind: 'cli', check: 'installed' });
+    expect(by.claude).toMatchObject({ available: true, kind: 'cli', check: 'signed-in' });// `claude auth status` exited 0
     expect(by.gpt).toMatchObject({ available: false, check: 'signed-in' }); expect(by.gpt.reason).toMatch(/not signed in/i);
     expect(by.grok).toMatchObject({ available: false }); expect(by.grok.reason).toMatch(/could not start "grok"/);
     expect(JSON.stringify(report)).not.toContain('secret@example.com');
-    expect(r.calls.find(c => c.cmd === 'claude')!.args).toEqual(['--version']);
+    expect(r.calls.find(c => c.cmd === 'claude')!.args).toEqual(['auth', 'status']);
     expect(r.calls.find(c => c.cmd === 'codex')!.args).toEqual(['login', 'status']);
     expect(r.calls.every(c => !Object.keys(c.env).some(k => /KEY|TOKEN|SECRET/i.test(k)))).toBe(true);
   });
@@ -119,7 +119,7 @@ describe('availability report', () => {
     let now = 1_000_000; const r = runner(() => ok());
     const router = new ModelRouter({ ...DEFAULT_MODELS, endpoint: fake.url }, { runner: r.run, now: () => now });
     await router.report(); await router.report();
-    expect(r.calls).toHaveLength(5); expect(fake.tags()).toBe(1); // claude, codex, grok, agy --version, agy models
+    expect(r.calls).toHaveLength(5); expect(fake.tags()).toBe(1); // claude auth status, codex login status, grok --version, agy --version, agy models
     now += 59_000; await router.report(); expect(r.calls).toHaveLength(5);
     now += 2_000; await router.report(); expect(r.calls).toHaveLength(10); expect(fake.tags()).toBe(2);
   });

@@ -806,7 +806,7 @@ describe('Artifact Center provenance & actions', () => {
   expect(w.bridge.api).toHaveBeenCalledWith('/import', expect.objectContaining({ title: 'Prior Chat', source: 'chatgpt' }));
  });
 
- it('forwards attached uploads in chat.js and registers Echo Build outputs in Artifact Center', async () => {
+ it('forwards attached uploads in chat.js and files no Echo Build artifact for a chat reply', async () => {
   const w = buildLibraryWorld(['library.js', 'chat.js']);
   w.bridge.state.attachments.add(UPL_PDF);
 
@@ -830,14 +830,9 @@ describe('Artifact Center provenance & actions', () => {
   expect(sent.sent).toBe(true);
   await tick();
 
+  // Live test 2026-11-06: every ECHO Code reply was filed as an "Echo Build" code artifact. A chat reply is not a build.
   const artCall = w.fetchMock.mock.calls.find((c: any[]) => c[0] === '/api/prime/artifacts' && c[1]?.method === 'POST');
-  expect(artCall).toBeTruthy();
-  expect(JSON.parse(artCall![1].body).provenance).toMatchObject({
-   source: 'build',
-   prompt: 'Build the upload parser',
-   model: 'qwen2.5-coder',
-   run_id: 'sess_42',
-  });
+  expect(artCall).toBeUndefined();
  });
 
  it('works for approved Workspace members (non-owner) with member CSRF headers', async () => {

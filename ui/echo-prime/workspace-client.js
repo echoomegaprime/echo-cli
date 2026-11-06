@@ -17,6 +17,10 @@
  // invalidation, logout, an owner-only 401/403) and a successful login forget it, so a sign-in or a revocation is seen
  // on the very next read. Before 2026-11-04 an idle owner page read /api/session about nine times a minute.
  const SESSION_MEMO_MS=10000,memo={at:-Infinity,value:null,inflight:null,generation:0};
+ // A 429 on the admission read is Prime's request limit, not an answer about the account (live test 2026-11-06: one 429 at
+ // boot left the page disabled). It is retried a bounded number of times with jittered backoff; no other status is retried.
+ const retryDelays=()=>{const value=window.EchoPrimeWorkspaceTransport.SESSION_RETRY_MS;return Array.isArray(value)?value:[400,1200,2500];};
+ const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
  const forget=()=>{memo.at=-Infinity;memo.value=null;memo.generation++;};
  const clock=()=>(window.EchoPrimeWorkspaceTransport.now||Date.now)();
  function readSession(fetchImpl){
@@ -26,9 +30,16 @@
   // No caller signal reaches the shared request: an aborted joiner must not interrupt the others. The read is small and
   // bounded by the host's own timeouts. A readback that arrives after forget() is returned but not kept.
   memo.inflight=(async()=>{
-   let response;try{response=await fetchImpl('/api/session',{credentials:'same-origin',cache:'no-store',headers:{'x-prime-request':'1'}});}catch(error){throw tagTransport(error);}
+   const delays=retryDelays();let response;
+   for(let attempt=0;;attempt++){
+    try{response=await fetchImpl('/api/session',{credentials:'same-origin',cache:'no-store',headers:{'x-prime-request':'1'}});}catch(error){throw tagTransport(error);}
+    if(response.status!==429||attempt>=delays.length)break;
+    try{await response.body?.cancel?.();}catch{/* the refused body is not needed */}
+    const base=Math.max(0,Number(delays[attempt])||0);await pause(base+Math.random()*base);
+   }
+   if(!response.ok){try{await response.body?.cancel?.();}catch{/* nothing to read */}const error=new Error('Account admission unavailable.');error.status=response.status;throw error;}
    const value=await readJson(response);
-   if(!response.ok||typeof value.workspaceConfigured!=='boolean'||typeof value.authenticated!=='boolean')throw new Error('Account admission unavailable.');
+   if(typeof value.workspaceConfigured!=='boolean'||typeof value.authenticated!=='boolean')throw new Error('Account admission unavailable.');
    if(value.authenticated&&(!value.user||typeof value.user.uid!=='string'||typeof value.csrf!=='string'))throw new Error('Invalid account admission.');
    return value;
   })().then(value=>{if(memo.generation===started){memo.value=value;memo.at=clock();}return value;},error=>{forget();throw error;}).finally(()=>{memo.inflight=null;});
@@ -37,6 +48,7 @@
  window.EchoPrimeWorkspaceTransport=class {
   static now=Date.now;// clock seam for the shared session memo (tests move it; the page uses Date.now)
   static SESSION_MEMO_MS=SESSION_MEMO_MS;
+  static SESSION_RETRY_MS=[400,1200,2500];// backoff before each retry of a 429 admission read (each plus up to the same again at random)
   static isTransportError(error,signal){return !signal?.aborted&&isTypeError(error)&&error.name!=='AbortError'&&error.transport!==false&&!error.incomplete&&!protocolError.test(String(error.message||''))&&!/encoded data|utf-8/i.test(String(error.message||''));}
   #logoutProof=null;
   constructor(options={}){this.fetch=options.fetch||window.fetch.bind(window);this.onIdentityChange=options.onIdentityChange||(()=>{});this.session=null;this.generation=0;this.sessionEpoch=0;this.responses=new WeakMap();}

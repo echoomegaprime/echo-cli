@@ -128,7 +128,7 @@
  function renderEnhance(){
   const gate=enhanceGate(),list=providers();
   for(const s of enhancers){
-   s.select.replaceChildren(...list.map(p=>{const option=el('option',{value:p.id},p.label+(p.available?'':' (unavailable)'));option.disabled=!p.available;return option;}));
+   s.select.replaceChildren(...list.map(p=>{const option=el('option',{value:p.id},p.label+(p.available?'':' (unavailable'+(p.reason?': '+p.reason:'')+')'));option.disabled=!p.available;return option;}));
    if(provider)s.select.value=provider;
    s.select.hidden=!list.length;s.select.disabled=!!gate||busy;
    s.button.disabled=!!gate||busy;
@@ -358,6 +358,7 @@
  window.addEventListener('echo-account-changed',()=>{generation++;if(autoTimer){clearTimeout(autoTimer);autoTimer=null;}busy=false;routing=false;lastRoute=null;setAuto(false);notice('');panel.hidden=true;status.textContent='';pickBox.replaceChildren();alternatives.replaceChildren();excludedBox.replaceChildren();failure.replaceChildren();for(const k of Object.keys(sessionFailures))delete sessionFailures[k];for(const s of enhancers){s.previous=null;s.undo.hidden=true;s.added.replaceChildren();s.added.hidden=true;s.note.hidden=true;s.busy=false;}report=null;reportState='loading';renderEnhance();void loadModels();});
  renderEnhance();
  const ready=loadModels();
+ window.addEventListener('echo-model-outcome',()=>{void loadModels();});// chat.js: a failed turn may have signed a provider out, so Enhance re-reads before offering it
  // Another surface (composer.js) mounts an Enhance control that shares this provider chip, owner gate and account reset.
  function mountShared(options){
   if(!options||typeof options.name!=='string'||typeof options.textarea!=='function'||typeof options.mode!=='function'||typeof options.mount!=='function')throw new Error('Invalid Enhance mount');

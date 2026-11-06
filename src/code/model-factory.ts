@@ -1,7 +1,7 @@
 import { tmpdir } from 'node:os';
 import { debuglog } from 'node:util';
 import { LocalModel, validateEndpoint, type Model } from './model.js';
-import { CliModel, PROVIDER_BIN, PROVIDER_LABEL, childEnv, run, type ProviderId, type Runner } from './providers.js';
+import { CliModel, PROVIDER_BIN, PROVIDER_LABEL, ProviderUnavailableError, childEnv, run, type ProviderId, type Runner } from './providers.js';
 import { TASK_CLASSES, classifyTask, type TaskClass } from './task-classifier.js';
 
 /**
@@ -131,12 +131,14 @@ export interface AnswerInfo {
   /** Set when auto mode chose this provider for the turn ("routed to Claude (coding)"). */
   routed?: RouteInfo;
 }
+/** The last failed call on a provider. `signedOut` = the CLI said it could not authenticate (it then reads unavailable for SIGNED_OUT_MS, or until a call succeeds). */
+export interface FailureInfo { at: string; reason: string; signedOut: boolean }
 export interface ProviderStatus {
   id: ModelId; label: string; kind: 'local' | 'cli'; available: boolean; reason?: string;
   check: 'model-listed' | 'installed' | 'signed-in'; checkedAt: string; requested: string | null;
   /** Argon only: the Gemini ids agy offers right now (empty with a reason when listing failed; never invented). */
   variants?: Variant[]; variantsReason?: string;
-  endpoint?: string; contextTokens?: number; last: AnswerInfo | null;
+  endpoint?: string; contextTokens?: number; last: AnswerInfo | null; lastFailure: FailureInfo | null;
 }
 export interface ModelsReport { default: ModelId; contextTokens: number; providers: ProviderStatus[]; auto: AutoConfig & { chains: Record<TaskClass, ModelId[]> } }
 export interface RouterOptions { runner?: Runner; now?: () => number; probeTimeoutMs?: number }
@@ -152,11 +154,32 @@ export function routingChains(auto: AutoConfig): Record<TaskClass, ModelId[]> {
 interface Probe { available: boolean; reason?: string; check: ProviderStatus['check']; checkedAt: string; variants?: Variant[]; variantsReason?: string }
 const withVariant = (config: ModelsConfig, id: ProviderId, variant: string): ModelsConfig => ({ ...config, cli: { ...config.cli, [id]: { model: variant } } });
 const CACHE_MS = 60000;
+/**
+ * How each vendor CLI is checked (vendor docs read 2026-11-06). `claude auth status` exits 0 when logged in and 1 when not
+ * (code.claude.com/docs/en/cli-reference); `codex login status` exits 0 when logged in (OpenAI Codex CLI command reference).
+ * The grok CLI (docs.x.ai/build/cli/reference) and agy (antigravity.google/docs/install) document no status command, so
+ * they are checked for installation only and their sign-in is judged from the last call.
+ */
+const SIGN_IN: Partial<Record<ProviderId, { args: string[]; login: string }>> = {
+  claude: { args: ['auth', 'status'], login: 'claude auth login' },
+  gpt: { args: ['login', 'status'], login: 'codex login --device-auth' },
+};
+/** Install steps for a CLI Prime cannot find (docs.x.ai/build/overview; antigravity.google/docs/getting-started). */
+const INSTALL: Partial<Record<ProviderId, string>> = {
+  grok: 'install it on the Prime host with "curl -fsSL https://x.ai/cli/install.sh | bash", then sign in with "grok login --device-auth"',
+  argon: 'install it on the Prime host with "curl -fsSL https://antigravity.google/cli/install.sh | bash", then run "agy" once to sign in with Google',
+};
+const LOGIN: Record<ProviderId, string> = { claude: 'claude auth login', gpt: 'codex login --device-auth', grok: 'grok login --device-auth', argon: 'agy' };
+/** A CLI failure about its login (expired OAuth, not logged in, 401) rather than about the request. */
+const SIGNED_OUT = /\b(?:authenticat\w*|oauth|unauthori[sz]ed|not (?:logged|signed) in|log(?:ged)? ?in|sign(?:ed)? ?in|re-?auth\w*|credentials?)\b|\b401\b/i;
+/** How long a signed-out failure keeps a provider unavailable when no call succeeds: long enough to stop the next turns, short enough that a re-authorised CLI is offered again. */
+export const SIGNED_OUT_MS = 10 * 60 * 1000;
 
 export class ModelRouter {
   private instances = new Map<string, Model>();
   private history = new Map<ModelId, AnswerInfo>();
   private probes = new Map<ModelId, { at: number; probe: Promise<Probe> }>();
+  private failures = new Map<ModelId, FailureInfo & { atMs: number }>();
   private runner: Runner; private now: () => number; private probeTimeoutMs: number;
   constructor(readonly config: ModelsConfig = DEFAULT_MODELS, options: RouterOptions = {}) {
     this.runner = options.runner ?? run; this.now = options.now ?? Date.now; this.probeTimeoutMs = options.probeTimeoutMs ?? 8000;
@@ -167,7 +190,7 @@ export class ModelRouter {
   /** Current probe result for one provider (cached 60 s like the report). */
   async available(id: ModelId): Promise<{ available: boolean; reason?: string }> {
     if (!isModelId(id)) throw new Error('Unknown model provider');
-    const probe = await this.probe(id);
+    const probe = await this.status(id);
     return probe.available ? { available: true } : { available: false, reason: probe.reason };
   }
   /**
@@ -190,7 +213,7 @@ export class ModelRouter {
     const promptChars = (options.historyChars ?? 0) + prompt.length;
     for (const id of routingChains(this.auto)[task]) {
       if (id === 'argon' && promptChars > ARGON_PROMPT_BUDGET) { considered.push({ id, available: false, reason: `the conversation (${promptChars} characters) exceeds agy's command-line prompt cap` }); continue; }
-      const probe = await this.probe(id);
+      const probe = await this.status(id);
       considered.push({ id, available: probe.available, ...(probe.reason ? { reason: probe.reason } : {}) });
       if (probe.available) {
         const info: RouteInfo = { task, reason, classifier, confidence, considered };
@@ -229,18 +252,39 @@ export class ModelRouter {
   turn(id: ModelId, variant?: string): { model: Model; answered(): AnswerInfo | null; info(): AnswerInfo } {
     if (!isModelId(id)) throw new Error('Unknown model provider');
     if (variant !== undefined && id !== 'argon') throw new Error('A model variant is only for Argon (Gemini); other providers use their configured model');
-    const model = this.instance(id, variant) as Model & { last?: unknown };
-    model.last = undefined;
+    const raw = this.instance(id, variant) as Model & { last?: unknown };
+    raw.last = undefined;
     const label = modelLabel(id, this.config), requested = this.requested(id, variant);
     const read = (): AnswerInfo | null => {
-      const last = model.last as { requested?: string | null; model: string | null; reported: boolean } | undefined;
+      const last = raw.last as { requested?: string | null; model: string | null; reported: boolean } | undefined;
       return last ? { id, label, requested: last.requested ?? requested, model: last.model, reported: last.reported, answered: true } : null;
     };
+    // A vendor CLI that fails to answer is remembered (the "last outcome"), so a signed-out CLI stops reading as available
+    // even while its status command still says it is logged in (live test 2026-11-06: expired OAuth). A decline is not a failure.
+    const model: Model = id === 'qwen' ? raw : {
+      next: async (messages, signal) => {
+        try { return await raw.next(messages, signal); }
+        catch (error) {
+          if (error instanceof ProviderUnavailableError) this.failures.set(id, { at: this.stamp(), atMs: this.now(), reason: error.detail, signedOut: SIGNED_OUT.test(error.detail) });
+          throw error;
+        }
+      },
+    };
     return {
-      model: model as Model,
-      answered: () => { const a = read(); if (a) this.history.set(id, { ...a, at: new Date(this.now()).toISOString() }); return a; },
+      model,
+      answered: () => { const a = read(); if (a) { this.history.set(id, { ...a, at: new Date(this.now()).toISOString() }); this.failures.delete(id); } return a; },
       info: () => read() ?? { id, label, requested, model: null, reported: false, answered: false },
     };
+  }
+  /** The probe, overridden by a signed-out failure younger than SIGNED_OUT_MS: what the picker, Enhance, Echo Build and auto routing read. */
+  private async status(id: ModelId): Promise<Probe> {
+    const probe = await this.probe(id), failure = this.failures.get(id);
+    if (id === 'qwen' || !probe.available || !failure?.signedOut || this.now() - failure.atMs >= SIGNED_OUT_MS) return probe;
+    return { ...probe, available: false, reason: `signed out: the last call (${failure.at}) failed with "${failure.reason}"; sign in again on the Prime host with "${LOGIN[id]}"` };
+  }
+  private lastFailure(id: ModelId): FailureInfo | null {
+    const failure = this.failures.get(id);
+    return failure ? { at: failure.at, reason: failure.reason, signedOut: failure.signedOut } : null;
   }
   private probe(id: ModelId): Promise<Probe> {
     const cached = this.probes.get(id), now = this.now();
@@ -277,25 +321,26 @@ export class ModelRouter {
     return { ...probe, ...result };
   }
   private async probeCli(id: ProviderId): Promise<Probe> {
-    const bin = PROVIDER_BIN[id], signedIn = id === 'gpt';
-    const base = { check: (signedIn ? 'signed-in' : 'installed') as ProviderStatus['check'], checkedAt: this.stamp() };
+    const bin = PROVIDER_BIN[id], signIn = SIGN_IN[id];
+    const base = { check: (signIn ? 'signed-in' : 'installed') as ProviderStatus['check'], checkedAt: this.stamp() };
     try {
-      const result = await this.runner(bin, signedIn ? ['login', 'status'] : ['--version'], { cwd: tmpdir(), env: childEnv(), timeoutMs: this.probeTimeoutMs, maxBytes: 20000 });
+      const result = await this.runner(bin, signIn ? signIn.args : ['--version'], { cwd: tmpdir(), env: childEnv(), timeoutMs: this.probeTimeoutMs, maxBytes: 20000 });
       if (result.timedOut) return { ...base, available: false, reason: `"${bin}" timed out` };
-      if (result.code) return { ...base, available: false, reason: signedIn ? `not signed in ("${bin} login status" exited with code ${result.code})` : `"${bin}" exited with code ${result.code}` };
+      if (result.code) return { ...base, available: false, reason: signIn ? `not signed in ("${bin} ${signIn.args.join(' ')}" exited with code ${result.code}); sign in on the Prime host with "${signIn.login}"` : `"${bin}" exited with code ${result.code}` };
       return { ...base, available: true };
     } catch (error) {
-      return { ...base, available: false, reason: (error as { spawnFailed?: boolean }).spawnFailed ? `could not start "${bin}" (not installed or not on PATH)` : `could not run "${bin}"` };
+      const install = INSTALL[id];
+      return { ...base, available: false, reason: (error as { spawnFailed?: boolean }).spawnFailed ? `could not start "${bin}" (not installed or not on PATH)${install ? '; ' + install : ''}` : `could not run "${bin}"` };
     }
   }
   async report(): Promise<ModelsReport> {
-    const probes = await Promise.all(MODEL_IDS.map(id => this.probe(id)));
+    const probes = await Promise.all(MODEL_IDS.map(id => this.status(id)));
     return {
       default: this.config.default, contextTokens: this.config.contextTokens, auto: { ...this.auto, chains: routingChains(this.auto) },
       providers: MODEL_IDS.map((id, i) => ({
         id, label: modelLabel(id, this.config), kind: id === 'qwen' ? 'local' as const : 'cli' as const, ...probes[i],
         requested: this.requested(id), ...(id === 'qwen' ? { endpoint: this.config.endpoint, contextTokens: this.config.contextTokens } : {}),
-        last: this.history.get(id) ?? null,
+        last: this.history.get(id) ?? null, lastFailure: this.lastFailure(id),
       })),
     };
   }

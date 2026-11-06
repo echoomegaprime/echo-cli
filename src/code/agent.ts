@@ -151,7 +151,8 @@ export async function runTurn(options: TurnOptions): Promise<TurnResult> {
   const pending = store.get(sessionId).proposals.filter(p => p.status === 'pending').length;
   const summarised = status === 'step_limit' && tools !== undefined && tools.used > 0;
   return {
-    mode, sessionId, status, answer, pending, answerVerification: status === 'pending_approval' || summarised ? 'application_generated' : 'unverified_model_text', evidence: [...reads.values()],
+    // A failed turn's answer is the host's or provider's error text, never model text (live test 2026-11-06).
+    mode, sessionId, status, answer, pending, answerVerification: status === 'pending_approval' || summarised || status === 'failed' ? 'application_generated' : 'unverified_model_text', evidence: [...reads.values()],
     ...(tools ? { tools: { calls: tools.used, exhausted: tools.budgetExhausted, events: tools.events, sources: tools.sources } } : {}),
     ...(status === 'completed' ? { claims: checkClaims(answer, given) } : {}),
     ...(options.persona ? { persona: { id: options.persona.id, name: options.persona.name } } : {}),
