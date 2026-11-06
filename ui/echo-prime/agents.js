@@ -229,7 +229,10 @@
  function finish(r){
   if(run!==r)return;
   run=null;stopTimers(r);
-  orb(r.status==='done'?'success':r.status==='failed'?'error':'idle');orb('idle');publishSatellites();
+  // A result flashes success (done) or error (failed) over the orb; any other end (stopped, unknown run, lost contact,
+  // wall clock) just releases this source's claim.
+  if(r.status==='done'||r.status==='failed')orb(r.status==='done'?'success':'error');
+  orb('idle');publishSatellites();
   if(admission()!=='signin'&&admission()!=='member'&&health&&health.available===true)api('runs?limit=20',undefined,undefined).then(v=>{if(!run)renderRuns(v.runs);}).catch(()=>{});
  }
  async function poll(r){
