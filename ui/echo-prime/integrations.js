@@ -29,7 +29,7 @@
  }
  function render(){
   const query=$('#creative-search').value.toLowerCase(),category=$('#creative-category').value,target=$('#creative-tools');target.replaceChildren();
-  const rows=catalog.filter(c=>(category==='all'||c.category===category)&&(c.id+' '+c.description).toLowerCase().includes(query));
+  const rows=catalog.filter(c=>(category==='all'||category==='auto'||c.category===category)&&(c.id+' '+c.description).toLowerCase().includes(query));
   status.textContent=rows.length+' of '+catalog.length+' creative capabilities · '+(host?'Host connected; availability checked per request':'Registry snapshot · live availability unverified');
   for(const c of rows){const b=document.createElement('button');b.className='creative-tool';b.setAttribute('aria-pressed',String(selected?.id===c.id));const title=document.createElement('strong'),small=document.createElement('small'),state=document.createElement('span');title.textContent=c.id.replace(/^echo\./,'');small.textContent=c.description;state.textContent=c.health+' · '+(c.scope||'scope unknown');b.append(title,state,small);b.addEventListener('click',()=>choose(c));target.append(b);}
  }
@@ -115,13 +115,21 @@
  $('#prepare-creative').addEventListener('click',async()=>{
   if(!selected){result.textContent='Select a capability first.';return;}
   const current=generation,version=revision;
-  try{const prepared=await api('prepare',{target:'sdk',name:selected.id,arguments:JSON.parse($('#creative-arguments').value)});if(current!==generation||version!==revision)return;ticket=prepared;$('#request-review').textContent=JSON.stringify(ticket.request,null,2);$('#request-cost').textContent=ticket.cost+' Required scope: '+(ticket.scope||'owner-defined');$('#execute-request').disabled=false;$('#review-dialog').showModal();debug('prepare','returned');}catch(e){if(current===generation&&version===revision){ticket=null;fail(e);}}
+  const preparing=selected.id;
+  try{const prepared=await api('prepare',{target:'sdk',name:selected.id,arguments:JSON.parse($('#creative-arguments').value)});if(current!==generation||version!==revision)return;ticket=prepared;$('#request-review').textContent=JSON.stringify(ticket.request,null,2);$('#request-cost').textContent=ticket.cost+' Required scope: '+(ticket.scope||'owner-defined');$('#execute-request').disabled=false;$('#review-dialog').showModal();debug('prepare','returned');}catch(e){if(current===generation&&version===revision){ticket=null;fail(e);
+   // The auto-router offers the next-best tool when the review refuses its pick; it never re-prepares by itself.
+   try{window.dispatchEvent(new CustomEvent('echo-studio-executed',{detail:{state:'refused',detail:String(e instanceof Error?e.message:'Review refused').slice(0,600),name:preparing,requestId:null}}));}catch{}}}
  });
  $('#execute-request').addEventListener('click',async()=>{
   if(!ticket||submitting)return;submitting=true;$('#execute-request').disabled=true;const current=ticket,epoch=generation;ticket=null;
   $('#review-dialog').close();result.textContent='Submitting the reviewed request…';
+  // The auto-router listens for this to offer the next-best tool after a failure; it never resubmits by itself.
+  const executed=(state,detail)=>{try{window.dispatchEvent(new CustomEvent('echo-studio-executed',{detail:{state,detail:String(detail||'').slice(0,600),name:current.request.name,requestId:current.requestId}}));}catch{}};
   try{const r=await api('execute',{id:current.id,digest:current.digest});if(epoch===generation){
    result.textContent=JSON.stringify(r,null,2);debug('execute','returned');
+    // A provider body that says it failed (ok:false or an error string) counts as a failure for the router's next-best offer.
+    const body=r&&r.result&&typeof r.result==='object'&&!Array.isArray(r.result)?r.result:null,failed=r?.state==='returned'&&!!body&&(body.ok===false||typeof body.error==='string');
+    executed(failed?'failed':r.state,failed?String(body.error||body.detail||'provider reported a failure'):r.detail);
    if(typeof window.EchoPrimeArtifacts?.register==='function'&&r?.state!=='blocked'&&r?.state!=='uncertain'){
     const reqArgs=current.request?.arguments||{},reqOpts=reqArgs.options||{},cat=selected?.category||'other';
     const artKind=['image','video','music','sound','voice'].includes(cat)?cat:'other';
@@ -141,7 +149,25 @@
      },
     }).catch(()=>{});
    }
-  }}catch(e){if(epoch===generation){result.textContent='Outcome unknown. Do not resubmit automatically. Request ID: '+current.requestId+'\n'+e.message;debug('execute','unconfirmed');}}finally{if(epoch===generation)submitting=false;}
+  }}catch(e){if(epoch===generation){result.textContent='Outcome unknown. Do not resubmit automatically. Request ID: '+current.requestId+'\n'+e.message;debug('execute','unconfirmed');executed('uncertain',e.message);}}finally{if(epoch===generation)submitting=false;}
  });
- window.EchoPrimeStudio={open,addInput:addStudioInput,inputs:()=>studioInputs.map(i=>({...i}))};renderStudioInputs();models();render();
+ window.EchoPrimeStudio={open,addInput:addStudioInput,inputs:()=>studioInputs.map(i=>({...i})),
+   /** Auto-router hooks: select a listed capability by id, or select it and set the exact request the router prepared. */
+   select(id){const c=catalog.find(x=>x.id===id);if(c)choose(c);return !!c;},
+   apply(pick){const c=pick&&catalog.find(x=>x.id===pick.id);if(!c)return false;choose(c);if(pick.arguments&&typeof pick.arguments==='object'&&!Array.isArray(pick.arguments))$('#creative-arguments').value=JSON.stringify({...pick.arguments,...(studioInputs.length?{inputs:studioInputs.map(i=>({upload_id:i.upload_id,role:i.role}))}:{})},null,2);return true;},
+   /** Auto-router hook: rows the live catalog listed for a route (public catalog fields only). A new id is added under its
+    *  medium; a listed id keeps its entry and takes the live health and registration. Returns how many ids were added. */
+   merge(rows){
+    let added=0,changed=false;
+    for(const r of Array.isArray(rows)?rows.slice(0,20):[]){
+     if(!r||typeof r.id!=='string'||!/^echo\.[A-Za-z0-9_.-]{1,180}$/.test(r.id))continue;
+     const health=typeof r.health==='string'&&r.health?r.health.slice(0,32):'unknown',registered=r.registered!==false,at=catalog.findIndex(x=>x.id===r.id);
+     if(at<0){catalog=[...catalog,{id:r.id,description:typeof r.description==='string'?r.description.slice(0,600):'',health,registered,scope:typeof r.scope==='string'?r.scope:'',category:Object.hasOwn(modes,r.category)||r.category==='tools'?r.category:'tools'}];added++;changed=true;}
+     else if(catalog[at].health!==health||catalog[at].registered!==registered){catalog=catalog.map((x,i)=>i===at?{...x,health,registered}:x);changed=true;}
+    }
+    if(changed)render();return added;
+   },
+   catalog(){return catalog.slice();},
+   selected(){return selected?{id:selected.id,category:selected.category}:null;},
+  };renderStudioInputs();models();render();
 })();

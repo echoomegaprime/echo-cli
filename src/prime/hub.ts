@@ -8,6 +8,9 @@ import type {ModelRouter} from '../code/model-factory.js';
 import {SwarmError,type SwarmClient} from './swarm.js';
 import {ADK_MAX_STEPS_CEILING,AdkError,type AdkClient} from './agents.js';
 import {VideoAgentError,discoverVideoCatalog,offlineCatalog,parseVideoRequest,parseVideoRun,planVideo,resolveVideoInputs,videoAgentDefinition,videoRunPrompt,type VideoCatalog} from './videoagent.js';
+import {MediaRouter} from './media.js';
+import {PromptEnhancer} from './enhance.js';
+import {WorkspaceHttpError} from './workspace.js';
 import {BotsError,type BotsClient} from './bots.js';
 import {BrowserError,type BrowserClient} from './browser.js';
 import type {AutoAgents,ChatTool} from '../code/tools/autoagents.js';
@@ -33,6 +36,10 @@ export interface PrimeOptions {
  capabilities:Capability[];sdk?:SdkBroker;esh?:McpConnection;chat?:SharedChat;steward?:StewardOwner;models?:ModelRouter;swarm?:SwarmClient;
  /** Opt-in loopback `echo-adk-api` client (Agents view). Absent = the feature is off. */
  adk?:AdkClient;
+ /** Auto media routing over this hub's catalog (built on demand from `capabilities`, `sdk.read` and `models` when absent). */
+ media?:MediaRouter;
+ /** Enhance-prompt runner over `models` (built on demand when absent; without `models` the route says enhancement is off). */
+ enhancer?:PromptEnhancer;
  bots?:BotsClient;
  browser?:BrowserClient;
  /** Autonomous agent/bot creation from chat prompts (needs adk + bots + sdk). Absent = the make_* tools are not offered. */
@@ -342,6 +349,27 @@ export class PrimeHub {
   if(data.family===undefined)kit.setEnabled(data.enabled);
   else{if(typeof data.family!=='string')throw new Refused('Unknown tool family');try{kit.setFamily(data.family,data.enabled);}catch(e){throw new Refused(e instanceof Error?e.message:'Unknown tool family');}}
   return {configured:true,...kit.report()};
+ }
+ private media?:MediaRouter;private enhancer?:PromptEnhancer;
+ /** Auto media routing: classify the prompt, rank the catalog's generators, return one explicit pick plus alternatives.
+  * Spends nothing: the pick is a request shape for the existing prepare -> review -> execute path. Health probes reuse the
+  * same `sdk.read` that `prepare` trusts (unwrapped, bounded, cached 60 s in the router). The candidates come from the live
+  * catalog: kind-scoped `sdk.search` calls through the broker (5 s each, cached 60 s per kind), overlaid on the snapshot;
+  * live rows are kept in this hub's catalog like `/api/search` results (the snapshot's Studio medium is preserved, and a
+  * live row without health keeps the snapshot's health instead of erasing it). */
+ async mediaRoute(input:unknown,signal?:AbortSignal){
+  const sdk=this.options.sdk;
+  this.media??=this.options.media??new MediaRouter({catalog:()=>this.capabilities(),read:sdk?id=>bounded(()=>sdk.read(id),8000).then(unwrap):undefined,
+   search:sdk?query=>sdk.search(query):undefined,
+   onDiscovered:rows=>{for(const c of rows){if(!/^echo\.[A-Za-z0-9_.-]+$/.test(c.id))continue;const old=this.catalog.get(c.id);this.catalog.set(c.id,old?{...old,registered:c.registered,health:c.health==='unknown'&&old.health?old.health:c.health}:{...c});}},
+   models:this.options.models});
+  return this.media.route(input,signal);
+ }
+ /** Enhance prompt on exactly the chosen provider through the reviewed model router. No router = the feature is off (503). */
+ async enhance(input:unknown,sessionKey:string,signal?:AbortSignal){
+  if(!this.options.models&&!this.options.enhancer)throw new WorkspaceHttpError(503,'Prompt enhancement is off: the reviewed Prime configuration has no models section, so no provider can be asked');
+  this.enhancer??=this.options.enhancer??new PromptEnhancer(this.options.models!);
+  return this.enhancer.enhance(input,sessionKey,signal);
  }
  async refresh(query:string){
   if(!this.options.sdk)throw new Refused('SDK host not connected');

@@ -1,7 +1,7 @@
 import {createServer,type IncomingMessage} from 'node:http';
 import {readFile} from 'node:fs/promises';
 import {join} from 'node:path';
-import {randomBytes,randomUUID,timingSafeEqual} from 'node:crypto';
+import {createHash,randomBytes,randomUUID,timingSafeEqual} from 'node:crypto';
 import {debuglog} from 'node:util';
 import {PrimeHub,object,type PrimeRequest} from './hub.js';
 import {redact} from '../code/workspace.js';
@@ -29,6 +29,7 @@ assets['/favicon.svg']='favicon.svg';assets['/favicon.ico']='favicon.svg';
 const assetTypes:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml'};
 Object.assign(assets,{'/brain.js':'brain.js','/brain.css':'brain.css'});
 assets['/autonomy.js']='autonomy.js';
+Object.assign(assets,{'/media-router.js':'media-router.js','/media.css':'media.css'});
 async function body(req:IncomingMessage,maxBytes=131072){
  let size=0;const chunks:Buffer[]=[];
  for await(const part of req){size+=part.length;if(size>maxBytes)throw new Error('Request exceeds size limit');chunks.push(part);}
@@ -63,7 +64,7 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
   const path=new URL(req.url??'/',url).pathname;
   if(path.startsWith('/api/')){
    const started=Date.now(),requestId=randomUUID();
-   const operation=path.startsWith('/api/workspace/')?'workspace':path.startsWith('/api/steward/')?'steward':path.startsWith('/api/prime/swarm/')?'swarm':path.startsWith('/api/prime/adk/')?'adk':path.startsWith('/api/prime/bots/')?'bots':path.startsWith('/api/prime/browser/')?'browser':path.startsWith('/api/prime/build/')?'build':path.startsWith('/api/prime/video/')?'video':path==='/api/prime/uploads'||path.startsWith('/api/prime/uploads/')?'uploads':path==='/api/prime/artifacts'||path.startsWith('/api/prime/artifacts/')?'artifacts':path==='/api/session'?'session':'owner';
+   const operation=path.startsWith('/api/prime/media/')?'media':path==='/api/prime/enhance'?'enhance':path.startsWith('/api/workspace/')?'workspace':path.startsWith('/api/steward/')?'steward':path.startsWith('/api/prime/swarm/')?'swarm':path.startsWith('/api/prime/adk/')?'adk':path.startsWith('/api/prime/bots/')?'bots':path.startsWith('/api/prime/browser/')?'browser':path.startsWith('/api/prime/build/')?'build':path.startsWith('/api/prime/video/')?'video':path==='/api/prime/uploads'||path.startsWith('/api/prime/uploads/')?'uploads':path==='/api/prime/artifacts'||path.startsWith('/api/prime/artifacts/')?'artifacts':path==='/api/session'?'session':'owner';
    const record=(outcome:string)=>debug('%j',{schemaVersion:1,event:'prime_api_request',operation,requestId,status:res.statusCode,outcome,durationMs:Date.now()-started});
    res.once('finish',()=>record('returned'));res.once('close',()=>{if(!res.writableEnded)record('disconnected');});
    const supplied=(req.headers.cookie??'').split(';').map(c=>c.trim()).find(c=>c.startsWith('echo_prime='))?.slice(11)??'';
@@ -254,6 +255,9 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     else if(botsAction)send(200,await hub.botsAction(decodeURIComponent(botsAction[1]),botsAction[2],abort.signal));
     else if(path==='/api/prime/browser/act')send(200,await hub.browserAct(data,abort.signal));
     else if(path==='/api/steward/ask')send(200,await hub.stewardAsk(data));
+    // Media auto-router (spends nothing) and Enhance prompt (rate-limited per Prime session: the cookie hash, never the cookie).
+    else if(path==='/api/prime/media/route')send(200,await hub.mediaRoute(data,abort.signal));
+    else if(path==='/api/prime/enhance')send(200,await hub.enhance(data,createHash('sha256').update(supplied).digest('hex'),abort.signal));
     else send(404,{error:'Unknown route'});
    }catch(e){if(res.headersSent)res.destroy();else send(e instanceof WorkspaceHttpError?e.status:400,{error:redact(e instanceof Error?e.message:'Request failed').slice(0,600)});}
    finally{res.removeListener('close',disconnected);if(mediaFileGet)mediaActive--;else active--;}
