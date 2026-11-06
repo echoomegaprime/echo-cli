@@ -132,6 +132,7 @@
   render();
  });
  window.addEventListener('echo-account-changed',()=>{refresh();});
+ window.addEventListener('echo-model-outcome',()=>{refresh();});// chat.js: a failed turn may have signed a provider out
  window.addEventListener('echo-chat-kind',()=>render());// workspace.js: Echo conversation <-> ECHO Code changes what the note must say
  render();
  const ready=refresh();
@@ -150,7 +151,8 @@
   conversationRoute(){
    const id=current(),label=labelOf(id);
    if(gate)return {};
-   if(failed)return id==='qwen'||id==='auto'?{}:{blocked:'Model status is unavailable, so '+label+' could not be confirmed. Nothing was sent: pick Qwen to answer through your Workspace, or try again in a moment.'};
+   // `retry`: workspace.js re-reads the status once before refusing, and every later send re-reads it after the cool-down.
+   if(failed)return id==='qwen'||id==='auto'?{}:{blocked:'Model status is unavailable, so '+label+' could not be confirmed. Nothing was sent: pick Qwen to answer through your Workspace, or send again in a few seconds (each send reads the model status again).',retry:true};
    if(!report||report.routing!==true||id==='qwen'||id==='auto')return {};
    if(id==='swarm')return {blocked:label+' runs in ECHO Code conversations. Switch Conversation to ECHO Code to use it; nothing was sent.'};
    const variant=currentVariant();

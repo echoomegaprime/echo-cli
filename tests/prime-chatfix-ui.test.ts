@@ -362,3 +362,135 @@ describe('boot admission read under load (workspace-client.js)',()=>{
   expect(h.get('#workspace-panel-status').textContent).toMatch(/busy/i);expect(h.get('#workspace-panel-status').textContent).toMatch(/Reload/);
  });
 });
+
+// Review 2026-11-06 (round 2). A vendor turn forwarded the Workspace's attachment set (Workspace library ids) to /api/chat,
+// where only Prime uploads are read, so a ticked Library file silently never reached Claude; the model report was read
+// once at boot, so a failed boot read blocked vendor picks for the life of the page and a provider that signed out
+// mid-session still read available; and a Google refusal carried no status for the sign-in card to act on.
+describe('vendor turns carry attachments explicitly',()=>{
+ const UPL='upl_'+'b'.repeat(32);
+ const bigChat=()=>({id:'c1',title:'Long',events:[],messages:Array.from({length:6},(_,i)=>({id:'h'+i,role:i%2?'assistant':'user',content:String.fromCharCode(97+i).repeat(3900),created:'2026-11-06T09:00:0'+i+'+00:00'}))});
+ function vendor(windowExtra:Record<string,any>={},chat?:any){
+  let h!:ReturnType<typeof workspace>;
+  const send=vendorChat(()=>h.get('#chat-log'));
+  h=workspace({EchoPrimeModels:routeTo({vendor:{id:'claude',label:'Claude (claude CLI)'}}),...windowExtra},chat);h.window.EchoPrimeChat.send=send;
+  const base=h.request.getMockImplementation()!;
+  const files:Record<string,any>={lib1:{id:'lib1',name:'plan.md',content:'Step one: ship it.',sha256:'9f'.repeat(32),path:'/srv/ws/library/lib1/plan.md'}};
+  h.request.mockImplementation(async(path:string,body?:any)=>{if(path.startsWith('/library/')){const item=files[decodeURIComponent(path.slice(9))];if(!item)throw new Error('Library item not found.');return item;}return base(path,body);});
+  return {h,send,files};
+ }
+ it('inlines an attached Workspace library file, passes only Prime uploads on, and names what was sent',async()=>{
+  const {h,send}=vendor();await h.ws.ready;await h.ws.bridge.openChat('c1');
+  h.ws.bridge.state.attachments.add('lib1');h.ws.bridge.state.attachments.add(UPL);
+  const outcome=await h.ws.send('What is step one?');
+  expect(outcome).toMatchObject({handled:true,sent:true});
+  expect(h.request.mock.calls.map(c=>c[0])).toContain('/library/lib1');
+  const options=send.mock.calls[0][1].workspace;
+  expect(options.prompt).toContain('plan.md');expect(options.prompt).toContain('Step one: ship it.');expect(options.prompt).toMatch(/untrusted/i);
+  expect(options.prompt).not.toContain('/srv/ws/library');expect(options.prompt.endsWith('What is step one?')).toBe(true);
+  expect(options.prompt.length).toBeLessThanOrEqual(12000);
+  expect(options.attachments).toEqual([UPL]);
+  expect(options.note).toContain('plan.md');
+ });
+ it('refuses, naming the file, when an attached Workspace file cannot be read or does not fit',async()=>{
+  const missing=vendor();await missing.h.ws.ready;await missing.h.ws.bridge.openChat('c1');
+  missing.h.ws.bridge.state.attachments.add('gone');
+  const refused=await missing.h.ws.send('hello');
+  expect(refused.sent).toBe(false);expect(refused.detail).toMatch(/Workspace file .*could not be read.*Library item not found.*nothing was sent to Claude \(claude CLI\)/i);
+  expect(missing.send).not.toHaveBeenCalled();
+  const big=vendor();big.files.lib1.content='x'.repeat(12500);await big.h.ws.ready;await big.h.ws.bridge.openChat('c1');
+  big.h.ws.bridge.state.attachments.add('lib1');
+  const tooBig=await big.h.ws.send('hello');
+  expect(tooBig.sent).toBe(false);expect(tooBig.detail).toMatch(/12,000-character limit/);expect(tooBig.detail).toMatch(/Qwen/);
+  expect(big.send).not.toHaveBeenCalled();
+ });
+ it('leaves room for a Prime upload the server adds, instead of filling the limit with history',async()=>{
+  const uploads:Record<string,any>={[UPL]:{id:UPL,name:'notes.txt',type:'text/plain',bytes:5000}};
+  const {h,send}=vendor({EchoPrimeLibrary:{uploadById:(id:string)=>uploads[id]||null}},bigChat());
+  await h.ws.ready;await h.ws.bridge.openChat('c1');h.ws.bridge.state.attachments.add(UPL);
+  await h.ws.send('Compare the notes with what we said.');
+  const options=send.mock.calls[0][1].workspace;
+  expect(options.attachments).toEqual([UPL]);expect(options.prompt.length).toBeLessThanOrEqual(12000-5000);
+  expect(options.note).toMatch(/left out/);
+ });
+});
+
+describe('the model report is re-read when it matters (models.js)',()=>{
+ const rows=(claude:boolean)=>({configured:true,routing:true,default:'qwen',contextTokens:262144,auto:{enabled:false,chains:{}},providers:[
+  {id:'qwen',label:'Qwen (FORGE, 256K)',available:true},
+  claude?{id:'claude',label:'Claude (claude CLI)',available:true}:{id:'claude',label:'Claude (claude CLI)',available:false,reason:'signed out: the last call failed with "OAuth session expired"'},
+  {id:'gpt',label:'GPT (codex CLI)',available:true}]});
+ function boot(answer:()=>any){
+  const fetch=vi.fn(async()=>{const next=answer();return {ok:next.status<400,status:next.status,json:async()=>next.body};});
+  const ws={enabled:true,session:owner,ready:Promise.resolve(true),generalMode:true,ownerHeaders:async()=>({}),invalidate:vi.fn()};
+  const h=harness('models.js',{fetch,storage:{'echo-prime-model-v1':'claude'},window:{EchoPrimeWorkspace:ws}});
+  const select=descendants(h.get('.composer-toolbar')).find(n=>n.tagName==='SELECT'&&(n as any).id==='model-select')!;
+  return {...h,fetch,api:h.window.EchoPrimeModels,claudeOption:()=>select.children.find(n=>n.value==='claude')!.textContent};
+ }
+ it('re-reads after a failed turn, so a provider that signed out reads unavailable without a reload',async()=>{
+  let up=true;
+  const h=boot(()=>({status:200,body:rows(up)}));await h.api.ready;
+  expect(h.claudeOption()).toBe('Claude (claude CLI)');
+  up=false;h.emit('echo-model-outcome');await flush();
+  expect(h.fetch).toHaveBeenCalledTimes(2);expect(h.claudeOption()).toBe('Claude (claude CLI) (unavailable)');
+ });
+ it('marks a pick blocked by a failed status read as retryable',async()=>{
+  const h=boot(()=>({status:500,body:{error:'busy'}}));await h.api.ready;
+  const route=h.api.conversationRoute();
+  expect(route.blocked).toMatch(/Claude \(claude CLI\).*Nothing was sent/);expect(route.retry).toBe(true);
+ });
+});
+
+describe('a blocked pick re-reads the model status once before refusing (workspace.js)',()=>{
+ it('reads the status again and answers with the pick when it now confirms',async()=>{
+  let h!:ReturnType<typeof workspace>;
+  const send=vendorChat(()=>h.get('#chat-log'));
+  const conversationRoute=vi.fn().mockReturnValueOnce({blocked:'Model status is unavailable.',retry:true}).mockReturnValue({vendor:{id:'claude',label:'Claude (claude CLI)'}});
+  const refresh=vi.fn(async()=>{});
+  h=workspace({EchoPrimeModels:{ready:Promise.resolve(),conversationRoute,refresh}});h.window.EchoPrimeChat.send=send;
+  await h.ws.ready;await h.ws.bridge.openChat('c1');
+  expect(await h.ws.send('hello')).toMatchObject({handled:true,sent:true});
+  expect(refresh).toHaveBeenCalledTimes(1);expect(send).toHaveBeenCalledTimes(1);expect(h.chatTurn).not.toHaveBeenCalled();
+ });
+ it('refuses after one re-read that still cannot confirm the pick',async()=>{
+  const refresh=vi.fn(async()=>{});
+  const h=workspace({EchoPrimeModels:{ready:Promise.resolve(),conversationRoute:()=>({blocked:'Model status is unavailable.',retry:true}),refresh}});
+  await h.ws.ready;await h.ws.bridge.openChat('c1');
+  expect(await h.ws.send('hello')).toEqual({handled:true,sent:false,detail:'Model status is unavailable.'});
+  expect(refresh).toHaveBeenCalledTimes(1);expect(h.chatTurn).not.toHaveBeenCalled();
+ });
+});
+
+describe('chat.js sends only the attachments it was handed and reports a failed turn',()=>{
+ const UPL='upl_'+'c'.repeat(32);
+ function chat(answer:any){
+  const bodies:any[]=[];
+  const fetch=vi.fn(async(path:string,init:any)=>{if(path.endsWith('/status'))return {ok:true,status:200,json:async()=>({chat:{state:'attached'}})};bodies.push(JSON.parse(init.body));return {ok:true,status:200,json:async()=>answer};});
+  const h=harness('chat.js',{fetch,window:{EchoPrimeActivity:{start:()=>({thinking(){},done(){},fail(){}}),clear(){}},EchoPrimeModels:{provider:()=>'claude',model:()=>undefined,describe:()=>'',label:()=>'Claude (claude CLI)'},EchoPrimeWorkspace:{ownerHeaders:async()=>({}),bridge:{state:{attachments:new Set(['lib1',UPL])}}}}});
+  const outcomes=vi.fn();h.window.addEventListener('echo-model-outcome',outcomes);
+  return {...h,bodies,outcomes,api:h.window.EchoPrimeChat};
+ }
+ const done={status:'completed',sessionId:'33333333-3333-4333-8333-333333333333',answer:'ok',evidence:[]};
+ it('never forwards the Workspace attachment set on an Echo conversation turn',async()=>{
+  const h=chat(done);
+  await h.api.send('q',{workspace:{chatId:'c1',prompt:'q',attachments:[UPL]}});
+  expect(h.bodies[0].attachments).toEqual([UPL]);
+  await h.api.send('q2',{workspace:{chatId:'c1',prompt:'q2'}});
+  expect(h.bodies[1]).not.toHaveProperty('attachments');
+  expect(h.outcomes).not.toHaveBeenCalled();
+ });
+ it('announces a failed turn so the model report is read again',async()=>{
+  const h=chat({...done,status:'failed',answer:'Claude (claude CLI) is unavailable: OAuth session expired'});
+  await h.api.send('q');
+  expect(h.outcomes).toHaveBeenCalledTimes(1);
+ });
+});
+
+describe('a refused account request keeps its HTTP status (workspace-client.js)',()=>{
+ it('attaches the status to the error so the sign-in card can tell a refusal from an outage',async()=>{
+  const fetch=vi.fn(async()=>new Response(JSON.stringify({error:'Sign-in failed.'}),{status:401,headers:{'content-type':'application/json'}}));
+  const Transport=harness('workspace-client.js',{fetch}).window.EchoPrimeWorkspaceTransport;
+  const error=await new Transport({fetch}).auth('login',{provider:'google',id_token:'eyJ.fixture'}).catch((e:any)=>e);
+  expect(error.message).toBe('Sign-in failed.');expect(error.status).toBe(401);
+ });
+});

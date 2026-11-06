@@ -87,7 +87,8 @@
    if(generation!==this.generation){await response.body?.cancel().catch(()=>{});throw new Error('Account session changed; response discarded.');}
    if(!response.ok){
     let value;try{value=await readJson(response);}finally{if(logout||response.status===401||response.status===403&&!auth)this.clear();}
-    throw new Error(typeof value.error==='string'?value.error.slice(0,600):'Workspace request failed. No automatic retry was made.');
+    // The status travels with the message, so a caller can tell a refusal (4xx) from an outage without parsing the words.
+    const error=new Error(typeof value.error==='string'?value.error.slice(0,600):'Workspace request failed. No automatic retry was made.');error.status=response.status;throw error;
    }
    this.responses.set(response,generation);return response;
   }

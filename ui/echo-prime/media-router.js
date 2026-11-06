@@ -337,6 +337,7 @@
  window.addEventListener('echo-account-changed',()=>{generation++;if(autoTimer){clearTimeout(autoTimer);autoTimer=null;}busy=false;routing=false;lastRoute=null;setAuto(false);notice('');panel.hidden=true;pickBox.replaceChildren();alternatives.replaceChildren();excludedBox.replaceChildren();failure.replaceChildren();for(const s of enhancers){s.previous=null;s.undo.hidden=true;s.added.replaceChildren();s.added.hidden=true;s.note.hidden=true;s.busy=false;}report=null;reportState='loading';renderEnhance();void loadModels();});
  renderEnhance();
  const ready=loadModels();
+ window.addEventListener('echo-model-outcome',()=>{void loadModels();});// chat.js: a failed turn may have signed a provider out, so Enhance re-reads before offering it
  // Another surface (composer.js) mounts an Enhance control that shares this provider chip, owner gate and account reset.
  function mountShared(options){
   if(!options||typeof options.name!=='string'||typeof options.textarea!=='function'||typeof options.mode!=='function'||typeof options.mount!=='function')throw new Error('Invalid Enhance mount');

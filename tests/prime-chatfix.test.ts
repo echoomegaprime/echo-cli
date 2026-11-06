@@ -140,3 +140,37 @@ describe('the request limit is fair per client and keeps a slot for the admissio
   }finally{h.releaseAll();await h.s.close();}
  });
 });
+
+// Review 2026-11-06: a vendor turn in an Echo conversation forwarded Workspace library ids as attachments; hub.chat only
+// reads Prime uploads (upl_…) and deleted every other id without a word, and an upload's text could push the prompt past
+// SharedChat's 12,000-character limit, which answered only "Invalid chat request". Each case is now refused by name.
+describe('chat attachments are read or refused by name, never dropped',()=>{
+ const UPL='upl_'+'a'.repeat(32),WORKSPACE_FILE='0123456789abcdef0123456789abcdef';
+ function hub(options:{uploads?:boolean;text?:string}={}){
+  const submitted:Record<string,unknown>[]=[];
+  const chat={status:()=>({state:'attached',busy:false,routing:false}),submit:async(input:Record<string,unknown>)=>{submitted.push(input);return {status:'completed',sessionId:'s1',answer:'ok'};}};
+  const uploads={extractForChat:async(_owner:string,id:string)=>({meta:{id,name:'notes.txt',type:'text/plain'},extracted:true,text:options.text??'Mission Alpha'})};
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- stand-ins for the chat host and the upload store
+  return {submitted,hub:new PrimeHub({capabilities:[],chat:chat as any,...(options.uploads===false?{}:{uploads:uploads as any})})};
+ }
+ const ask=(attachments:unknown,prompt='What does the file say?')=>({requestId:'00000000-0000-4000-8000-000000000001',prompt,attachments});
+ it('refuses a Workspace library id instead of deleting it',async()=>{
+  const h=hub();
+  await expect(h.hub.chat(ask([UPL,WORKSPACE_FILE]))).rejects.toThrow(/Attachment 2 is not a Prime upload.*Workspace library.*nothing was sent/i);
+  expect(h.submitted).toHaveLength(0);
+ });
+ it('says uploads are not configured instead of "Invalid chat request", and ignores an empty list',async()=>{
+  const h=hub({uploads:false});
+  await expect(h.hub.chat(ask([UPL]))).rejects.toThrow(/uploads are not configured on this host/i);
+  expect(h.submitted).toHaveLength(0);
+  await h.hub.chat(ask([]));
+  expect(h.submitted).toHaveLength(1);expect(h.submitted[0]).not.toHaveProperty('attachments');
+ });
+ it('refuses a message that the attached text pushes past the chat limit, with the sizes',async()=>{
+  const h=hub({text:'x'.repeat(13000)});
+  await expect(h.hub.chat(ask([UPL]))).rejects.toThrow(/over the 12,000-character chat limit.*13,0\d\d characters? from the attached files.*nothing was sent/i);
+  expect(h.submitted).toHaveLength(0);
+  const fits=hub();await fits.hub.chat(ask([UPL]));
+  expect(fits.submitted[0].prompt).toContain('Mission Alpha');expect(fits.submitted[0]).not.toHaveProperty('attachments');
+ });
+});

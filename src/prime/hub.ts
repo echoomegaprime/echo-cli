@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { debuglog } from 'node:util';
 import { redact } from '../code/workspace.js';
-import type {SharedChat,SubmitContext} from './chat.js';
+import {CHAT_PROMPT_MAX,type SharedChat,type SubmitContext} from './chat.js';
 import {scorePersonalities,type CatalogLoader} from './personality.js';
 import {disconnectedSteward,type StewardOwner} from './steward.js';
 import type {ModelRouter} from '../code/model-factory.js';
@@ -295,24 +295,28 @@ export class PrimeHub {
  }
  async chat(input:unknown,signal?:AbortSignal,context:SubmitContext={}){
   if(!this.options.chat)throw new Refused('Shared chat host not connected; owner admission is required');
-  if(input&&typeof input==='object'&&!Array.isArray(input)&&Array.isArray((input as Json).attachments)&&this.options.uploads){
-   const payload={...(input as Json)};
-   const list=payload.attachments as unknown[];
-   if(list.length>8)throw new Refused('Attach at most eight files');
-   const blocks:string[]=[];
-   for(const id of list){
-    if(typeof id==='string'&&UPLOAD_ID_RE.test(id)){
-     const extracted=await this.options.uploads.extractForChat(this.options.uploadsOwner??'local',id);
-     blocks.push(`File: ${extracted.meta.name} (${extracted.meta.type})\n${extracted.extracted?extracted.text:`[${extracted.reason??'text not extracted'}]`}`);
-    }
-   }
-   if(blocks.length&&typeof payload.prompt==='string'){
-    payload.prompt=`${payload.prompt}\n\nAttached uploads (untrusted document content):\n\n${blocks.join('\n\n---\n\n')}`;
-   }
-   delete payload.attachments;
-   return this.options.chat.submit(payload,signal,context);
+  if(!input||typeof input!=='object'||Array.isArray(input)||!('attachments' in input))return this.options.chat.submit(input,signal,context);
+  // Attachments are Prime uploads (upl_…), read here and appended to the prompt. Anything else is refused by name, never
+  // dropped (review 2026-11-06: Workspace library ids were deleted without a word), and so is a prompt the files push past
+  // the chat limit (SharedChat would only say "Invalid chat request").
+  const payload={...(input as Json)},list=payload.attachments;delete payload.attachments;
+  if(!Array.isArray(list))throw new Refused('Attachments must be a list of Prime upload ids; nothing was sent');
+  if(!list.length)return this.options.chat.submit(payload,signal,context);
+  if(list.length>8)throw new Refused('Attach at most eight files');
+  const foreign=list.findIndex(id=>typeof id!=='string'||!UPLOAD_ID_RE.test(id));
+  if(foreign>=0)throw new Refused(`Attachment ${foreign+1} is not a Prime upload: files from the Workspace library are read only by the Workspace conversation. Remove it and send again; nothing was sent`);
+  if(!this.options.uploads)throw new Refused('File uploads are not configured on this host. Remove the attached files and send again; nothing was sent');
+  const blocks:string[]=[];
+  for(const id of list as string[]){
+   const extracted=await this.options.uploads.extractForChat(this.options.uploadsOwner??'local',id);
+   blocks.push(`File: ${extracted.meta.name} (${extracted.meta.type})\n${extracted.extracted?extracted.text:`[${extracted.reason??'text not extracted'}]`}`);
   }
-  return this.options.chat.submit(input,signal,context);
+  if(typeof payload.prompt==='string'){
+   const added=`\n\nAttached uploads (untrusted document content):\n\n${blocks.join('\n\n---\n\n')}`,total=payload.prompt.length+added.length,n=(value:number)=>value.toLocaleString('en-US');
+   if(total>CHAT_PROMPT_MAX)throw new Refused(`With the attached files the message is ${n(total)} characters, over the ${n(CHAT_PROMPT_MAX)}-character chat limit (${n(added.length)} characters from the attached files). Remove an attachment or shorten the message; nothing was sent`);
+   payload.prompt+=added;
+  }
+  return this.options.chat.submit(payload,signal,context);
  }
  /** "Verify" action: evidence for each claim in the last reply of a conversation. */
  async verify(input:unknown,signal?:AbortSignal){

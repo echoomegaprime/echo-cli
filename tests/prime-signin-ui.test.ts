@@ -356,3 +356,54 @@ describe('sign-up intent and inline action results',()=>{
   expect(resultOf(h,'Forgot password?').textContent).toBe('Enter your email address first.');
  });
 });
+
+// Review 2026-11-06: "Sign up with Google" calls the same Google login route (Google's credential is the same for sign-in
+// and sign-up; echo-auth decides). Until echo-auth creates accounts from Google sign-in, the Workspace answers a Google
+// address with no account with a bare "Sign-in failed." (401). On the sign-up intent that refusal now says, next to the
+// button, what to do next; any other answer is shown verbatim and alone.
+describe('Google sign-up refusal on the sign-up intent',()=>{
+ const withScroll=()=>{const scrolled:Node[]=[];(Node.prototype as any).scrollIntoView=function(this:Node){scrolled.push(this);};return {scrolled,restore:()=>{delete (Node.prototype as any).scrollIntoView;}};};
+ const googleStatus=(h:ReturnType<typeof boot>)=>descendants(h.google()).find(n=>n.className==='signin-google-status')!;
+ const details=(h:ReturnType<typeof boot>)=>descendants(h.content).find(n=>n.tagName==='DETAILS')!;
+ async function signupCallback(error:Error){
+  const h=boot({session:anonymous(),config:enabled()});await h.get('#sidebar-signup').fire('click');await flush();
+  const api=h.gis();await h.script().fire('load');await flush();
+  h.auth.mockImplementation(async(operation:string)=>{if(operation==='login')throw error;return enabled();});
+  details(h).open=false;
+  const result={credential:'eyJ.fixture.token'};
+  await api.initialize.mock.calls[0][0].callback(result);await flush();
+  return {h,result};
+ }
+ it('keeps the Workspace message verbatim and says how to get an account, next to the button and in view',async()=>{
+  const view=withScroll();
+  try{
+   const {h,result}=await signupCallback(Object.assign(new Error('Sign-in failed.'),{status:401}));
+   expect(h.auth.mock.calls.filter(c=>c[0]==='login').map(c=>c[1])).toEqual([{provider:'google',id_token:'eyJ.fixture.token'}]);
+   expect(h.auth.mock.calls.some(c=>c[0]==='signup')).toBe(false);// sign-up with Google is the Google login route, never the password sign-up
+   expect(result.credential).toBe('');
+   const status=googleStatus(h);
+   expect(status.textContent.startsWith('Sign-in failed. ')).toBe(true);
+   expect(status.textContent).toMatch(/no Echo account uses this Google address yet/i);
+   expect(status.textContent).toMatch(/create an account below with the same email address/i);
+   expect(h.google().attributes['data-state']).toBe('error');expect(details(h).open).toBe(true);
+   expect(view.scrolled).toContain(status);
+  }finally{view.restore();}
+ });
+ it('shows any other answer verbatim and alone',async()=>{
+  const view=withScroll();
+  try{
+   const {h}=await signupCallback(Object.assign(new Error('Identity service is unavailable.'),{status:503}));
+   expect(googleStatus(h).textContent).toBe('Identity service is unavailable.');
+   expect(view.scrolled).toContain(googleStatus(h));
+   const precise=await signupCallback(Object.assign(new Error('Google cannot confirm this address is still yours.'),{status:403}));
+   expect(googleStatus(precise.h).textContent).toBe('Google cannot confirm this address is still yours.');
+  }finally{view.restore();}
+ });
+ it('adds no sign-up guidance to a refused Google sign-in',async()=>{
+  const h=boot({session:anonymous(),config:enabled()});await h.open();
+  const api=h.gis();await h.script().fire('load');await flush();
+  h.auth.mockImplementation(async(operation:string)=>{if(operation==='login')throw Object.assign(new Error('Sign-in failed.'),{status:401});return enabled();});
+  await api.initialize.mock.calls[0][0].callback({credential:'eyJ.fixture.token'});await flush();
+  expect(googleStatus(h).textContent).toBe('Sign-in failed.');
+ });
+});

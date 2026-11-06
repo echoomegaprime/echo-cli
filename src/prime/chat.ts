@@ -22,6 +22,8 @@ export interface ChatReply extends TurnResult {requestId:string;model?:AnswerInf
 export interface VerifiedClaim extends Claim {verified:boolean;source:string|null}
 export interface VerifyReply {requestId:string;sessionId:string;answer:string;claims:VerifiedClaim[];summary:{total:number;verified:number;unverified:number};account:{text:string;model:AnswerInfo}|null;answerVerification:'unverified_model_text'}
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+/** The longest prompt one chat turn accepts, attached upload text included (hub.chat checks it before submit). */
+export const CHAT_PROMPT_MAX=12000;
 const debug=debuglog('echo-prime');
 const TOOL_PREFIX='UNTRUSTED TOOL RESULT (';
 const VERIFY_SYSTEM='You are reviewing your own previous answer for evidence. You have no tools. For each listed claim, state exactly what you relied on: quote the tool result it came from (by action and path or query) or the user\'s message, or write "no evidence: general knowledge or inference" or "no evidence: unsupported". Never invent evidence. Reply with exactly one JSON object {"action":"final","content":"<one line per claim, in order>"} and nothing else.';
@@ -85,7 +87,7 @@ export class SharedChat {
   const data=input as Record<string,unknown>;
   if(Object.keys(data).some(k=>!['requestId','prompt','sessionId','provider','model','rolePin'].includes(k))||
    typeof data.requestId!=='string'||!uuid.test(data.requestId)||typeof data.prompt!=='string'||
-   !data.prompt.trim()||data.prompt.length>12000||
+   !data.prompt.trim()||data.prompt.length>CHAT_PROMPT_MAX||
    (data.sessionId!==undefined&&(typeof data.sessionId!=='string'||!uuid.test(data.sessionId))))throw new Error('Invalid chat request');
   const {requestId,prompt}=data;
   if(data.rolePin!==undefined&&data.rolePin!==null&&!isPrimeRole(data.rolePin))throw new Error('Invalid role pin');
