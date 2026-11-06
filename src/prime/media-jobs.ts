@@ -35,7 +35,8 @@ export type MediaErrorKind='no_media'|'unreadable';
 interface Job {
  requestId:string;capability:string;describe:JobDescribe;arguments:Json;prompt:string;
  /** An adult request on the on-prem router: its refusals are the router's policy at work, not the tool failing, so they never count against it. */
- adult:boolean;state:JobState;phase:'invoking'|'polling'|'collecting'|'done';
+ adult:boolean;/** What the router named, kept from the submit answer and refreshed by each status answer (an older router's status may omit it). */
+ used?:Json;state:JobState;phase:'invoking'|'polling'|'collecting'|'done';
  startedAt:number;deadline:number;updatedAt:number;polls:number;detail?:string;result?:Json;providerJobId?:string;providerStatus?:string;
  followable:boolean;statusCapability?:string;howToCheck?:string;media?:JobMedia;mediaError?:string;mediaErrorKind?:MediaErrorKind;trimmed?:boolean;done:Promise<void>;
 }
@@ -58,10 +59,10 @@ const promptOf=promptOfArguments;
 /** Where a router job really ran and with what: the router answers `model`, `node` and `backend` on the job, and Prime reports
  * them as given (short plain strings only) so the page never claims a model or place the router did not name. */
 const PLAIN=/^[A-Za-z0-9][A-Za-z0-9_.:/ +-]{0,79}$/;
-function usedOf(job:{capability:string;result?:Json}):Json|undefined{
- if(!isRouterCap(job.capability)||!job.result)return undefined;
+function usedFrom(capability:string,body:Json):Json|undefined{
+ if(!isRouterCap(capability))return undefined;
  const pick=(v:unknown)=>typeof v==='string'&&PLAIN.test(v.trim())?v.trim():undefined;
- const model=pick(job.result.model),node=pick(job.result.node),backend=pick(job.result.backend);
+ const model=pick(body.model),node=pick(body.node),backend=pick(body.backend);
  return model||node||backend?{...(model?{model}:{}),...(node?{node}:{}),...(backend?{backend}:{})}:undefined;
 }
 function providerJobOf(body:Json):string|undefined{
@@ -137,6 +138,7 @@ export class MediaJobs {
   const full=[...this.jobs.values()].filter(j=>j!==job&&j.state!=='running'&&!MEDIA_KINDS.has(j.describe.kind)&&j.result&&!j.trimmed);
   for(const old of full.slice(0,Math.max(0,full.length-(FULL_RESULTS-1)))){const marks={changed:false};old.result=compact(old.result,0,marks) as Json;old.trimmed=true;}
  }
+ private noteUsed(job:Job,body:Json){const u=usedFrom(job.capability,body);if(u)job.used={...job.used,...u};}
  private async run(job:Job){
   const {label}=job.describe,limit=this.deps.config.invokeTimeoutsMs[job.describe.kind];
   const out=await this.deps.invoke(job.capability,job.arguments,job.requestId,'Explicitly reviewed ECHO Prime request',limit);
@@ -147,7 +149,7 @@ export class MediaJobs {
    else this.finish(job,'uncertain',label+' did not answer within '+seconds(limit)+' s or the connection dropped ('+out.detail+'). The outcome is unknown and nothing was retried: check request ID '+job.requestId+' in the gate execution log before submitting again.');
    return;
   }
-  job.result=out.body;job.updatedAt=this.now();
+  job.result=out.body;job.updatedAt=this.now();this.noteUsed(job,out.body);
   const providerJob=providerJobOf(out.body);
   if(providerJob){
    job.providerJobId=providerJob;job.providerStatus=String(out.body.status??'submitted').toLowerCase();
@@ -175,7 +177,7 @@ export class MediaJobs {
     // The media router answers a failed job as {ok:false,status:'failed',error}; the hub's unwrap refuses that, so the
     // refusal's own body says whether the job ended. An unknown job id is final too: there is nothing left to follow.
     const status=String(st.body?.status??'').toLowerCase();
-    if(st.refused&&FAILED.has(status)){job.providerStatus=status;job.result=st.body;failed(status,st.body?.error??st.detail);return;}
+    if(st.refused&&FAILED.has(status)){job.providerStatus=status;job.result=st.body;this.noteUsed(job,st.body??{});failed(status,st.body?.error??st.detail);return;}
     if(st.refused&&/unknown job_id/i.test(st.detail)){job.providerStatus='unknown to the provider';this.finish(job,'blocked',job.describe.label+' no longer knows job '+job.providerJobId+' ('+st.detail.slice(0,160)+'), so Prime cannot follow it. Nothing was retried.');return;}
     if(st.notSent){job.providerStatus='status read deferred: '+st.detail.slice(0,120);continue;}
     misses++;job.providerStatus='status read failed: '+st.detail.slice(0,160);
@@ -183,7 +185,7 @@ export class MediaJobs {
     continue;
    }
    misses=0;
-   const status=String(st.body.status??'').toLowerCase();job.providerStatus=status||'unknown';job.result=st.body;
+   const status=String(st.body.status??'').toLowerCase();job.providerStatus=status||'unknown';job.result=st.body;this.noteUsed(job,st.body);
    if(DONE.has(status)){await this.collect(job,st.body);this.finish(job,'returned');return;}
    if(FAILED.has(status)){failed(status,st.body.error);return;}
   }
@@ -215,7 +217,7 @@ export class MediaJobs {
  private view(job:Job):Json{
   const now=this.now(),media=MEDIA_KINDS.has(job.describe.kind);
   // A finished media job's answer was compacted once in finish(); a running one may hold an uncompacted status body.
-  const marks={changed:false},result=job.result?(media&&job.phase!=='done'?compact(job.result,0,marks):job.result):undefined,used=usedOf(job);
+  const marks={changed:false},result=job.result?(media&&job.phase!=='done'?compact(job.result,0,marks):job.result):undefined,used=job.used;
   return {state:job.state,requestId:job.requestId,capability:job.capability,kind:job.describe.kind,untrusted:true,
    ...(used?{used}:{}),
    ...(job.detail?{detail:job.detail}:{}),

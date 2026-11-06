@@ -233,6 +233,16 @@ describe('honest results',()=>{
   expect(sdk.invoke.mock.calls[0][0].params).toEqual(adultArgs({node:'temper'}));
   expect(await uploads.get('owner-1',r.media.uploadId)).toMatchObject({type:'image/png'});
  });
+ it('keeps the model the router named at submit even when its status answers omit it (an older router)',async()=>{
+  const out=tmp('prime-adult-out3-');writeFileSync(join(out,'image_x.png'),img);
+  const clock=fakeClock(),statuses=['running','done'];
+  const {hub}=hubWith(async(request:any)=>{
+   if(request.capability===ROUTER)return {ok:true,job_id:'x1',status:'queued',node:'temper',model:'illustrious-xl-v0.1',backend:'comfyui'};
+   const status=statuses.shift()!;return {ok:true,job_id:'x1',status,...(status==='done'?{path:join(out,'image_x.png')}:{})};
+  },{clock,config:{localRoots:[out]}});
+  const r=await run(hub,ROUTER,adultArgs());
+  expect(r.state).toBe('returned');expect(r.used).toEqual({model:'illustrious-xl-v0.1',node:'temper',backend:'comfyui'});
+ });
  it('passes a router explanation about missing adult-capable models through verbatim and tries nothing else',async()=>{
   const said="no live nsfw-capable on-prem image model for style 'anime'; available nsfw-capable styles: photoreal";
   const {hub,sdk}=hubWith(async()=>({ok:false,error:said}));

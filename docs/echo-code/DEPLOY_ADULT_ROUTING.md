@@ -26,9 +26,13 @@ Base: `9410bae` (live). The change is additive; an ordinary (non-adult) request 
 2. `echo.media.image_generate` is registered and its health is not `red` or `orphaned`: `prepare` refuses those states
    ("Capability unavailable or unregistered") and adult mode then has nowhere to go. Check from the Studio status line or
    `echo.caps.detail`. The v2 router's `GET /backends` alias is what fixes an `orphaned` probe.
-3. `media.localRoots` in `/home/forge/prime-prod/prime.prod.json` includes `/home/forge/echo-media/out` (the default when the
+3. The gate passes `subjects_fictional` through to the router. It is not in the v2 `register_caps.sql` `input_schema_json`
+   (the router reads it, and that schema, like v1, does not forbid extra properties). Smoke step 6 is what proves it; if the
+   gate stripped it, the v2 router would answer 400 "an adult request must declare its subjects are fictional" and Prime would
+   show that sentence verbatim. Fix by adding `subjects_fictional` (boolean) to the cap's input schema.
+4. `media.localRoots` in `/home/forge/prime-prod/prime.prod.json` includes `/home/forge/echo-media/out` (the default when the
    directory is readable), so a finished file can be stored.
-4. Gate green on ANVIL (never QUENCH or FORGE): `bash anvil_test.sh adult`.
+5. Gate green on ANVIL (never QUENCH or FORGE): `bash anvil_test.sh adult`.
 
 ## Deploy
 

@@ -764,10 +764,13 @@ term in an adult brief (child, kid, teen, school girl/boy, "17 year old", young/
 rest of `minor_regex`), and a real-person request (deepfake, face swap, look-alike, likeness of, real person,
 celebrity, famous, "photo of my ex/wife/boss…", "my ex/wife…", social-network names, `@handle`, or a title-cased full name
 after of/with/featuring/starring/resembling/named/called). There is no name or NER detector and no list of names (the
-router's `named_persons` is empty today). The router remains the authority and refuses the same things again.
+router's `named_persons` is empty today). The title-cased-name rule is blunt on purpose: "in the style of Frank Frazetta"
+or "portrait of Queen Victoria" in an adult request is refused as `real_person`; the user rewords ("in a painterly 1970s
+fantasy style") or drops the name. The router remains the authority and refuses the same things again.
 
 **Honest results.** A router job's `model`, `node` and `backend` are reported as the router named them
-(`used` on the job view); the Studio shows "Model used: …" and a badge "on-prem (TEMPER)" (or the node it really
+(`used` on the job view: kept from the submit answer and refreshed by each status answer, so an older router whose status
+omits them still shows the model); the Studio shows "Model used: …" and a badge "on-prem (TEMPER)" (or the node it really
 reported, for example "on-prem (FORGE)"). Router refusals and explanations reach the user verbatim: "no live
 nsfw-capable on-prem image model for style 'anime'; available nsfw-capable styles: photoreal", "busy, try again in ~30s:
 …", "refused: …". Nothing is retried, and no other provider, tool or style is tried or offered: the failure box says
