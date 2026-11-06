@@ -23,6 +23,7 @@ Object.assign(assets,{'/nav.js':'nav.js','/nav.css':'nav.css','/privacy.html':'p
 Object.assign(assets,{'/autoagents.js':'autoagents.js','/autoagents.css':'autoagents.css'});
 Object.assign(assets,{'/activity.js':'activity.js','/activity.css':'activity.css'});
 assets['/systems.js']='systems.js';
+Object.assign(assets,{'/videoagent.js':'videoagent.js','/videoagent.css':'videoagent.css'});
 // The Echo orb mark answers the browser's default /favicon.ico probe as well as the linked /favicon.svg (both the same SVG).
 assets['/favicon.svg']='favicon.svg';assets['/favicon.ico']='favicon.svg';
 const assetTypes:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml'};
@@ -63,7 +64,7 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
   const path=new URL(req.url??'/',url).pathname;
   if(path.startsWith('/api/')){
    const started=Date.now(),requestId=randomUUID();
-   const operation=path.startsWith('/api/prime/media/')?'media':path==='/api/prime/enhance'?'enhance':path.startsWith('/api/workspace/')?'workspace':path.startsWith('/api/steward/')?'steward':path.startsWith('/api/prime/swarm/')?'swarm':path.startsWith('/api/prime/adk/')?'adk':path.startsWith('/api/prime/bots/')?'bots':path.startsWith('/api/prime/browser/')?'browser':path.startsWith('/api/prime/build/')?'build':path==='/api/prime/uploads'||path.startsWith('/api/prime/uploads/')?'uploads':path==='/api/prime/artifacts'||path.startsWith('/api/prime/artifacts/')?'artifacts':path==='/api/session'?'session':'owner';
+   const operation=path.startsWith('/api/prime/media/')?'media':path==='/api/prime/enhance'?'enhance':path.startsWith('/api/workspace/')?'workspace':path.startsWith('/api/steward/')?'steward':path.startsWith('/api/prime/swarm/')?'swarm':path.startsWith('/api/prime/adk/')?'adk':path.startsWith('/api/prime/bots/')?'bots':path.startsWith('/api/prime/browser/')?'browser':path.startsWith('/api/prime/build/')?'build':path.startsWith('/api/prime/video/')?'video':path==='/api/prime/uploads'||path.startsWith('/api/prime/uploads/')?'uploads':path==='/api/prime/artifacts'||path.startsWith('/api/prime/artifacts/')?'artifacts':path==='/api/session'?'session':'owner';
    const record=(outcome:string)=>debug('%j',{schemaVersion:1,event:'prime_api_request',operation,requestId,status:res.statusCode,outcome,durationMs:Date.now()-started});
    res.once('finish',()=>record('returned'));res.once('close',()=>{if(!res.writableEnded)record('disconnected');});
    const supplied=(req.headers.cookie??'').split(';').map(c=>c.trim()).find(c=>c.startsWith('echo_prime='))?.slice(11)??'';
@@ -174,6 +175,8 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     if(swarmRun&&req.method==='GET'){send(200,await hub.swarmStatus(decodeURIComponent(swarmRun[1]),abort.signal));return;}
     // Agents (Echo ADK): owner-only like every other /api/prime route. GET list/status before the JSON POST gate; POST run/stop below it.
     if(path==='/api/prime/adk/health'&&req.method==='GET'){send(200,await hub.adkHealth(abort.signal));return;}
+    // Video agent builder (owner-only, below requireOwner): status here; plan / agent / run are JSON POSTs after the method gate.
+    if(path==='/api/prime/video/status'&&req.method==='GET'){send(200,hub.videoStatus());return;}
     if(path==='/api/prime/adk/agents'&&req.method==='GET'){send(200,await hub.adkAgents(abort.signal));return;}
     const adkAgent=/^\/api\/prime\/adk\/agents\/([^/]{1,80})$/.exec(path);
     if(adkAgent&&req.method==='GET'){send(200,await hub.adkAgent(decodeURIComponent(adkAgent[1]),abort.signal));return;}
@@ -241,6 +244,9 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     else if(path==='/api/prime/adk/runs')send(202,await hub.adkRun(data,abort.signal));
     else if(adkStop)send(200,await hub.adkStop(decodeURIComponent(adkStop[1]),abort.signal));
     else if(path==='/api/prime/adk/agents')send(201,await hub.adkCreateAgent(data,abort.signal));
+    else if(path==='/api/prime/video/plan')send(200,await hub.videoPlan(data,abort.signal));
+    else if(path==='/api/prime/video/agent'){const made=await hub.videoAgent(data,abort.signal);send(made.existing?200:201,made);}
+    else if(path==='/api/prime/video/run')send(202,await hub.videoRun(data,abort.signal));
     else if(adkAgentAction&&adkAgentAction[2]==='update')send(200,await hub.adkUpdateAgent(decodeURIComponent(adkAgentAction[1]),data,abort.signal));
     else if(adkAgentAction)send(200,await hub.adkDeleteAgent(decodeURIComponent(adkAgentAction[1]),abort.signal));
     else if(path==='/api/prime/bots/create')send(201,await hub.botsCreate(data,abort.signal));

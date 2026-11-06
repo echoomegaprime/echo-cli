@@ -6,7 +6,8 @@ import {scorePersonalities,type CatalogLoader} from './personality.js';
 import {disconnectedSteward,type StewardOwner} from './steward.js';
 import type {ModelRouter} from '../code/model-factory.js';
 import {SwarmError,type SwarmClient} from './swarm.js';
-import {AdkError,type AdkClient} from './agents.js';
+import {ADK_MAX_STEPS_CEILING,AdkError,type AdkClient} from './agents.js';
+import {VideoAgentError,discoverVideoCatalog,offlineCatalog,parseVideoRequest,parseVideoRun,planVideo,resolveVideoInputs,videoAgentDefinition,videoRunPrompt,type VideoCatalog} from './videoagent.js';
 import {MediaRouter} from './media.js';
 import {PromptEnhancer} from './enhance.js';
 import {WorkspaceHttpError} from './workspace.js';
@@ -115,6 +116,8 @@ const digest=(request:PrimeRequest)=>createHash('sha256').update(JSON.stringify(
 export class PrimeHub {
  private catalog:Map<string,Capability>;private tickets=new Map<string,Ticket>();private tools:Tool[]=[];
  private eshAutonomy:EshAutonomy;private ecf:EcfTools;
+ /** Video-related part of the live catalog, re-read at most once a minute (plan, create and re-plan reuse it). */
+ private videoCatalogCache?:{at:number;catalog:VideoCatalog};
  constructor(private options:PrimeOptions){this.catalog=new Map(options.capabilities.map(c=>[c.id,{...c}]));
   this.eshAutonomy=new EshAutonomy({connection:options.esh,config:options.autonomy,events:options.autonomyEvents,prepare:r=>this.prepareTicket(r,true),execute:(id,hash)=>this.execute(id,hash)});
   this.ecf=options.ecf??new EcfTools(new ContinuityClient(),options.autonomyEvents);
@@ -182,6 +185,54 @@ export class PrimeHub {
  async adkCreateAgent(input:unknown,signal?:AbortSignal){return this.adkClient().createAgent(input,signal);}
  async adkUpdateAgent(name:string,input:unknown,signal?:AbortSignal){return this.adkClient().updateAgent(name,input,signal);}
  async adkDeleteAgent(name:string,signal?:AbortSignal){return this.adkClient().deleteAgent(name,signal);}
+ /** Video agent builder: what can work on this host and why not. Never throws and requests nothing. */
+ videoStatus(){
+  const adk=!!this.options.adk,catalog=!!this.options.sdk,uploads=!!this.options.uploads;
+  const reasons=[...(adk?[]:['Echo ADK is off (add an `adk` section to the Prime config)']),...(catalog?[]:['the live capability catalog is not connected (the Prime config has no `sdk` section, so no capability id can be verified)'])];
+  return {configured:adk&&catalog,adk,catalog,uploads,...(reasons.length?{reason:'Video agents cannot be created: '+reasons.join('; ')+'. Storyboards still plan.'}:{})};
+ }
+ private async videoCatalog(signal?:AbortSignal):Promise<VideoCatalog>{
+  const sdk=this.options.sdk;
+  if(!sdk)return offlineCatalog('The live capability catalog is not connected: the Prime config has no `sdk` section, so no capability id can be verified. Nothing can be created until it is.');
+  const hit=this.videoCatalogCache;
+  if(hit&&Date.now()-hit.at<60000)return hit.catalog;
+  if(signal?.aborted)throw new VideoAgentError(499,'Interrupted');
+  const catalog=await discoverVideoCatalog({read:async id=>unwrap(await sdk.read(id)),search:query=>sdk.search(query)});
+  if(catalog.live)this.videoCatalogCache={at:Date.now(),catalog};
+  return catalog;
+ }
+ private async videoMaterial(input:unknown,signal?:AbortSignal){
+  const material=parseVideoRequest(input);
+  const [inputs,catalog]=await Promise.all([resolveVideoInputs(material.inputs,this.options.uploads,this.options.uploadsOwner??'local'),this.videoCatalog(signal)]);
+  return {material,plan:planVideo(material,inputs,catalog)};
+ }
+ /** Storyboard + routed capabilities + budget for a request (`prompts`) or an edited storyboard (`shots`). Owner-only route. */
+ async videoPlan(input:unknown,signal?:AbortSignal){return {plan:(await this.videoMaterial(input,signal)).plan};}
+ /** Creates the `video-<slug>` producer agent from the recomputed plan. The same storyboard twice returns the existing agent; a
+  *  name taken by anything else is refused (nothing is renamed or overwritten). */
+ async videoAgent(input:unknown,signal?:AbortSignal){
+  const adk=this.adkClient();
+  const {plan}=await this.videoMaterial(input,signal);
+  const definition=videoAgentDefinition(plan);
+  try{
+   const agent=await adk.createAgent(definition,signal,{maxSteps:ADK_MAX_STEPS_CEILING});
+   return {agent,plan,existing:false};
+  }catch(error){
+   if(!(error instanceof AdkError)||error.detail.http!==409)throw error;
+   const taken=await adk.agent(definition.name,signal).catch(()=>undefined);
+   if(taken&&object(taken.origin).prompt_sha256===plan.origin.prompt_sha256)return {agent:taken,plan,existing:true};
+   throw new VideoAgentError(409,'An agent named '+definition.name+' already exists and was not made from this storyboard. Give the video a different name; nothing was created or replaced.');
+  }
+ }
+ /** Starts a run of a video agent through Echo ADK. Without a budget the agent's own lane budget is used (the service clamps it). */
+ async videoRun(input:unknown,signal?:AbortSignal){
+  const adk=this.adkClient(),request=parseVideoRun(input);
+  const record=await adk.agent(request.agent,signal);
+  if(record.role!=='producer')throw new VideoAgentError(400,request.agent+' is not a video producer agent');
+  const lane=object(object(record.lane).budget);
+  const budget=request.budget!==undefined?request.budget:Object.keys(lane).length?lane:undefined;
+  return adk.run({agent:request.agent,prompt:videoRunPrompt(request.agent),...(budget!==undefined?{budget}:{})},signal);
+ }
  /** The autonomous-creation chat tools in registration shape; an empty list when the feature is off. The tool loop spreads this into its tools. */
  autoagentTools():ChatTool[]{return this.options.autoagents?this.options.autoagents.tools():[];}
  autoagentsStatus(){return this.options.autoagents?this.options.autoagents.status():{configured:false,reason:'Autonomous agents are off: the Prime config needs adk, bots and sdk configured'};}
