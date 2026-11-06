@@ -105,9 +105,14 @@
 
  // ---- Enhance control --------------------------------------------------------------------------------------------
  const enhancers=[];
- // A surface may name its own control (options.ariaLabel) and say what "done" means for it (options.doneNote); the defaults are the chat composer's.
+ // A surface may name its own control (options.ariaLabel), say what "done" means for it (options.doneNote) and learn when its request starts and ends
+ // (options.onBusy(true|false), e.g. to hold its own submit button while the text may still be replaced); the defaults are the chat composer's.
  const DONE_NOTE='Nothing was sent; review and press Send yourself.';
  const resetNote=state=>{state.note.className='enhance-note';};
+ function notifyBusy(state,on){
+  if(typeof state.options.onBusy!=='function')return;
+  try{state.options.onBusy(on);}catch(error){debug('enhance','prime_enhance_busy_callback_failed',{surface:state.options.name,reason:error instanceof Error?error.message:'failed'});}
+ }
  function mountEnhance(options){
   const label=el('span',{class:'enhance-label'},'Enhance'),button=el('button',{type:'button',class:'quiet-button enhance-button','data-enhance':options.name,'aria-label':options.ariaLabel||'Enhance prompt'},spark(),label);
   const select=el('select',{class:'enhance-provider','data-enhance-provider':options.name,'aria-label':'Enhance with'});
@@ -148,7 +153,7 @@
   if(!text){state.note.hidden=false;state.note.textContent='Type a prompt first.';return;}
   if(text.length>4000){state.note.hidden=false;state.note.textContent='Enhance takes up to 4,000 characters; shorten the prompt first.';return;}
   const mode=state.options.mode(),chosen=provider,current=generation;
-  busy=true;state.busy=true;renderEnhance();resetNote(state);state.note.hidden=false;state.note.textContent='Asking '+(LABELS[chosen]||chosen)+' to enhance this '+(mode==='auto'?'prompt':(ARTICLE[mode]||'a').replace(/^an? /,'')+' prompt')+'…';
+  busy=true;state.busy=true;notifyBusy(state,true);renderEnhance();resetNote(state);state.note.hidden=false;state.note.textContent='Asking '+(LABELS[chosen]||chosen)+' to enhance this '+(mode==='auto'?'prompt':(ARTICLE[mode]||'a').replace(/^an? /,'')+' prompt')+'…';
   try{
    const result=await api('prime/enhance',{mode,text,provider:chosen},125000);
    if(current!==generation)return;
@@ -176,7 +181,7 @@
    }
    state.note.textContent=failureText(message)+' Your prompt was not changed.'+next;
    debug('enhance','prime_enhance_failed',{surface:state.options.name,mode,provider:chosen,next:provider});
-  }finally{if(current===generation){busy=false;state.busy=false;renderEnhance();}}
+  }finally{if(current===generation){busy=false;state.busy=false;notifyBusy(state,false);renderEnhance();}}
  }
 
  // ---- Auto mode in the composer -------------------------------------------------------------------------------------
@@ -361,7 +366,7 @@
   mountEnhance({name:'studio',textarea:()=>$('#creative-prompt'),mode:()=>{const cat=category?category.value:'auto';if(cat==='auto'||cat==='all'){const k=lastRoute&&lastRoute.classification&&lastRoute.classification.kind;return k&&k!=='chat'&&k!=='image-edit'?k:k==='image-edit'?'image':'auto';}return CATEGORY_MODE[cat]||'auto';},
    mount(wrap,note,added){const row=$('.creative-actions');if(row)row.append(wrap);else brief.after(wrap);(row||brief).after(note,added);}});
  }
- window.addEventListener('echo-account-changed',()=>{generation++;if(autoTimer){clearTimeout(autoTimer);autoTimer=null;}busy=false;routing=false;lastRoute=null;setAuto(false);notice('');panel.hidden=true;status.textContent='';pickBox.replaceChildren();alternatives.replaceChildren();excludedBox.replaceChildren();failure.replaceChildren();for(const k of Object.keys(sessionFailures))delete sessionFailures[k];for(const s of enhancers){s.previous=null;s.undo.hidden=true;s.added.replaceChildren();s.added.hidden=true;s.note.hidden=true;resetNote(s);s.busy=false;}report=null;reportState='loading';renderEnhance();void loadModels();});
+ window.addEventListener('echo-account-changed',()=>{generation++;if(autoTimer){clearTimeout(autoTimer);autoTimer=null;}busy=false;routing=false;lastRoute=null;setAuto(false);notice('');panel.hidden=true;status.textContent='';pickBox.replaceChildren();alternatives.replaceChildren();excludedBox.replaceChildren();failure.replaceChildren();for(const k of Object.keys(sessionFailures))delete sessionFailures[k];for(const s of enhancers){s.previous=null;s.undo.hidden=true;s.added.replaceChildren();s.added.hidden=true;s.note.hidden=true;resetNote(s);if(s.busy)notifyBusy(s,false);s.busy=false;}report=null;reportState='loading';renderEnhance();void loadModels();});
  renderEnhance();
  const ready=loadModels();
  window.addEventListener('echo-model-outcome',()=>{void loadModels();});// chat.js: a failed turn may have signed a provider out, so Enhance re-reads before offering it

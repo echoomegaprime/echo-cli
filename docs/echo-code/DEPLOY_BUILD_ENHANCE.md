@@ -9,11 +9,12 @@ Build form. Design and rules: `PRIME_BUILD.md` ("Enhance the description") and `
 
 | File | Change |
 |---|---|
-| `src/prime/enhance.ts` | New mode `build` (`ENHANCE_SYSTEM.build`, `PRESERVE_BUILD`, output contract with `warnings`); build drafts and answers go through `redactBuild` (stable), the answer is parsed before it is redacted; result `warnings` (draft credential, brief credential, model notes, max 5); mode error message lists `build`; `prime_enhance_credentials_redacted` debug event |
-| `ui/echo-prime/media-router.js` | `ARTICLE.build`; `mountEnhance` options `ariaLabel` and `doneNote` (defaults unchanged for the composer and Studio); `warnings` shown in the note with `enhance-warn`; `prime_enhance_mounted` debug event |
-| `ui/echo-prime/build.js` | Mounts the shared control (`name: 'build'`, `mode: 'build'`) into `#build-enhance` / `#build-enhance-feedback`; both hidden unless the view's own `admitted()` is true |
+| `src/prime/enhance.ts` | New mode `build` (`ENHANCE_SYSTEM.build`, `PRESERVE_BUILD`, output contract with `warnings`); build drafts and answers go through `scrubBuild` (a superset of what Echo Build `create` refuses, repeated until stable), the answer is parsed before it is scrubbed; result `warnings` (draft credential, brief credential, model notes, max 5, each saying it can be a false alarm); the system prompt fences the draft as data and bans label-colon credential words; the 4,000-character cap is checked again after the scrub (400, nothing sent, rate limit not charged); mode error message lists `build`; `prime_enhance_credentials_redacted` and `prime_enhance_refused` (`input_expanded_by_redaction`) debug events |
+| `src/prime/build.ts` | Export only: `refusesCredentials` (the credential check `create` and `turn` apply, now a named function that `inputText` calls) and `inputText`. No behaviour change; Echo Build still refuses exactly what it refused before |
+| `ui/echo-prime/media-router.js` | `ARTICLE.build`; `mountEnhance` options `ariaLabel`, `doneNote` and `onBusy` (defaults unchanged for the composer and Studio); `warnings` shown in the note with `enhance-warn`; `prime_enhance_mounted` debug event |
+| `ui/echo-prime/build.js` | Mounts the shared control (`name: 'build'`, `mode: 'build'`) into `#build-enhance` / `#build-enhance-feedback`; both hidden unless the view's own `admitted()` is true; **Build it** is disabled (and a submit refused with a reason) while an Enhance request runs |
 | `ui/echo-prime/index.html` | `#build-submit` moves into `div.build-submit-row` with `#build-enhance` before it; `#build-enhance-feedback` after the row |
-| `ui/echo-prime/build.css`, `media.css` | Row layout; `.enhance-warn` colour |
+| `ui/echo-prime/build.css`, `media.css` | Row layout; `.enhance-warn` colour; `.build-form .enhance-provider` restores the chip's pill look that `.build-form select` would otherwise override; `#build-submit` keeps stretching across the column |
 | `tests/prime-enhance.test.ts`, `tests/prime-build-enhance-ui.test.ts` | Server tests for the build mode and the credential handling; UI tests for the Echo Build control |
 | `docs/echo-code/PRIME_BUILD.md`, `PRIME_MEDIA_ROUTER.md`, `ui/echo-prime/README.md`, this file | Docs |
 
@@ -28,6 +29,9 @@ responses (no `warnings` field), and the composer and Studio notes are unchanged
 2. At least one Enhance provider is signed in (the chip lists them from `/api/prime/models`). Claude and GPT are checked for
    sign-in; an expired CLI login is named and skipped, as in the composer.
 3. Gate green on ANVIL (never QUENCH or FORGE): `bash anvil_test.sh buildenh`.
+   The gate has no browser: the UI tests run the real scripts against a stand-in DOM and apply the real stylesheets through a
+   small cascade stand-in, so layout, real focus and real key presses are proven only by smoke steps 3, 9 and 10. The one
+   known ANVIL-only failure, `tests/code-events.test.ts` (a file-mode assertion on the NTFS-backed scratch disk), is unrelated.
 
 ## Deploy
 
@@ -58,16 +62,23 @@ the new `index.html`, `build.js`, `media-router.js` and CSS on the next load (ha
    becomes a brief with Purpose / Platform and stack / Core features / Acceptance checks headings; the note reads "Enhanced by
    <Provider> · <model> · as a build prompt · added N things ... Nothing was sent and no build was started; review the text,
    then press Build it yourself."; **Undo enhance** appears. The builds list does not change and no `/api/prime/build/create`
-   request appears. The Engine select is exactly as before.
+   request appears. The Engine select is exactly as before. **Look at it** (nothing in the gate renders CSS): the provider chip is the small rounded pill with 10 px text that the chat composer shows, not a full-width dark field like the Engine select; **Build it** still spans the form column (it drops below the Enhance controls when the column is narrow); at a phone width the row wraps without horizontal scrolling.
 4. **Undo.** Press **Undo enhance**: the original text is back exactly (including trailing spaces and line breaks) and the note
    says "Restored your original prompt."
 5. **Provider choice.** Pick another provider in the chip and press Enhance again: the request body has that `provider`. The
    Engine select did not move.
-6. **Credential in the draft (fake value).** Type "a weather app, api_key=sk-FAKEFAKEFAKEFAKEFAKEFAKE12345" and press Enhance.
-   Expect a "Warning: Your draft contains text that looks like a credential ..." sentence in the note, the new text does not
+6. **Credential in the draft (fake values only).** Type "a weather app, api_key=sk-FAKEFAKEFAKEFAKEFAKEFAKE12345" and press Enhance.
+   Expect a "Warning: Credential-like text was removed from your draft before it went to the model ... This can be a false alarm ...
+   check it for anything sensitive too ... Undo enhance restores your original text." sentence in the note, and the new text does not
    contain `FAKEFAKE` (Echo Build `create` would accept it; do not press **Build it** just for this check, because that starts
-   a real engine run). **Undo enhance** brings the fake key back into the field, so remove it there. Check the FORGE journal for
-   `prime_enhance_credentials_redacted` (only with `NODE_DEBUG=echo-prime`); it carries flags, never text.
+   a real engine run). **Undo enhance** brings the fake key back into the field, so remove it there. Repeat with a fake
+   `redis://:fakepw123@cache:6379/0`, with `password = "fake two words"` (both words must go) and with a line
+   `-----BEGIN PRIVATE KEY-----` followed by a line of made-up base64 and no END line (the header and the text after it must go).
+   Check the FORGE journal for `prime_enhance_credentials_redacted` (only with `NODE_DEBUG=echo-prime`); it carries flags, never text.
+   **False alarm check:** "a login page. Password: required, min 8 chars." must also produce the warning (with `Password: [REDACTED]`
+   in what the model saw), and the warning must say it can be a false alarm; Undo gets the sentence back.
+   **Cap check:** a draft of 400 lines of `cookie: a` (4,000 characters) answers "Prompt exceeds 4000 characters once credential-like
+   text is replaced with [REDACTED] ..." and leaves the text alone.
 7. **Honest failure.** If a provider is signed out, pick it and press Enhance: the sentence names it ("... Failed to
    authenticate ... no fallback was used. Your prompt was not changed."), the text is untouched, and the chip moves to the next
    available provider for the next press. Nothing is retried by itself.
@@ -81,11 +92,19 @@ the new `index.html`, `build.js`, `media-router.js` and CSS on the next load (ha
 
    Expect `mode: "build"`, `text` as a structured brief, `provider`, `providerLabel`, `model`, no `warnings` for this draft. Mode
    `"deploy"` answers 400 "Invalid enhance mode; use chat, image, video, music, sfx, voice, build or auto".
-9. **Other surfaces unchanged.** The composer Enhance and the Studio Enhance still work and still end their note with "Nothing was
+9. **Build it waits.** Type a title and a description, press Enhance and, while the button reads "Enhancing…", look at **Build it**:
+   it is disabled, and pressing Enter in the Title field does nothing but show "Enhance is still working. Build it is available when
+   it finishes ...". When the note says "Enhanced by ...", **Build it** is enabled again and no build was started in between.
+10. **Keyboard.** Tab through the form: description, Engine, **Enhance**, the provider chip, **Undo enhance** (once visible), **Build it**.
+   Space and Enter on the focused Enhance button each press it; Enter in the Title field submits nothing while Enhance works and
+   starts no enhancement. The focus ring is visible on each control. Paste text with Windows (CRLF) line breaks, press Enhance and then
+   Undo: the field shows the same lines as before (a browser reports CRLF as LF, so the restored text is what the field showed).
+11. **Other surfaces unchanged.** The composer Enhance and the Studio Enhance still work and still end their note with "Nothing was
    sent; review and press Send yourself."
 
-Pass: steps 2 to 4 behave as stated, step 6 shows the warning and no credential in the result, step 7 names the provider and
-leaves the text alone, and step 9 shows no change.
+Pass: steps 2 to 4 behave as stated (including the look of the chip and of Build it in step 3), step 6 shows the warning and no
+credential in the result, step 7 names the provider and leaves the text alone, steps 9 and 10 behave as stated, and step 11 shows no
+change.
 
 ## Rollback
 

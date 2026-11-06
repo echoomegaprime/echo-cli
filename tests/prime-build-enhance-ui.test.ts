@@ -460,3 +460,171 @@ describe('Echo Build Enhance: keyboard and structured debug events', () => {
     expect(JSON.stringify(h.debug.mock.calls)).not.toContain('sk-fake');
   });
 });
+
+describe('Echo Build Enhance: Build it waits while Enhance works', () => {
+  it('disables Build it for the whole request, refuses a submit with a reason, and enables it again once the text has been replaced', async () => {
+    const h = await harness({pendingEnhance: true}); await h.open();
+    h.n['build-title'].value = 'Counter'; h.n['build-prompt'].value = 'a counter app';
+    expect(h.n['build-submit'].disabled).toBe(false);
+    h.button().click(); await tick();
+    expect(h.n['build-submit'].disabled).toBe(true);
+    await h.n['build-form'].fire('submit'); await tick();
+    expect(h.createCalls()).toHaveLength(0);
+    expect(h.n['build-status'].textContent).toContain('Enhance is still working');
+    expect(h.n['build-prompt'].value).toBe('a counter app');
+    h.release(); await tick();
+    expect(h.n['build-prompt'].value).toBe(enhanced.text);
+    expect(h.n['build-submit'].disabled).toBe(false);
+    await h.n['build-form'].fire('submit'); await tick();
+    expect(h.createCalls()).toHaveLength(1);
+    expect(h.createCalls()[0].body.prompt).toBe(enhanced.text);
+  });
+
+  it('stays disabled through a refresh and an Engine change while Enhance works', async () => {
+    const h = await harness({pendingEnhance: true}); await h.open();
+    h.n['build-prompt'].value = 'a counter app';
+    h.button().click(); await tick();
+    await h.n['refresh-build'].fire('click'); await tick();
+    await h.n['build-engine'].fire('change'); await tick();
+    expect(h.n['build-submit'].disabled).toBe(true);
+    h.release(); await tick();
+    expect(h.n['build-submit'].disabled).toBe(false);
+  });
+
+  it('enables it again after a failed Enhance and after one that replaced nothing because the text changed', async () => {
+    const failing = await harness({enhanceStatus: 502, enhance: {error: 'Claude failed: x; no other provider was used'}}); await failing.open();
+    failing.n['build-prompt'].value = 'a counter app';
+    failing.button().click(); await tick();
+    expect(failing.n['build-submit'].disabled).toBe(false);
+    const changed = await harness({pendingEnhance: true}); await changed.open();
+    changed.n['build-prompt'].value = 'a counter app';
+    changed.button().click(); await tick();
+    changed.n['build-prompt'].value = 'a counter app, edited by hand';
+    changed.release(); await tick();
+    expect(changed.n['build-submit'].disabled).toBe(false);
+  });
+
+  it('does not stay locked when the account changes while Enhance is working', async () => {
+    const h = await harness({pendingEnhance: true}); await h.open();
+    h.n['build-prompt'].value = 'a counter app';
+    h.button().click(); await tick();
+    expect(h.n['build-submit'].disabled).toBe(true);
+    h.fire('echo-account-changed'); await tick();
+    h.release(); await tick();
+    h.n['open-build'].dispatchEvent(new TestEvent('click')); await tick();
+    expect(h.n['build-submit'].disabled).toBe(false);
+  });
+
+  it('logs the lock and the unlock as [echo.enhance] events with no text in them', async () => {
+    const h = await harness({pendingEnhance: true}); await h.open();
+    h.n['build-prompt'].value = 'draft with TOPSECRETWORD';
+    h.button().click(); await tick();
+    expect(h.debug).toHaveBeenCalledWith('[echo.enhance]', {schema_version: 1, event: 'prime_enhance_build_locked', surface: 'build', locked: true});
+    await h.n['build-form'].fire('submit'); await tick();
+    expect(h.debug).toHaveBeenCalledWith('[echo.enhance]', {schema_version: 1, event: 'prime_enhance_build_blocked', surface: 'build'});
+    h.release(); await tick();
+    expect(h.debug).toHaveBeenCalledWith('[echo.enhance]', {schema_version: 1, event: 'prime_enhance_build_locked', surface: 'build', locked: false});
+    expect(JSON.stringify(h.debug.mock.calls)).not.toContain('TOPSECRETWORD');
+  });
+});
+
+describe('Echo Build Enhance: the line breaks a browser reports', () => {
+  /** A real textarea reports its text with LF line breaks whatever was typed or pasted; this stand-in does the same. */
+  const browserLikeTextarea = (node: Node) => {
+    let raw = '';
+    Object.defineProperty(node, 'value', {configurable: true, get: () => raw.replace(/\r\n?/g, '\n'), set: (v: string) => { raw = String(v); }});
+  };
+
+  it('restores exactly what the textarea reported before Enhance, and sends the same LF text to the server', async () => {
+    const h = await harness(); browserLikeTextarea(h.n['build-prompt']); await h.open();
+    h.n['build-prompt'].value = '  line one\r\nline two\r\n\r\n  ';
+    const reported = h.n['build-prompt'].value;
+    expect(reported).toBe('  line one\nline two\n\n  ');
+    h.button().click(); await tick();
+    expect(h.enhanceCalls()[0].body.text).toBe('line one\nline two');
+    expect(h.n['build-prompt'].value).toBe(enhanced.text);
+    h.undo().click();
+    expect(h.n['build-prompt'].value).toBe(reported);
+  });
+});
+
+// ---- Stylesheet cascade ------------------------------------------------------------------------------------------------
+// The gate host has no browser, so layout cannot be rendered there. This stand-in applies the page's real stylesheets in the
+// order index.html links them (specificity, then source order, `font` expanded) to a described element chain. It is a check
+// of which rule wins for the provider chip and Build it, not a pixel test: DEPLOY_BUILD_ENHANCE.md step 3 is the visual check.
+type Chain = {tag: string; classes: string[]; id: string}[];
+const dom = (tag: string, classes: string[] = [], id = '') => ({tag, classes, id});
+interface Winner { value: string; spec: number[]; order: number; selector: string }
+function cssRules() {
+  const files = [...html.matchAll(/<link rel="stylesheet" href="([^"]+)"/g)].map(m => m[1]);
+  const rules: {selectors: string[]; decls: [string, string][]; order: number}[] = [];
+  let order = 0;
+  for (const file of files) {
+    const css = readFileSync(new URL('../ui/echo-prime/' + file, import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+    let depth = 0, headStart = 0, bodyStart = 0;
+    for (let i = 0; i < css.length; i++) {
+      if (css[i] === '{') { if (depth === 0) bodyStart = i; depth++; }
+      else if (css[i] === '}' && --depth === 0) {
+        const head = css.slice(headStart, bodyStart).trim(), body = css.slice(bodyStart + 1, i);
+        headStart = i + 1;
+        if (head.startsWith('@')) continue; // media queries: the desktop layout is what is compared
+        const decls = body.split(/;(?![^(]*\))/).map(d => d.trim()).filter(d => d.includes(':')).map(d => [d.slice(0, d.indexOf(':')).trim().toLowerCase(), d.slice(d.indexOf(':') + 1).replace(/!important/i, '').trim()] as [string, string]);
+        rules.push({selectors: head.split(/,(?![^(]*\))/).map(s => s.trim()), decls, order: order++});
+      }
+    }
+  }
+  return rules;
+}
+const allRules = cssRules();
+function compoundMatches(compound: string, element: Chain[number]) {
+  const m = /^([a-z][a-z0-9]*|\*)?((?:[.#][\w-]+)*)$/i.exec(compound);
+  if (!m) return false; // attribute and pseudo selectors (:hover, [hidden]) are not the resting state
+  if (m[1] && m[1] !== '*' && m[1].toLowerCase() !== element.tag) return false;
+  return [...m[2].matchAll(/([.#])([\w-]+)/g)].every(([, kind, name]) => kind === '.' ? element.classes.includes(name) : element.id === name);
+}
+function selectorMatches(tokens: string[], at: number, chain: Chain, index: number): boolean {
+  if (!compoundMatches(tokens[at], chain[index])) return false;
+  if (at === 0) return true;
+  if (tokens[at - 1] === '>') return index > 0 && selectorMatches(tokens, at - 2, chain, index - 1);
+  for (let j = index - 1; j >= 0; j--) if (selectorMatches(tokens, at - 1, chain, j)) return true;
+  return false;
+}
+const specificity = (selector: string) => [(selector.match(/#[\w-]+/g) ?? []).length, (selector.match(/\.[\w-]+/g) ?? []).length, (selector.replace(/[.#][\w-]+/g, ' ').match(/[a-z][a-z0-9]*/gi) ?? []).length];
+const beats = (a: number[], orderA: number, b: Winner) => { for (let i = 0; i < 3; i++) if (a[i] !== b.spec[i]) return a[i] > b.spec[i]; return orderA > b.order; };
+function winners(chain: Chain) {
+  const won = new Map<string, Winner>();
+  for (const rule of allRules) for (const selector of rule.selectors) {
+    const tokens = selector.replace(/\s*>\s*/g, ' > ').trim().split(/\s+/);
+    if (!selectorMatches(tokens, tokens.length - 1, chain, chain.length - 1)) continue;
+    const spec = specificity(selector);
+    for (const [prop, value] of rule.decls) for (const p of prop === 'font' ? ['font', 'font-size', 'font-family'] : [prop]) {
+      const old = won.get(p);
+      if (!old || beats(spec, rule.order, old)) won.set(p, {value, spec, order: rule.order, selector});
+    }
+  }
+  return won;
+}
+const buildForm: Chain = [dom('body'), dom('dialog', ['panel-dialog', 'build-dialog'], 'build-dialog'), dom('div', ['build-layout']), dom('div'), dom('form', ['build-form'], 'build-form')];
+const buildChip: Chain = [...buildForm, dom('div', ['build-submit-row']), dom('div', ['build-enhance'], 'build-enhance'), dom('div', ['enhance-wrap']), dom('select', ['enhance-provider'])];
+const composerChip: Chain = [dom('body'), dom('main'), dom('div', ['composer-wrap']), dom('form', ['composer'], 'composer'), dom('div', ['composer-bottom']), dom('div', ['send-actions']), dom('div', ['enhance-wrap']), dom('select', ['enhance-provider'])];
+
+describe('Echo Build Enhance: stylesheet cascade (no browser on the gate host)', () => {
+  it('finds the Build form rule that restyles a plain select, so the checks below are not vacuous', () => {
+    const plain = winners([...buildForm, dom('label'), dom('select')]);
+    expect(plain.get('width')?.value).toBe('100%');
+    expect(plain.get('border-radius')?.value).toBe('8px');
+    expect(plain.get('width')?.selector).toBe('.build-form select');
+  });
+
+  it('gives the provider chip the same declarations in the Build form as in the composer', () => {
+    const inBuild = winners(buildChip), inComposer = winners(composerChip);
+    const same = (w?: Winner, prop?: string) => prop === 'width' && (!w || w.value === 'auto') ? 'auto' : w?.value ?? '';
+    for (const prop of ['width', 'max-width', 'box-sizing', 'padding', 'border', 'border-radius', 'background', 'color', 'font-size', 'font-family'])
+      expect(same(inBuild.get(prop), prop), prop + ' won by "' + inBuild.get(prop)?.selector + '"').toBe(same(inComposer.get(prop), prop));
+  });
+
+  it('keeps Build it stretching across the form column, as it did before it moved into the Enhance row', () => {
+    const submit = winners([...buildForm, dom('div', ['build-submit-row']), dom('button', ['new-chat'], 'build-submit')]);
+    expect(submit.get('flex')?.value, 'flex won by "' + submit.get('flex')?.selector + '"').toMatch(/^1 1 /);
+  });
+});

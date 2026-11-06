@@ -79,9 +79,13 @@ export function redactBuild(text: string): string {
   .replace(/((?:[a-z0-9_]*token|[a-z0-9_]*secret|[a-z0-9_]*password|[a-z0-9_]*api_key)["']?\s*[:=]\s*["']?)[^\s"',;}]+/gi,'$1[REDACTED]')
   .replace(/https?:\/\/[^\s/@]+:[^\s/@]+@/gi,'https://[REDACTED]@'));
 }
-function inputText(value: unknown, max: number, name: string): string {
+/** The credential check Echo Build `create` and `turn` apply to a title or prompt. Exported so Enhance (build mode) can prove its brief passes it. */
+export function refusesCredentials(value: string): boolean {
+ return redactBuild(value)!==value || /-----BEGIN .*PRIVATE KEY-----/.test(value);
+}
+export function inputText(value: unknown, max: number, name: string): string {
  if (typeof value !== 'string' || !value.trim() || value.length > max || value.includes('\0'))throw new BuildError(400, name+' must contain 1..'+max+' characters');
- if (redactBuild(value)!==value || /-----BEGIN .*PRIVATE KEY-----/.test(value))throw new BuildError(400,'Do not include credentials in '+name);
+ if (refusesCredentials(value))throw new BuildError(400,'Do not include credentials in '+name);
  return value.trim();
 }
 /** A contract for the engine, not a claim of OS-level isolation. No reference-export code is executed or copied. */
