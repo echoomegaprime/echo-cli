@@ -47,7 +47,7 @@ const usage=(uid:string,exists=true)=>({uid,generated_at:1730000500,cached:false
   :{exists:false,chats:0,projects:0,messages_sent:0,chars_sent:0,replies:0,reply_chars:0,imported_messages:0,library_items:0,tool_calls:{},answer_seconds:0,model_prompt_tokens:0,model_completion_tokens:0,tokens_approximate:true,last_activity:null,storage_bytes:0},
  unavailable:['voice','media','swarm','agents','bots','build','sdk','web_search','esh']});
 const activeInvite={id:'inv-1',email:'old@example.test',status:'active',created:1730000000,expires:1731209600,used_at:null};
-const MEMBERS_ROUTES=['/auth/accounts','/auth/usage','/auth/invites','/auth/invite','/auth/invite/revoke','/auth/decide'];
+const MEMBERS_ROUTES=['/auth/accounts','/auth/usage','/auth/invites','/auth/invite','/auth/invite/resend','/auth/invite/revoke','/auth/decide'];
 
 interface Options {session?:()=>any;request?:(path:string,body?:any)=>any;uploads?:(body:any)=>any;globals?:Record<string,any>}
 function membersHarness(options:Options={}){
@@ -64,7 +64,9 @@ function membersHarness(options:Options={}){
   if(path==='/auth/invites')return {invites:[activeInvite,{id:'inv-2',email:'used@example.test',status:'used',created:1730000000,expires:1731209600,used_at:1730000600}]};
   if(path==='/auth/usage')return usage(body.uid);
   if(path==='/auth/decide')return decide(body);
-  if(path==='/auth/invite')return {invite:{id:'inv-new',email:body.email,status:'active',created:1730000700,expires:1731210300,used_at:null},existing:false};
+  // The Workspace reports the mail outcome in `email` whenever the owner asked for it (send_email), and never otherwise.
+  if(path==='/auth/invite')return {invite:{id:'inv-new',email:body.email,status:'active',created:1730000700,expires:1731210300,used_at:null},existing:false,...(body.send_email===true?{email:{sent:true,message_id:'msg-created'}}:{})};
+  if(path==='/auth/invite/resend')return {invite:{...activeInvite},email:{sent:true,message_id:'msg-resent'}};
   if(path==='/auth/invite/revoke')return {invite:{...activeInvite,status:'revoked'}};
   return {};
  });
@@ -275,7 +277,7 @@ describe('shipped Members code and styles',()=>{
  it('renders text only and stacks the view at phone width',()=>{
   expect(source('workspace.js')).not.toMatch(/innerHTML|insertAdjacentHTML|outerHTML/);
   const css=source('styles.css'),phone=/@media\(max-width:640px\)\{([\s\S]*?)\n\}/.exec(css.slice(css.indexOf('.members-counts')))?.[1]??'';
-  for(const rule of ['.members-toolbar','.members-actions','.members-copy','.members-invite','.members-facts'])expect(phone,rule).toContain(rule);
+  for(const rule of ['.members-toolbar','.members-actions','.members-copy','.members-invite','.members-facts','.members-check'])expect(phone,rule).toContain(rule);
   expect(phone).toContain('flex-direction:column');expect(phone).toContain('width:100%');expect(phone).toContain('grid-template-columns:1fr');
   expect(source('nav.css')).toContain('.signin-invited{');
  });
@@ -321,7 +323,7 @@ describe('Invites',()=>{
   expect(h.find('Revoke')).toBeDefined();expect(h.all().filter(n=>n.tagName==='BUTTON'&&text(n)==='Revoke')).toHaveLength(1);// active invites only
   const email=h.all().find(n=>n.tagName==='INPUT'&&n.attributes.type==='email')!;email.value=' new@example.test ';
   await h.find('Create invite')!.fire('click');await flush();
-  expect(h.calls('/auth/invite').map(c=>c[1])).toEqual([{email:'new@example.test'}]);
+  expect(h.calls('/auth/invite').map(c=>c[1])).toEqual([{email:'new@example.test',send_email:true}]);// "Email the invitation" is checked by default
   const link=h.all().find(n=>n.tagName==='INPUT'&&n.attributes['aria-label']==='Invite link')!;
   expect(link.value).toBe('https://echoomegaprime.com/#invite');
   const message=h.all().find(n=>n.tagName==='TEXTAREA'&&n.attributes['aria-label']==='Invite message')!;
@@ -330,6 +332,7 @@ describe('Invites',()=>{
   await h.find('Copy message')!.fire('click');expect(writeText).toHaveBeenLastCalledWith(message.value);
   expect(h.calls('/auth/invites')).toHaveLength(2);// the invite list reloads
   expect(h.text()).toContain('Invite created for new@example.test');
+  expect(h.text()).toContain('Invitation emailed to new@example.test');
  });
  it('returns the existing active invite for the same email',async()=>{
   const h=membersHarness({request:(path,body)=>path==='/auth/invite'?{invite:{...activeInvite,email:body.email},existing:true}:undefined});await h.open();
@@ -390,6 +393,124 @@ describe('Invites',()=>{
  });
 });
 
+// Emailed invitations (PRIME_MEMBERS_CONTRACT.md, "Emailed invitations"): the Workspace sends the mail server-side with
+// the owner's session. The view only asks (send_email), then tells the owner exactly what happened, and never takes the
+// copy-link fallback away. The mailer is never reached from these tests: every Workspace answer here is synthetic.
+describe('Invitation email',()=>{
+ type Harness=ReturnType<typeof membersHarness>;
+ const refusal=(message:string,extra:Record<string,unknown>)=>Object.assign(new Error(message),extra);
+ const emailInput=(h:Harness)=>h.all().find(n=>n.tagName==='INPUT'&&n.attributes.type==='email')!;
+ const mailBox=(h:Harness)=>h.all().find(n=>n.tagName==='INPUT'&&n.attributes.type==='checkbox'&&n.attributes['aria-label']==='Email the invitation');
+ const create=async(h:Harness,address='new@example.test')=>{emailInput(h).value=address;await h.find('Create invite')!.fire('click');await flush();};
+ const linkField=(h:Harness)=>h.all().find(n=>n.tagName==='INPUT'&&n.attributes['aria-label']==='Invite link');
+ const messageField=(h:Harness)=>h.all().find(n=>n.tagName==='TEXTAREA'&&n.attributes['aria-label']==='Invite message');
+ const resendButtons=(h:Harness)=>h.all().filter(n=>n.tagName==='BUTTON'&&text(n)==='Resend');
+ const errorLine=(h:Harness,expected:string)=>h.all().some(n=>n.className==='members-error'&&text(n).includes(expected));
+ const created=(body:any,extra:Record<string,unknown>={})=>({invite:{id:'inv-new',email:body.email,status:'active',created:1730000700,expires:1731210300,used_at:null},existing:false,...extra});
+
+ it('offers "Email the invitation", checked by default, and no longer claims that nothing is emailed',async()=>{
+  const h=membersHarness();await h.open();
+  const box=mailBox(h);expect(box).toBeDefined();expect(box!.checked).toBe(true);
+  expect(h.text()).toContain('Email the invitation');expect(h.text()).not.toContain('Nothing is emailed from here');
+ });
+ it('sends send_email:false when the box is unchecked, shows no mail result and keeps the copy-link fallback',async()=>{
+  const h=membersHarness();await h.open();mailBox(h)!.checked=false;
+  await create(h);
+  expect(h.calls('/auth/invite').map(c=>c[1])).toEqual([{email:'new@example.test',send_email:false}]);
+  expect(h.text()).toContain('Invite created for new@example.test');expect(h.text()).toContain('Share the link and message yourself');
+  expect(h.text()).not.toContain('Invitation emailed');
+  expect(linkField(h)!.value).toBe('https://echoomegaprime.com/#invite');expect(messageField(h)).toBeDefined();
+ });
+ it('says "Invitation emailed to <address>" and still shows the link and the message',async()=>{
+  const h=membersHarness();await h.open();await create(h);
+  expect(h.text()).toContain('Invitation emailed to new@example.test');expect(errorLine(h,'')).toBe(false);
+  expect(linkField(h)!.value).toBe('https://echoomegaprime.com/#invite');expect(messageField(h)!.value).toContain('new@example.test');
+ });
+ it('reports the email for an existing active invite too',async()=>{
+  const h=membersHarness({request:(path,body)=>path==='/auth/invite'?created(body,{invite:{...activeInvite,email:body.email},existing:true,email:{sent:true,message_id:'msg-existing'}}):undefined});await h.open();
+  await create(h,'old@example.test');
+  expect(h.text()).toContain('An active invite for old@example.test already exists');expect(h.text()).toContain('Invitation emailed to old@example.test');
+ });
+ it.each([
+  ['mail that is not set up',{sent:false,error:'mail_unavailable'},'Mail is not set up'],
+  ['a rate limit with a wait',{sent:false,error:'too_many_attempts',retry_after:1800},'Too many invitations, try again in 30 min'],
+  ['a rate limit that rounds a part minute up',{sent:false,error:'too_many_attempts',retry_after:61},'Too many invitations, try again in 2 min'],
+  ['a rate limit with a wait under a minute',{sent:false,error:'too_many_attempts',retry_after:5},'Too many invitations, try again in 1 min'],
+  ['a rate limit without a wait',{sent:false,error:'too_many_attempts'},'Too many invitations, try again later'],
+  ['a rate limit with a nonsense wait',{sent:false,error:'too_many_attempts',retry_after:'soon'},'Too many invitations, try again later'],
+  ['a refused recipient',{sent:false,error:'invalid_recipient'},'That email address cannot receive an invitation'],
+  ['an invite link the mailer refuses',{sent:false,error:'invalid_invite_url'},'The invite link is not allowed in email'],
+  ['the provider text',{sent:false,error:'Mail provider refused the message (550).'},'Mail provider refused the message (550).'],
+  ['a code the view does not know',{sent:false,error:'forbidden'},'Invitation email failed (forbidden)'],
+  ['no reason at all',{sent:false},'The email was not sent'],
+ ] as const)('shows the exact failure for %s and keeps the invite and the copy-link fallback',async(_name,mail,expected)=>{
+  const h=membersHarness({request:(path,body)=>path==='/auth/invite'?created(body,{email:mail}):undefined});await h.open();
+  await create(h);
+  expect(h.text()).toContain('Invite created for new@example.test');
+  expect(errorLine(h,expected)).toBe(true);expect(h.text()).not.toContain('Invitation emailed');
+  expect(h.text()).toContain('share the link and message yourself');
+  expect(linkField(h)!.value).toBe('https://echoomegaprime.com/#invite');expect(messageField(h)).toBeDefined();
+ });
+ it('says so when the Workspace reports no email result at all (one that predates send_email)',async()=>{
+  const h=membersHarness({request:(path,body)=>path==='/auth/invite'?created(body):undefined});await h.open();
+  await create(h);
+  expect(h.text()).toContain('Invite created for new@example.test');expect(h.text()).toContain('did not report an email result');
+  expect(h.text()).not.toContain('Invitation emailed');expect(linkField(h)).toBeDefined();
+ });
+ it('never renders mail text as markup and caps an over-long provider message',async()=>{
+  const h=membersHarness({request:(path,body)=>path==='/auth/invite'?created(body,{email:{sent:false,error:'<img src=x onerror=alert(1)> '+'x'.repeat(900)}}):undefined});await h.open();
+  await create(h);
+  const line=h.all().find(n=>n.className==='members-error')!;
+  expect(text(line)).toContain('<img src=x onerror=alert(1)>');expect(text(line).length).toBeLessThan(420);
+ });
+
+ it('puts Resend on active invites only and posts the exact body with no confirm card',async()=>{
+  const h=membersHarness();await h.open();
+  expect(resendButtons(h)).toHaveLength(1);// inv-1 is active; inv-2 is used
+  await resendButtons(h)[0].fire('click');await flush();
+  expect(h.calls('/auth/invite/resend').map(c=>c[1])).toEqual([{invite_id:'inv-1'}]);
+  expect(h.text()).toContain('Invitation emailed to old@example.test');expect(h.text()).not.toContain('Revoke this invite?');
+  expect(h.calls('/auth/invites')).toHaveLength(1);// a resend changes nothing in the list
+ });
+ it.each([
+  ['a rate limit with a wait',()=>Promise.reject(refusal('Too many attempts.',{status:429,retryAfter:600})),'Too many invitations, try again in 10 min'],
+  ['a rate limit without a wait',()=>Promise.reject(refusal('Too many attempts.',{status:429})),'Too many invitations, try again later'],
+  ['mail that is not set up',()=>({invite:activeInvite,email:{sent:false,error:'mail_unavailable'}}),'Mail is not set up'],
+  ['a rate limit reported in the email result',()=>({invite:activeInvite,email:{sent:false,error:'too_many_attempts',retry_after:3600}}),'Too many invitations, try again in 60 min'],
+  ['an invite that is no longer active',()=>Promise.reject(refusal('That invite is no longer active.',{status:409})),'That invite is no longer active.'],
+  ['a missing email result',()=>({invite:activeInvite}),'did not report an email result'],
+ ] as const)('shows the exact failure for a resend that hits %s, with the copy-link fallback',async(_name,answer,expected)=>{
+  const h=membersHarness({request:path=>path==='/auth/invite/resend'?answer():undefined});await h.open();
+  await resendButtons(h)[0].fire('click');await flush();
+  expect(h.text()).toContain(expected);expect(h.text()).not.toContain('Invitation emailed');
+  expect(h.status.textContent).toContain(expected);
+  expect(linkField(h)!.value).toBe('https://echoomegaprime.com/#invite');expect(messageField(h)!.value).toContain('old@example.test');
+ });
+ it('does not send twice while a resend is in flight',async()=>{
+  const pending=deferred();
+  const h=membersHarness({request:path=>path==='/auth/invite/resend'?pending.promise:undefined});await h.open();
+  const button=resendButtons(h)[0],first=button.fire('click');await flush();
+  expect(button.disabled).toBe(true);await button.fire('click');
+  expect(h.calls('/auth/invite/resend')).toHaveLength(1);
+  pending.resolve({invite:activeInvite,email:{sent:true}});await first;await flush();
+  expect(h.text()).toContain('Invitation emailed to old@example.test');expect(button.disabled).toBe(false);
+ });
+ it('discards a resend answer that arrives after the account changed',async()=>{
+  const pending=deferred();
+  const h=membersHarness({request:path=>path==='/auth/invite/resend'?pending.promise:undefined});await h.open();
+  const first=resendButtons(h)[0].fire('click');await flush();
+  h.change();// the same page now belongs to a member
+  pending.resolve({invite:activeInvite,email:{sent:true}});await first;await flush();
+  expect(h.content.children).toHaveLength(0);expect(h.text()).not.toContain('Invitation emailed');
+ });
+ it('lets a member or an anonymous visitor reach no invite or resend route',async()=>{
+  for(const session of [memberSession,anonymousSession]){
+   const h=membersHarness({session});await h.ws.ready;await h.navMembers.fire('click');await flush();
+   expect(h.calls('/auth/invite/resend')).toEqual([]);expect(h.calls('/auth/invite')).toEqual([]);
+  }
+ });
+});
+
 describe('Workspace transport refusals (the shipped workspace-client.js)',()=>{
  // The real transport against a synthetic Prime: an approved owner session, then one refused POST /auth/invite.
  async function refused(status:number,payload:Record<string,unknown>){
@@ -414,6 +535,41 @@ describe('Workspace transport refusals (the shipped workspace-client.js)',()=>{
  ] as const)('keeps the status and carries no uid for %s',async(_name,status,payload)=>{
   const {error}=await refused(status,payload);
   expect(error?.message).toBe(payload.error);expect(error?.status).toBe(status);expect('uid' in error).toBe(false);
+ });
+});
+
+describe('Workspace transport refusals: how long to wait',()=>{
+ // The Workspace answers a rate-limited invite or resend with a 429 that names the wait in its JSON (`retry_after`,
+ // seconds) and, through Prime, in a Retry-After header. The transport puts the wait on the error as `retryAfter`.
+ async function refusedWith(status:number,payload:Record<string,unknown>,extraHeaders:Record<string,string>={}){
+  const json=(value:unknown,code=200,headers:Record<string,string>={})=>new Response(JSON.stringify(value),{status:code,headers:{'content-type':'application/json',...headers}});
+  const fetch=vi.fn(async(url:string)=>url==='/api/session'?json(ownerSession()):json(payload,status,extraHeaders));
+  const window:any={};
+  runInNewContext(source('workspace-client.js'),{window,TextDecoder,TextEncoder,AbortController,Uint8Array});
+  const client=new window.EchoPrimeWorkspaceTransport({fetch});
+  return await client.request('/auth/invite/resend',{invite_id:'inv-1'}).then(()=>null,(reason:any)=>reason);
+ }
+ it('reads the wait from retry_after in the body',async()=>{
+  const error=await refusedWith(429,{error:'Too many attempts.',retry_after:600});
+  expect(error?.status).toBe(429);expect(error?.message).toBe('Too many attempts.');expect(error?.retryAfter).toBe(600);
+ });
+ it('falls back to the Retry-After header',async()=>{
+  const error=await refusedWith(429,{error:'Too many attempts.'},{'retry-after':'120'});
+  expect(error?.retryAfter).toBe(120);
+ });
+ it('prefers the body over the header',async()=>{
+  const error=await refusedWith(429,{error:'Too many attempts.',retry_after:30},{'retry-after':'120'});
+  expect(error?.retryAfter).toBe(30);
+ });
+ it.each([
+  ['a negative wait',{retry_after:-5},{}],
+  ['a zero wait',{retry_after:0},{}],
+  ['a text wait',{retry_after:'soon'},{}],
+  ['a wait over a week',{retry_after:1e9},{}],
+  ['a header that is not a number of seconds',{},{'retry-after':'Wed, 21 Oct 2026 07:28:00 GMT'}],
+ ] as const)('carries no wait for %s',async(_name,payload,headers)=>{
+  const error=await refusedWith(429,{error:'Too many attempts.',...payload},headers);
+  expect(error?.status).toBe(429);expect('retryAfter' in error).toBe(false);
  });
 });
 

@@ -51,20 +51,20 @@ it('still forwards the account routes the Workspace implements',async()=>{
  const session=await fetch(p.url+'/api/workspace/auth/session',{headers:p.headers});expect(session.status).toBe(200);
  expect(up.calls.filter(c=>c==='GET /api/auth/session').length).toBeGreaterThanOrEqual(2);// startup validation + this read
 });
-// Member management (PRIME_MEMBERS_CONTRACT.md): one GET and three POSTs join the allowlist. An anonymous request to a
+// Member management (PRIME_MEMBERS_CONTRACT.md): one GET and four POSTs (usage, invite, invite/resend, invite/revoke) join the allowlist. An anonymous request to a
 // known route is refused at sign-in (401); a sibling path is still unknown (404) and never reaches the Workspace.
-it('allowlists exactly the four member-management account routes and keeps their siblings unknown',async()=>{
+it('allowlists exactly the five member-management account routes and keeps their siblings unknown',async()=>{
  const up=await upstream(),p=await prime(up.baseUrl);
  const before=up.calls.length;
  const get=(path:string)=>fetch(p.url+'/api/workspace/auth/'+path,{headers:p.headers});
  const post=(path:string)=>fetch(p.url+'/api/workspace/auth/'+path,{method:'POST',headers:p.headers,body:'{}'});
  expect((await get('invites')).status).toBe(401);
- for(const path of ['usage','invite','invite/revoke'])expect((await post(path)).status,path).toBe(401);
+ for(const path of ['usage','invite','invite/resend','invite/revoke'])expect((await post(path)).status,path).toBe(401);
  expect(up.calls.slice(before).every(c=>c==='GET /api/auth/session')).toBe(true);// only the admission read
  const known=up.calls.length;
- for(const path of ['invites/x','invites2','usage/x','invite/x','invite/revoked','invites/revoke'])expect((await get(path)).status,'GET '+path).toBe(404);
- for(const path of ['invites','usage2','usage/x','invite/x','invite/revoke/x','invites/revoke'])expect((await post(path)).status,'POST '+path).toBe(404);
- for(const path of ['usage','invite','invite/revoke'])expect((await get(path)).status,'GET '+path).toBe(404);
+ for(const path of ['invites/x','invites2','usage/x','invite/x','invite/revoked','invites/revoke','invite/resent'])expect((await get(path)).status,'GET '+path).toBe(404);
+ for(const path of ['invites','usage2','usage/x','invite/x','invite/revoke/x','invites/revoke','invite/resend/x','invite/resent','invites/resend','invite/resend/revoke'])expect((await post(path)).status,'POST '+path).toBe(404);
+ for(const path of ['usage','invite','invite/resend','invite/revoke'])expect((await get(path)).status,'GET '+path).toBe(404);
  expect(up.calls.slice(known)).toEqual([]);
 });
 it('serves the layout, ESH dock and chat-actions modules from the asset allowlist only',async()=>{

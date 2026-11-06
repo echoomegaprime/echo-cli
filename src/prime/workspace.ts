@@ -64,10 +64,10 @@ const writes=new Set(['/api/mcp','/api/chats','/api/chat/update','/api/chat','/a
 const publicReads=new Set(['/api/auth/session','/api/auth/config']);
 // Exactly the account routes the Workspace implements (accounts_http.py). `/api/auth/refresh` and
 // `/api/auth/verify` were allowlisted until 2026-11-04 although the Workspace never served them.
-// Member management (PRIME_MEMBERS_CONTRACT.md, 2026-11-06) adds usage and the invite create/revoke writes.
-const authWrites=new Set(['/api/auth/login','/api/auth/signup','/api/auth/reset','/api/auth/logout','/api/auth/decide','/api/auth/usage','/api/auth/invite','/api/auth/invite/revoke']);
+// Member management (PRIME_MEMBERS_CONTRACT.md, 2026-11-06) adds usage and the invite create/resend/revoke writes.
+const authWrites=new Set(['/api/auth/login','/api/auth/signup','/api/auth/reset','/api/auth/logout','/api/auth/decide','/api/auth/usage','/api/auth/invite','/api/auth/invite/resend','/api/auth/invite/revoke']);
 // Account administration: only the pinned, currently approved primary owner reaches these upstream.
-const primaryOwnerOnly=new Set(['/api/fleet','/api/diagnostics','/api/catalog','/api/plugins','/api/sync','/api/auth/accounts','/api/auth/decide','/api/auth/usage','/api/auth/invites','/api/auth/invite','/api/auth/invite/revoke']);
+const primaryOwnerOnly=new Set(['/api/fleet','/api/diagnostics','/api/catalog','/api/plugins','/api/sync','/api/auth/accounts','/api/auth/decide','/api/auth/usage','/api/auth/invites','/api/auth/invite','/api/auth/invite/resend','/api/auth/invite/revoke']);
 function route(url:URL,method:string):string {
  const path=url.pathname.replace(/^\/api\/workspace\//,'/api/');
  const allowed=method==='GET'?(reads.has(path)||publicReads.has(path)||/^\/api\/(?:chats|journals|library|mcp\/tools|voice\/audio)\/[A-Za-z0-9_-]{1,120}$/.test(path)):
@@ -210,6 +210,9 @@ export class WorkspaceBridge {
     res.setHeader('Set-Cookie',`echo_workspace_session=${match[1]}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${match[1]?'28800':'0'}${this.secureCookies?'; Secure':''}`);
    }
    res.statusCode=response.status;res.setHeader('Content-Type',contentType);res.setHeader('Cache-Control','no-store');
+   // A rate-limited invite or resend names its wait in the JSON body; Retry-After is relayed as well, but only as plain seconds.
+   const retryAfter=response.status===429?response.headers.get('retry-after'):null;
+   if(retryAfter&&/^\d{1,7}$/.test(retryAfter))res.setHeader('Retry-After',retryAfter);
    if(contentType.startsWith('application/x-ndjson'))res.socket?.setNoDelay(true);
    if(!response.body){res.end();return;}
    const reader=response.body.getReader();let size=0,lineBytes=0,prefix='';

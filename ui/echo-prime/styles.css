@@ -179,7 +179,11 @@ body.panel-dragging{user-select:none;cursor:grabbing}body.panel-dragging .worksp
 .members-invite{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;padding:6px 0;border-bottom:1px solid #1b3127;font-size:12px;min-width:0}
 .members-invite .members-email{flex:1 1 200px;color:#e1f2ea}
 .members-invite small{color:#8fb0a4;font-size:11px}
+.workspace-card-content .members-check{display:flex;align-items:center;gap:10px;min-width:0;font-size:12px;line-height:1.5;color:#a9c9b9;cursor:pointer}
+.members-check input{flex:none;width:20px;height:20px;margin:0;accent-color:#a7f5dd}
+.workspace-card-content .members-sent{color:#8ee6bf}
 @media(max-width:640px){
+ .members-check{min-height:44px}
  .members-toolbar,.members-actions,.members-copy,.members-invite{flex-direction:column;align-items:stretch}
  .members-toolbar .workspace-field,.members-copy input,.members-invite .members-email{flex-basis:auto}
  .members-chips{display:grid;grid-template-columns:repeat(auto-fill,minmax(88px,1fr))}

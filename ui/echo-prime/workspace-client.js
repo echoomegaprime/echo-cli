@@ -11,6 +11,14 @@
   try{for(;;){const {done,value}=await reader.read();if(done)break;bytes+=value.byteLength;if(bytes>8*1024*1024)throw new Error('Workspace response exceeds limit.');text+=decoder.decode(value,{stream:true});}text+=decoder.decode();return text;}
   finally{await reader.cancel().catch(()=>{});}
  }
+ // How many seconds a rate-limited request must wait: the JSON body's `retry_after` (top level, or inside an `email`
+ // result), else a Retry-After header of plain seconds. A missing, non-numeric, non-positive or over-a-week value is
+ // no answer, so the view says "later" instead of inventing a number.
+ const retryWait=(value,response)=>{
+  const valid=raw=>typeof raw==='number'&&Number.isFinite(raw)&&raw>0&&raw<=604800?Math.ceil(raw):undefined;
+  const header=response.headers.get('retry-after');
+  return valid(value?.retry_after)??valid(value?.email?.retry_after)??(typeof header==='string'&&/^\d{1,7}$/.test(header)?valid(Number(header)):undefined);
+ };
  async function readJson(response){if(!response.headers.get('content-type')?.includes('application/json'))throw new Error('Unexpected Workspace response.');return JSON.parse(await readText(response));}
  // Every transport on the page (workspace.js and fleet.js each own one) shares one /api/session readback: concurrent
  // reads join the in-flight request, and a successful readback is reused for SESSION_MEMO_MS. clear() (identity
@@ -97,6 +105,7 @@
     // account), checked as Prime's own member routes check a uid, so a view can act on a conflict without parsing text.
     const error=new Error(typeof value.error==='string'?value.error.slice(0,600):'Workspace request failed. No automatic retry was made.');error.status=response.status;
     if(typeof value.uid==='string'&&/^[A-Za-z0-9_.:@+-]{1,200}$/.test(value.uid))error.uid=value.uid;
+    const wait=response.status===429?retryWait(value,response):undefined;if(wait!==undefined)error.retryAfter=wait;
     throw error;
    }
    this.responses.set(response,generation);return response;

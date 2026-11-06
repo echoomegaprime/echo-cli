@@ -731,6 +731,24 @@
  };
  const signedOut=count=>`Signed out ${memberPlural(count,'session','sessions')}.`;
  const inviteEmailPattern=/^[^\s@]{1,64}@[^\s@]+\.[^\s@]{2,}$/;
+ // Emailed invitations (PRIME_MEMBERS_CONTRACT.md): when asked (send_email) the Workspace answers with
+ // `email:{sent,message_id?,error?,retry_after?}`. These turn that result, or a refused resend, into the one line the
+ // owner reads. Codes the contract names get plain words; any other text (a provider message) is shown as given, capped.
+ const mailCodes={mail_unavailable:'Mail is not set up',invalid_recipient:'That email address cannot receive an invitation',invalid_invite_url:'The invite link is not allowed in email'};
+ function mailWait(seconds){const value=Number(seconds);return Number.isFinite(value)&&value>0&&value<=604800?`Too many invitations, try again in ${Math.max(1,Math.ceil(value/60))} min`:'Too many invitations, try again later';}
+ function mailFailure(error,retryAfter){
+  const code=typeof error==='string'?error.trim().slice(0,300):'';
+  if(code==='too_many_attempts')return mailWait(retryAfter);
+  if(mailCodes[code])return mailCodes[code];
+  if(/^[a-z][a-z0-9_]*$/.test(code))return `Invitation email failed (${code})`;
+  return code||'The email was not sent';
+ }
+ function mailOutcome(result){
+  const mail=result&&typeof result==='object'&&!Array.isArray(result)?result:null;
+  if(!mail)return {state:'unreported'};
+  return mail.sent===true?{state:'sent'}:{state:'failed',text:mailFailure(mail.error,mail.retry_after)};
+ }
+ const mailLine=(mail,email)=>mail.state==='sent'?`Invitation emailed to ${email}`:mail.state==='failed'?mail.text:'The Workspace did not report an email result';
  function inviteLink(){const origin=typeof location==='object'&&location&&typeof location.origin==='string'&&/^https?:\/\/[^/]+$/.test(location.origin)?location.origin:'';return origin+'/#invite';}
  // Prime's own owner route (not the Workspace): one account's upload count and bytes, with the same CSRF proof.
  async function memberUploads(uid){
@@ -797,8 +815,15 @@
    if(view.inviteNotice)nodes.push(element('p',{},view.inviteNotice));
    if(view.invite){
     const email=String(view.invite.email||''),link=inviteLink(),message=`You're invited to Echo Prime. Create an account at ${link} with ${email}, then confirm the verification email. Google sign-in works only if you already have an Echo account.`;
+    const mail=view.invite.mail,resend=view.invite.kind==='resend',existing=view.invite.existing===true;
     const linkField=element('input',{type:'text',readonly:'readonly','aria-label':'Invite link',value:link}),text=element('textarea',{rows:4,readonly:'readonly','aria-label':'Invite message'});text.value=message;
-    nodes.push(element('p',{},view.invite.existing?`An active invite for ${email} already exists. Share the same link.`:`Invite created for ${email}. Share the link and message yourself.`),
+    // What happened to the invite, then what happened to the email. Without a mail result (the box was unticked) the text is what it always was.
+    if(!resend)nodes.push(element('p',{},mail?(existing?`An active invite for ${email} already exists.`:`Invite created for ${email}.`):existing?`An active invite for ${email} already exists. Share the same link.`:`Invite created for ${email}. Share the link and message yourself.`));
+    if(mail){
+     nodes.push(element('p',{class:mail.state==='sent'?'members-sent':mail.state==='failed'?'members-error':'members-hint'},mailLine(mail,email)));
+     if(mail.state!=='sent')nodes.push(element('p',{},mail.state==='failed'&&resend?'Nothing was sent; share the link and message yourself.':existing?'Share the same link and message yourself.':'The invite was created; share the link and message yourself.'));
+    }
+    if(!resend||mail?.state!=='sent')nodes.push(
      element('div',{class:'workspace-field'},element('span',{},'Invite link'),element('div',{class:'members-copy'},linkField,button('Copy link',()=>copy(link,linkField,'Invite link')))),
      element('div',{class:'workspace-field'},element('span',{},'Message to send'),text,element('div',{class:'members-copy'},button('Copy message',()=>copy(message,text,'Invite message')))));
    }
@@ -809,11 +834,14 @@
    }
    inviteResult.replaceChildren(...nodes);
   }
+  // "Email the invitation" is on by default: the Workspace sends the mail server-side with this owner's session.
+  const emailIt=element('input',{type:'checkbox','aria-label':'Email the invitation'});emailIt.checked=true;
   const create=button('Create invite',async()=>{
    const address=String(inviteEmail.value||'').trim();
    if(address.length>254||!inviteEmailPattern.test(address))throw new Error('Enter a valid email address.');
+   const send=emailIt.checked===true;
    let receipt;
-   try{receipt=await api('/auth/invite',{email:address});}
+   try{receipt=await api('/auth/invite',{email:address,send_email:send});}
    catch(error){
     // Only a 409 means the email already has an account; it is offered as "Open member" when it is in the list read
     // above. The uid the 409 names wins (the Workspace matches casefolded emails); the listed email is the fallback for
@@ -822,11 +850,25 @@
     throw error;
    }
    const invite=receipt?.invite&&typeof receipt.invite==='object'?receipt.invite:{};
-   membersCarry={select:view.selected,query:view.query,filter:view.filter,invite:{email:typeof invite.email==='string'?invite.email:address,existing:receipt?.existing===true}};
+   membersCarry={select:view.selected,query:view.query,filter:view.filter,invite:{email:typeof invite.email==='string'?invite.email:address,existing:receipt?.existing===true,kind:'create',mail:send?mailOutcome(receipt?.email):null}};
    await open('members');
   },'quiet-button members-primary');
+  // Resend: same rate limits as a new invite, no confirm card (nothing is destroyed). The list is unchanged by a resend, so the
+  // answer is shown in place, with the copy-link fallback whenever the mail did not go.
+  async function resendInvite(item){
+   const email=String(item.email||'');
+   let receipt=null,failure='';
+   try{receipt=await api('/auth/invite/resend',{invite_id:item.id});}
+   catch(error){failure=error?.status===429?mailWait(error.retryAfter):error instanceof Error?error.message:'The invitation was not re-sent.';}
+   if(!live())return;
+   const mail=failure?{state:'failed',text:failure}:mailOutcome(receipt?.email);
+   view.inviteNotice='';view.inviteError=null;view.invite={email,existing:true,kind:'resend',mail};
+   inviteOutput();status(mailLine(mail,email));
+   try{inviteResult.scrollIntoView?.({block:'nearest'});}catch{/* scrolling is best effort */}
+  }
+  const resendButton=item=>{const node=button('Resend',()=>resendInvite(item),'quiet-button');node.setAttribute('aria-label',`Resend the invitation to ${String(item.email||'this email')}`);return node;};
   const invites=view.invitesError?element('p',{class:'members-error'},'Invites are unavailable: '+view.invitesError):!view.invites.length?element('p',{class:'members-hint'},'No invites yet.'):
-   element('ul',{class:'members-invites'},...view.invites.map(item=>element('li',{class:'members-invite'},element('span',{class:'members-email'},String(item.email||'')),element('span',{class:'members-badge','data-status':item.status},memberStatus(item.status)),element('small',{},`Created ${memberWhen(item.created)} · ${item.status==='used'?'used '+memberWhen(item.used_at):'expires '+memberWhen(item.expires)}`),item.status==='active'?button('Revoke',()=>confirmRevoke(view,item),'quiet-button members-danger'):null)));
+   element('ul',{class:'members-invites'},...view.invites.map(item=>element('li',{class:'members-invite'},element('span',{class:'members-email'},String(item.email||'')),element('span',{class:'members-badge','data-status':item.status},memberStatus(item.status)),element('small',{},`Created ${memberWhen(item.created)} · ${item.status==='used'?'used '+memberWhen(item.used_at):'expires '+memberWhen(item.expires)}`),item.status==='active'?resendButton(item):null,item.status==='active'?button('Revoke',()=>confirmRevoke(view,item),'quiet-button members-danger'):null)));
   content.replaceChildren(
    element('article',{class:'workspace-card-content members-card'},element('h3',{},'Members'),
     element('div',{class:'members-counts'},...memberStatuses.map(name=>element('span',{class:'members-count','data-status':name},memberStatus(name)+' ',element('strong',{},memberNumber(view.counts[name]))))),
@@ -834,7 +876,7 @@
     element('div',{class:'members-toolbar'},field('Search',search),element('div',{class:'members-chips',role:'group','aria-label':'Filter by status'},...chips)),
     field('Member',picker)),
    detail,
-   element('article',{class:'workspace-card-content members-invite-card'},element('h3',{},'Invite a member'),element('p',{},'An invite pre-approves one email address for 14 days. Nothing is emailed from here: copy the link and message and send them yourself.'),field('Email address',inviteEmail),element('div',{class:'members-copy'},create),inviteResult,element('h4',{class:'members-subhead'},'Invites'),invites));
+   element('article',{class:'workspace-card-content members-invite-card'},element('h3',{},'Invite a member'),element('p',{},'An invite pre-approves one email address for 14 days. Tick "Email the invitation" and Echo emails the link to that address for you; the link and message are always shown so you can copy and send them yourself.'),field('Email address',inviteEmail),element('label',{class:'members-check'},emailIt,element('span',{},'Email the invitation')),element('div',{class:'members-copy'},create),inviteResult,element('h4',{class:'members-subhead'},'Invites'),invites));
   press();fill();show();inviteOutput();
  }
  async function loadUsage(view,row,host){
