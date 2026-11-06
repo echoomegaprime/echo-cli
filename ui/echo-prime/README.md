@@ -23,6 +23,19 @@ The responsive shell follows the user-provided emerald desktop, ECHO Prime deskt
 
 The production integration must provide a separately admitted authenticated host and the existing bounded `runSharedTurn` adapter. Do not add credentials to static files or assume that this interface grants `continuity.write` or `coding.invoke`.
 
+## Echo controls rail
+
+The mode chips, model and personality pickers, voice controls and context meter live in one right-hand column, `<aside id="echo-rail" aria-label="Echo controls">`, as five collapsible cards in this order: Mode, Model, Personality, Voice, Context. Code: `rail.js`, `rail.css`; markup in `index.html`.
+
+- **Relocation, not a rewrite.** Each control is still created and driven by its own module (`app.js` mode chips, `models.js`, `brain.js`, `composer.js` context meter, `voicebar.js`, `speech.js`) with the same ids, listeners and behaviour. The modules mount into the card slots `#rail-mode-slot`, `#rail-model-slot`, `#rail-personality-slot`, `#rail-voice-slot` and `#rail-context-slot`, and keep their previous mount points as a fallback. The Workspace conversation strip keeps its own Personality select (`#workspace-personality`); it is a different control.
+- **Docked at 1100px and wider.** The conversation column shrinks to make room. The header button (`#rail-toggle`) hides and shows the rail and the choice is remembered. With the navigation moved to the right (`layout.js`), the rail sits beside it.
+- **Drawer below 1100px.** The same button opens the rail as a slide-over with a backdrop. Focus moves into the drawer, Escape or the backdrop closes it, and focus returns to the button. The drawer is never remembered.
+- **Cards.** The header button of each card collapses it (150-200 ms, none under `prefers-reduced-motion`). A card with nothing to show stays out of the way: Voice before sign-in, Context before a window size is known.
+- **Storage.** One key, `echo-prime-rail-v1`, holds `{v, hidden, collapsed}`, always read and written inside try/catch; the rail works when storage is blocked.
+- **Accessibility.** The option toggles are `role="switch"` with `aria-checked`; Mute, Conversation mode and the personality toggle stay toggle buttons whose label names the action and whose `aria-pressed` carries the state. Text is at least 4.5:1 and control outlines 3:1 in both themes (`tests/prime-rail-ui.test.ts` computes the ratios from the tokens).
+- **Themes.** Tokens are scoped to `#echo-rail`: dark by default, light under `:root[data-theme=light]` (the hook `nav.css` already uses). The rest of the page has no light theme yet.
+- **Voice pill.** `data-state` on the voice line is `ok` (green, Echo's voice configured), `device` (amber, only the device voice is on) or `error` (red, nothing can speak). The context bar carries `data-level` (`ok`, `high` from 70%, `critical` from 90%).
+
 ## Swarm (40-seat brain)
 
 The model picker has a "Swarm (40-seat brain)" entry. Selecting it sends the next ECHO Code chat message to the Maximalist Swarm Fusion Brain worker instead of a single model. It is off unless the reviewed Prime config has a `swarm` section (and the `models` section the picker needs):

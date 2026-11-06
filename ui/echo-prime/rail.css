@@ -1,0 +1,199 @@
+/* Echo controls rail (rail.js). One right-hand column: Mode, Model, Personality, Voice, Context.
+   It restyles controls that other modules create (models.js, brain.js, composer.js, voicebar.js, speech.js) and
+   never changes what they do. Every rule is scoped to #echo-rail so the rest of the page is untouched.
+   Tokens: dark by default, light under :root[data-theme=light] (the hook nav.css already uses). Text pairs are
+   at least 4.5:1 and control outlines at least 3:1 in both; tests/prime-rail-ui.test.ts computes them. */
+
+#echo-rail{
+  --rail-bg:#0a1215;--rail-card:#0f1b1e;--rail-field:#0a1417;
+  --rail-text:#e4eeeb;--rail-muted:#98b3ad;
+  --rail-accent:#7ff0c4;--rail-accent-2:#7fd3e6;--rail-accent-fill:#64e5af;--rail-on-accent:#04221a;
+  --rail-ok:#6fe3ad;--rail-warn:#f0bf6a;--rail-bad:#ff9d8d;
+  --rail-edge:#6b8c85;
+  --rail-line:rgba(169,225,213,.13);--rail-line-strong:rgba(169,225,213,.26);--rail-glow:rgba(100,229,175,.15);
+  color-scheme:dark;
+  display:flex;flex-direction:column;
+  position:fixed;top:0;right:0;bottom:0;width:var(--rail-w);z-index:18;
+  background:radial-gradient(130% 50% at 100% 0%,var(--rail-glow),transparent 62%),linear-gradient(200deg,#0d181b 0%,var(--rail-bg) 62%);
+  border-left:1px solid var(--rail-line);
+  color:var(--rail-text);font-size:13px;line-height:1.45;
+}
+:root[data-theme=light] #echo-rail{
+  --rail-bg:#eaf3ef;--rail-card:#ffffff;--rail-field:#f1f7f4;
+  --rail-text:#10272a;--rail-muted:#46665e;
+  --rail-accent:#0b6e52;--rail-accent-2:#1a7f9a;--rail-accent-fill:#0f7d5c;--rail-on-accent:#ffffff;
+  --rail-ok:#0b6e52;--rail-warn:#855400;--rail-bad:#b3321f;
+  --rail-edge:#68857d;
+  --rail-line:rgba(16,56,48,.13);--rail-line-strong:rgba(16,56,48,.24);--rail-glow:rgba(15,125,92,.12);
+  color-scheme:light;
+  background:radial-gradient(130% 50% at 100% 0%,var(--rail-glow),transparent 62%),linear-gradient(200deg,#f6fbf9 0%,var(--rail-bg) 62%);
+}
+:root{--rail-w:320px}
+
+#echo-rail *{box-sizing:border-box}
+#echo-rail [hidden]{display:none!important}
+#echo-rail button,#echo-rail select,#echo-rail input{font:inherit}
+#echo-rail button:focus-visible,#echo-rail select:focus-visible,#echo-rail input:focus-visible{outline:2px solid var(--rail-accent);outline-offset:2px}
+#echo-rail .quiet-button{display:inline-flex;align-items:center;gap:8px}/* styles.css hides .quiet-button on phones; the rail's buttons stay */
+
+/* ---- header ---- */
+#echo-rail .rail-head{position:relative;flex:none;display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:72px;padding:0 14px 0 20px}
+#echo-rail .rail-head::after{content:"";position:absolute;left:0;right:0;bottom:0;height:1px;background:linear-gradient(90deg,transparent,rgba(100,229,175,.55) 24%,rgba(127,211,230,.5) 60%,rgba(185,150,255,.4) 88%,transparent)}
+#echo-rail .rail-title{margin:0;font-size:15px;font-weight:600;letter-spacing:.01em;color:var(--rail-text)}
+#echo-rail .rail-close{display:none;width:36px;height:36px;border-radius:9px;color:var(--rail-muted);background:transparent}
+#echo-rail .rail-close:hover{background:var(--rail-line);color:var(--rail-text)}
+#echo-rail .rail-close svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round}
+#echo-rail .rail-scroll{flex:1;min-height:0;display:grid;align-content:start;gap:12px;padding:16px 14px 32px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--rail-line-strong) transparent}
+
+/* ---- cards ---- */
+#echo-rail .rail-card{border:1px solid var(--rail-line);border-radius:14px;background:var(--rail-card);box-shadow:inset 0 1px 0 rgba(205,255,221,.045)}
+#echo-rail .rail-card-head{margin:0;font:inherit}
+#echo-rail .rail-card-toggle{display:flex;align-items:center;gap:10px;width:100%;min-height:48px;padding:8px 12px 8px 10px;border:0;border-radius:13px;background:transparent;color:var(--rail-text);text-align:left;font-size:13.5px;font-weight:600;cursor:pointer}
+#echo-rail .rail-card-toggle:hover{background:rgba(127,240,196,.06)}
+#echo-rail .rail-card-toggle:focus-visible{outline-offset:-2px}
+#echo-rail .rail-card-icon{flex:none;display:grid;place-items:center;width:30px;height:30px;border-radius:10px;color:var(--rail-accent);background:linear-gradient(145deg,rgba(100,229,175,.2),rgba(127,211,230,.07));box-shadow:inset 0 0 0 1px rgba(127,240,196,.24)}
+#echo-rail .rail-card-icon svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+#echo-rail .rail-card-name{flex:1;min-width:0}
+#echo-rail .rail-chevron{flex:none;width:20px;height:20px;fill:none;stroke:var(--rail-muted);stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+#echo-rail .rail-card[data-collapsed] .rail-chevron{transform:rotate(-90deg)}
+
+/* Collapse: the body is a one-row grid that animates between 1fr and 0fr (150-200 ms), after the first paint only. */
+#echo-rail .rail-card-body{display:grid;grid-template-rows:1fr}
+#echo-rail.rail-ready .rail-card-body{transition:grid-template-rows .18s ease}
+#echo-rail.rail-ready .rail-chevron{transition:transform .18s ease}
+#echo-rail .rail-card[data-collapsed] .rail-card-body{grid-template-rows:0fr}
+#echo-rail .rail-card-inner{min-height:0;overflow:hidden;padding:4px 12px 14px}
+#echo-rail.rail-ready .rail-card-inner{transition:padding .18s ease,visibility 0s}
+#echo-rail .rail-card[data-collapsed] .rail-card-inner{visibility:hidden;padding-top:0;padding-bottom:0}
+#echo-rail.rail-ready .rail-card[data-collapsed] .rail-card-inner{transition:padding .18s ease,visibility 0s linear .18s}
+
+/* ---- Mode ---- */
+#echo-rail .mode-tabs{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin:0;overflow:visible}
+#echo-rail .mode-tabs button{flex:none;display:flex;align-items:center;justify-content:center;min-height:38px;padding:6px 6px;border:1px solid var(--rail-line-strong);border-radius:10px;background:var(--rail-field);color:var(--rail-text);font-size:12.5px;font-weight:500;white-space:nowrap;cursor:pointer;transition:background-color .15s,border-color .15s,color .15s}
+#echo-rail .mode-tabs button:hover{border-color:var(--rail-accent)}
+#echo-rail .mode-tabs button[data-mode=Auto]{grid-column:1/-1;min-height:40px;font-weight:600}
+#echo-rail .mode-tabs button.selected,#echo-rail .mode-tabs button[aria-selected=true]{border-color:transparent;background:var(--rail-accent-fill);color:var(--rail-on-accent);font-weight:600;box-shadow:0 0 0 1px rgba(255,255,255,.08) inset,0 6px 18px -8px var(--rail-accent-fill)}
+#echo-rail .rail-link{margin:10px 0 0;padding:6px 4px;border:0;border-radius:8px;background:transparent;color:var(--rail-accent);font-size:12.5px;font-weight:500;cursor:pointer}
+#echo-rail .rail-link:hover{text-decoration:underline;text-underline-offset:3px}
+
+/* ---- Model and Personality: fields ---- */
+#echo-rail .model-picker,#echo-rail .personality-control{display:grid;gap:10px!important;min-width:0}
+#echo-rail label.sr-only{position:static;display:grid;gap:6px;width:auto;height:auto;margin:0;overflow:visible;clip:auto;color:var(--rail-muted);font-size:12px;font-weight:500}
+/* The card title already names the Model and Personality pickers, so their captions stay for assistive technology only; the Gemini caption stays visible. */
+#echo-rail label.sr-only:has(>#model-select),#echo-rail label.sr-only:has(>#personality-select){gap:0;font-size:0}
+#echo-rail select{width:100%;min-width:0;min-height:40px;padding:8px 12px;border:1px solid var(--rail-edge);border-radius:10px;background-color:var(--rail-field);color:var(--rail-text);font-size:13px;cursor:pointer}
+#echo-rail select:disabled{opacity:.6;cursor:not-allowed}
+#echo-rail .connection-note{display:block;margin:0;font-size:12px;line-height:1.5;color:var(--rail-muted)}
+#echo-rail .connection-note:empty{display:none}
+
+/* ---- switch rows: the option checkboxes (role=switch) and the toggle buttons share one look ---- */
+#echo-rail label.check,#echo-rail #personality-toggle,#echo-rail [data-speech-conversation],#echo-rail [data-speech-mute]{
+  display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;min-height:44px;padding:8px 12px;
+  border:1px solid var(--rail-line-strong);border-radius:11px;background:var(--rail-field);color:var(--rail-text);
+  font-size:13px;font-weight:500;text-align:left;white-space:normal;cursor:pointer;
+  transition:border-color .15s,background-color .15s;
+}
+#echo-rail label.check{flex-direction:row-reverse}
+#echo-rail label.check:hover,#echo-rail #personality-toggle:hover,#echo-rail [data-speech-conversation]:hover,#echo-rail [data-speech-mute]:hover{border-color:var(--rail-accent)}
+#echo-rail #personality-toggle:disabled{opacity:.6;cursor:not-allowed}
+#echo-rail #personality-toggle::after,#echo-rail [data-speech-conversation]::after,#echo-rail [data-speech-mute]::after,
+#echo-rail input[type=checkbox][role=switch]{
+  flex:none;width:38px;height:22px;margin:0;border:1.5px solid var(--rail-edge);border-radius:999px;
+  background:radial-gradient(circle at center,var(--rail-edge) 0 7px,transparent 7.5px) no-repeat 3px 50%/16px 16px,var(--rail-field);
+  transition:background-position .16s ease,background-color .16s ease,border-color .16s ease;
+}
+#echo-rail #personality-toggle::after,#echo-rail [data-speech-conversation]::after,#echo-rail [data-speech-mute]::after{content:""}
+#echo-rail input[type=checkbox][role=switch]{-webkit-appearance:none;appearance:none;cursor:pointer}
+#echo-rail #personality-toggle[aria-pressed=true]::after,#echo-rail [data-speech-conversation][aria-pressed=true]::after,#echo-rail input[type=checkbox][role=switch]:checked{
+  border-color:var(--rail-accent-fill);
+  background:radial-gradient(circle at center,var(--rail-on-accent) 0 7px,transparent 7.5px) no-repeat calc(100% - 3px) 50%/16px 16px,var(--rail-accent-fill);
+}
+/* Mute is the one big switch. It is "on" when Echo is muted, which is the state worth noticing, so it turns amber. */
+#echo-rail [data-speech-mute]{min-height:56px;border-radius:13px;font-size:14px;font-weight:600;background:linear-gradient(145deg,rgba(100,229,175,.1),rgba(127,211,230,.04)),var(--rail-field)}
+#echo-rail [data-speech-mute][aria-pressed=true]{border-color:var(--rail-warn)}
+#echo-rail [data-speech-mute][aria-pressed=true]::after{
+  border-color:var(--rail-warn);
+  background:radial-gradient(circle at center,var(--rail-on-accent) 0 7px,transparent 7.5px) no-repeat calc(100% - 3px) 50%/16px 16px,var(--rail-warn);
+}
+#echo-rail #personality-toggle{margin:0}
+
+/* ---- Voice: the spoken-replies dock and the voice bar flow into one wrapping column, in their DOM order ---- */
+#rail-voice-slot{display:flex;flex-wrap:wrap;align-content:flex-start;gap:8px}
+#rail-voice-slot .speech-dock,#rail-voice-slot .speech-row,#rail-voice-slot .voice-bar,#rail-voice-slot .voice-controls{display:contents}
+#rail-voice-slot>*,#rail-voice-slot .speech-row>*,#rail-voice-slot .voice-controls>*{flex:1 1 100%;min-width:0;max-width:100%}
+#echo-rail .speech-voice{display:flex;align-items:center;gap:9px;width:auto;min-height:34px;padding:5px 14px 5px 11px;border:1px solid var(--rail-line-strong);border-radius:17px;background:var(--rail-field);color:var(--rail-ok);font-size:12.5px;font-weight:500;letter-spacing:0;overflow-wrap:anywhere}
+#echo-rail .speech-voice::before{content:"";flex:none;width:8px;height:8px;border-radius:50%;background:currentColor;box-shadow:0 0 0 3px color-mix(in srgb,currentColor 22%,transparent),0 0 10px currentColor}
+#echo-rail .speech-voice[data-state=device]{color:var(--rail-warn)}
+#echo-rail .speech-voice[data-state=error],#echo-rail .speech-voice.unavailable{color:var(--rail-bad)}
+#echo-rail .speech-count{order:1;margin:0;font-size:12px;color:var(--rail-muted);font-variant-numeric:tabular-nums}/* sits with the status lines below the buttons */
+#echo-rail [data-speech-bar-mute]{display:none}/* the dock's Mute switch is the only one in the rail */
+#echo-rail .voice-controls .quiet-button,#echo-rail [data-speech-stop]{flex:1 1 calc(50% - 4px);justify-content:center;min-height:36px;padding:6px 10px;border:1px solid var(--rail-line-strong);border-radius:10px;background:var(--rail-field);color:var(--rail-text);font-size:12.5px;font-weight:500;text-align:center;cursor:pointer}
+#echo-rail .voice-controls .quiet-button:hover,#echo-rail [data-speech-stop]:hover{border-color:var(--rail-accent)}
+#echo-rail [data-speech-stop]{flex-basis:100%}
+#echo-rail .speech-chip{flex:1 1 100%;justify-content:center;min-height:38px;border:1px solid var(--rail-accent-fill);border-radius:11px;background:var(--rail-accent-fill);color:var(--rail-on-accent);font-weight:600}
+#echo-rail .speech-status,#echo-rail .voice-bar small{order:2;flex:1 1 100%;margin:0;font-size:12px;line-height:1.5;color:var(--rail-muted);overflow-wrap:anywhere}
+#echo-rail .speech-status:empty,#echo-rail .voice-bar small:empty{display:none}
+#echo-rail .voice-bar small.muted{margin-top:2px;padding-top:10px;border-top:1px solid var(--rail-line);font-size:11.5px}
+
+/* ---- Context ---- */
+#echo-rail .composer-extras{display:grid;gap:8px;margin:0}
+#echo-rail .context-meter{display:flex;flex-direction:column;align-items:stretch;justify-content:flex-start;gap:9px;color:var(--rail-text);font-size:12.5px}
+#echo-rail .context-meter [data-context-label]{order:-1;font-variant-numeric:tabular-nums;line-height:1.4;overflow-wrap:anywhere}
+#echo-rail .context-meter progress{order:1;display:block;width:100%;height:8px;-webkit-appearance:none;appearance:none;overflow:hidden;border:0;border-radius:999px;background:var(--rail-field);box-shadow:inset 0 0 0 1px var(--rail-line-strong)}
+#echo-rail .context-meter progress::-webkit-progress-bar{border-radius:999px;background:var(--rail-field)}
+#echo-rail .context-meter progress::-webkit-progress-value{border-radius:999px;background:linear-gradient(90deg,var(--rail-accent-fill),var(--rail-accent-2))}
+#echo-rail .context-meter progress::-moz-progress-bar{border-radius:999px;background:linear-gradient(90deg,var(--rail-accent-fill),var(--rail-accent-2))}
+#echo-rail .context-meter[data-level=high] progress::-webkit-progress-value{background:var(--rail-warn)}
+#echo-rail .context-meter[data-level=high] progress::-moz-progress-bar{background:var(--rail-warn)}
+#echo-rail .context-meter[data-level=critical] progress::-webkit-progress-value{background:var(--rail-bad)}
+#echo-rail .context-meter[data-level=critical] progress::-moz-progress-bar{background:var(--rail-bad)}
+#echo-rail .context-meter[data-level=high] [data-context-label]{color:var(--rail-warn)}
+#echo-rail .context-meter[data-level=critical] [data-context-label]{color:var(--rail-bad)}
+
+/* ---- header toggle and backdrop ---- */
+.rail-toggle{flex:none;width:36px;height:36px;margin-left:6px;border:1px solid var(--line);border-radius:9px;color:#a9cbbf}
+.rail-toggle:hover{background:#a9ffcf10;color:#d9f6ea}
+.rail-toggle[aria-expanded=true]{border-color:#64e5af44;background:#64e5af12;color:var(--green)}
+.rail-toggle svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.rail-scrim{display:none}
+
+/* ---- docked: 1100px and wider. The conversation column makes room; the navigation may be on either side. ---- */
+@media (min-width:1100px){
+  html:not(.rail-hidden) main{margin-right:var(--rail-w)}
+  html:not(.rail-hidden) .sidebar-right main{margin-right:calc(var(--sidebar-width,250px) + var(--rail-w))}
+  .sidebar-right #echo-rail{right:var(--sidebar-width,250px)}
+  html.rail-hidden #echo-rail{display:none}
+  html:not(.rail-hidden) .toast{left:calc(50% + (var(--sidebar-width,250px) - var(--rail-w)) / 2)}
+  html:not(.rail-hidden) .sidebar-right .toast{left:calc(50% - (var(--sidebar-width,250px) + var(--rail-w)) / 2)}
+  html:not(.rail-hidden) .workspace-esh:not(.floating){right:calc(var(--rail-w) + 20px)}
+  html:not(.rail-hidden) .sidebar-right .workspace-esh:not(.floating){right:calc(var(--sidebar-width,250px) + var(--rail-w) + 20px)}
+}
+
+/* The conversation column is narrow with the rail docked at 1100-1359px, and on phones: the composer's tool chips take their own row under the persona and Send instead of wrapping letter by letter. */
+@media (min-width:1100px) and (max-width:1359.98px){
+  html:not(.rail-hidden) .composer-bottom{flex-wrap:wrap;row-gap:10px}
+  html:not(.rail-hidden) .composer-bottom .persona{white-space:nowrap}
+  html:not(.rail-hidden) .composer-bottom .composer-tools{order:3;flex:1 1 100%}
+}
+@media (max-width:640px){
+  .composer-bottom{flex-wrap:wrap;row-gap:10px}
+  .composer-bottom .persona{white-space:nowrap}
+  .composer-bottom .composer-tools{order:3;flex:1 1 100%}
+}
+
+/* ---- drawer: below 1100px the rail slides over from the right ---- */
+@media (max-width:1099.98px){
+  #echo-rail{width:min(340px,calc(100vw - 28px));z-index:45;transform:translateX(104%);visibility:hidden;box-shadow:-24px 0 60px #000a}
+  .sidebar-right #echo-rail{right:0}
+  html.rail-open #echo-rail{transform:none;visibility:visible}
+  #echo-rail.rail-ready{transition:transform .2s ease,visibility 0s linear .2s}
+  html.rail-open #echo-rail.rail-ready{transition:transform .2s ease,visibility 0s}
+  #echo-rail .rail-close{display:inline-flex;align-items:center;justify-content:center}
+  .rail-scrim.visible{display:block;position:fixed;inset:0;z-index:44;padding:0;border:0;background:#030907b3;-webkit-backdrop-filter:blur(5px);backdrop-filter:blur(5px)}
+}
+@media (max-width:800px){
+  #echo-rail .rail-head{min-height:65px}
+}
+@media (prefers-reduced-motion:reduce){
+  #echo-rail,#echo-rail *,#echo-rail *::before,#echo-rail *::after{transition:none!important;animation:none!important}
+}

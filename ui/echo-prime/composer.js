@@ -26,8 +26,8 @@
   }
   const prompt=Number(usage?.prompt_tokens),measured=usage!==null&&typeof usage==='object'&&usage.prompt_tokens!==undefined&&Number.isFinite(prompt)&&prompt>=0;
   const draftTokens=Math.ceil(draft.length/4);
-  const used=measured?prompt+(Number(usage.completion_tokens)||0)+draftTokens:Math.ceil(((Number(input.contextChars)||0)+(Number(input.baseChars)||0)+draft.length)/4);
-  const percent=Math.min(100,used/capacity*100),basis=measured?(draft?'last turn + draft estimate':'measured last turn'):'estimate';
+  const used=Math.max(0,measured?prompt+(Number(usage.completion_tokens)||0)+draftTokens:Math.ceil(((Number(input.contextChars)||0)+(Number(input.baseChars)||0)+draft.length)/4));
+  const percent=Math.max(0,Math.min(100,used/capacity*100)),basis=measured?(draft?'last turn + draft estimate':'measured last turn'):'estimate';
   return {used,capacity,percent,measured,basis,text:`${number(used)} / ${number(capacity)} · ${percent.toFixed(1)}% · ${basis}`,
    title:measured?'Last measured prompt includes instructions, memories, attached files and tool definitions. A draft is estimated at four characters per token.':'Estimate includes saved messages, workspace instructions and your draft. Retrieved memory and attachments are measured when sent.'};
  }
@@ -44,7 +44,9 @@
  const extensions={python:'py',javascript:'js',typescript:'ts',powershell:'ps1',bash:'sh',json:'json',html:'html',css:'css',rust:'rs',markdown:'md'};
  function fileNameFor(language){const key=String(language||'').trim().toLowerCase();return 'note.'+(extensions[key]||(/^[a-z]{1,6}$/.test(key)?key:'txt'));}
  const credentialName=/(?:^\.env|id_rsa|id_ed25519|credentials?|secrets?|\.(?:pem|key|pfx|db)$)/i;
- window.EchoPrimeComposer={contextMeter,chatChars,splitBlocks,fileNameFor};
+ // The rail colours the bar by how full the window is: ok below 70%, high from 70%, critical from 90%.
+ const meterLevel=percent=>percent>=90?'critical':percent>=70?'high':'ok';
+ window.EchoPrimeComposer={contextMeter,meterLevel,chatChars,splitBlocks,fileNameFor};
 
  function notify(text){const node=$('#draft-notice');if(node){node.textContent=String(text).slice(0,600);node.hidden=false;}}
  function makeDialog(kind,title){
@@ -189,7 +191,7 @@
   renderChips(b);
   const meter=contextMeter({capacity:data?.context_length,contextChars:chatChars(b.state.chat),baseChars:data?.base_context_chars,draft:$('#prompt')?.value||'',events:b.state.chat?.events});
   ui.meterRow.hidden=!meter;
-  if(meter){ui.bar.max=meter.capacity;ui.bar.value=meter.used;ui.label.textContent=meter.text;ui.meterRow.setAttribute('title',meter.title);}
+  if(meter){ui.bar.max=meter.capacity;ui.bar.value=meter.used;ui.bar.setAttribute('aria-valuetext',meter.text);ui.label.textContent=meter.text;ui.meterRow.setAttribute('title',meter.title);ui.meterRow.dataset.level=meterLevel(meter.percent);}
   syncPersonality(b);syncCheckpoint(b);decorate(b);
  }
  function build(b){
@@ -203,7 +205,8 @@
   ui.chips=el('div',{class:'attachment-chips',role:'list','aria-label':'Attached files'});ui.chips.hidden=true;$('#prompt')?.before(ui.chips);
   ui.bar=el('progress',{max:'1',value:'0','aria-label':'Context window used'});ui.label=el('span',{'data-context-label':'',role:'status'});
   ui.meterRow=el('div',{class:'context-meter'},ui.bar,ui.label);ui.meterRow.hidden=true;
-  const extras=el('div',{id:'composer-extras',class:'composer-extras'},ui.meterRow);$('.composer-caption')?.after(extras);
+  const extras=el('div',{id:'composer-extras',class:'composer-extras'},ui.meterRow),contextSlot=$('#rail-context-slot');
+  if(contextSlot)contextSlot.append(extras);else $('.composer-caption')?.after(extras);
   ui.personality=el('select',{id:'workspace-personality','data-personality':'','aria-label':'Personality'});ui.personalityLabel=el('label',{},'Personality',ui.personality);ui.personalityLabel.hidden=true;
   ui.personality.addEventListener('change',async()=>{
    const now=bridge(),epoch=now?.state.accountEpoch,chat=now?.state.chat;if(!now||!chat?.id)return;

@@ -25,7 +25,7 @@
  toggle.type='button';toggle.id='personality-toggle';toggle.className='quiet-button';
  note.className='connection-note';note.setAttribute('role','status');note.setAttribute('aria-live','polite');
  label.append(select);wrap.append(label,toggle,note);
- const mount=document.querySelector('.composer-toolbar')||document.querySelector('#composer');
+ const mount=document.querySelector('#rail-personality-slot')||document.querySelector('.composer-toolbar')||document.querySelector('#composer');
  if(mount)mount.append(wrap);
  function option(value,labelText){const o=document.createElement('option');o.value=value;o.textContent=labelText;return o;}
  function render(){
