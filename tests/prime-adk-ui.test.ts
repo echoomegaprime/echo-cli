@@ -375,6 +375,27 @@ describe('living orb wiring: agents.js publishes moons and states, and opens an 
     s.fire('echo-account-changed');
     expect(states(s)).toEqual(['deep', 'idle']); expect(moons(s)).toEqual([]);
   });
+  it('a reload never blanks the moons: Refresh, reopening and a moon click publish only what Echo ADK answered', async () => {
+    const opts: Opts = { workspace: workspaceStub(owner()) }; const s = await setup(opts);
+    const published = (from: number) => s.orbEvents.slice(from).filter(e => e.type === 'echo-orb-satellites').map(e => e.detail.satellites as Moon[]);
+    await s.open(); await settle(); expect(moons(s)).toEqual([idle('researcher'), idle('builder')]);
+    let from = s.orbEvents.length;
+    await s.api.refresh(); await settle();
+    s.n['agents-dialog'].close(); await s.open(); await settle();
+    s.fireDoc('echo-orb-open', { id: 'agent:builder', kind: 'agent' }); await settle();
+    expect(s.count('/api/prime/adk/agents')).toBe(4); expect(published(from)).toEqual(Array(3).fill([idle('researcher'), idle('builder')]));
+    // A reload that fails keeps the moons; one that answers with fewer definitions publishes exactly those.
+    opts.healthStatus = 503; opts.health = { error: 'Echo ADK unreachable' }; from = s.orbEvents.length;
+    await s.api.refresh(); await settle(); expect(s.n['agents-status'].textContent).toContain('unavailable'); expect(published(from)).toEqual([]);
+    await vi.advanceTimersByTimeAsync(5000); opts.healthStatus = 200; opts.health = HEALTH; opts.agents = [AGENTS[1]];
+    await s.api.refresh(); await settle(); expect(published(from)).toEqual([[idle('builder')]]);
+  });
+  it('the watched agent orbits even when it is listed past the 24th definition', async () => {
+    const s = await setup({ agents: Array.from({ length: 30 }, (_, i) => ({ ...AGENTS[0], name: 'agent-' + i })) });
+    await s.open(); await settle(); expect(moons(s)).toHaveLength(24); expect(moons(s)!.map(m => m.name)).not.toContain('agent-28');
+    await s.submit('Find the port.', 'agent-28'); await settle();
+    const now = moons(s)!; expect(now).toHaveLength(24); expect(now[0]).toEqual(runningMoon('agent-28')); expect(now.slice(1).every(m => !m.busy)).toBe(true);
+  });
   it('a click on an agent moon opens the view, loads it and selects that agent; other moons and malformed details are ignored', async () => {
     const s = await setup();
     s.fireDoc('echo-orb-open', { id: 'bot:' + 'a'.repeat(32), kind: 'bot' }); s.fireDoc('echo-orb-open', { id: 'builder', kind: 'agent' }); s.fireDoc('echo-orb-open', null);

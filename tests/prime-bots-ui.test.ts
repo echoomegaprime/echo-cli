@@ -391,6 +391,13 @@ describe('living orb satellites', () => {
     s.api.close(); const after = s.orbEvents().length;
     await vi.advanceTimersByTimeAsync(65000); expect(s.count('/api/prime/bots/list')).toBe(2); expect(s.orbEvents().length).toBe(after);
   });
+  it('sends running bots first, so one listed past the 24th still orbits; the rest keep list order', async () => {
+    const hex = (i: number) => i.toString(16).padStart(32, '0');
+    const s = await opened({ bots: Array.from({ length: 30 }, (_, i) => bot({ bot_id: hex(i + 1), name: 'Bot ' + i, status: i === 27 ? 'running' : 'paused' })) });
+    const moons = s.orbEvents().at(-1).satellites;
+    expect(moons).toHaveLength(24); expect(moons[0]).toMatchObject({ id: `bot:${hex(28)}`, status: 'running', busy: true });
+    expect(moons.slice(1).map((moon: any) => moon.id)).toEqual(Array.from({ length: 23 }, (_, i) => `bot:${hex(i + 1)}`));
+  });
   it('publishes nothing new when an action fails', async () => {
     const s = await opened(); s.serverBots.set([]); const before = s.orbEvents().length;
     await find(s.cards()[1], 'Pause')!.fire('click'); await settle();

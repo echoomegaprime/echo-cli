@@ -32,7 +32,14 @@
  }
  const allowed=()=>{const a=admission();return a==='open'||a==='owner';};
  function orbEvent(name,detail){try{if(typeof doc.dispatchEvent==='function'&&typeof CustomEvent==='function')doc.dispatchEvent(new CustomEvent(name,{detail}));}catch{}}
- function publishSatellites(){orbEvent('echo-orb-satellites',{source:'bots',satellites:allowed()?bots.slice(0,24).map(bot=>{const live=!!group&&!group.done;const inGroup=live&&group.bots.includes(bot.bot_id),satelliteGroup=inGroup?group.groupId:undefined;return {id:'bot:'+bot.bot_id,kind:'bot',name:str(bot.name,80)||shortId(bot.bot_id),status:STATUSES.includes(bot.status)?bot.status:'idle',busy:bot.status==='running'||inGroup,group:satelliteGroup};}):[]});}
+ // The orb keeps 24 moons across every publisher, busy first. Busy bots (running, or in a live group chat) go first here and
+ // the rest keep list order, so the 24 sent always include a running bot or a group member listed past the 24th.
+ function publishSatellites(){
+  const live=!!group&&!group.done;
+  const moons=allowed()?bots.map(bot=>{const inGroup=live&&group.bots.includes(bot.bot_id),satelliteGroup=inGroup?group.groupId:undefined;return {id:'bot:'+bot.bot_id,kind:'bot',name:str(bot.name,80)||shortId(bot.bot_id),status:STATUSES.includes(bot.status)?bot.status:'idle',busy:bot.status==='running'||inGroup,group:satelliteGroup};}):[];
+  moons.sort((a,b)=>Number(b.busy)-Number(a.busy));
+  orbEvent('echo-orb-satellites',{source:'bots',satellites:moons.slice(0,24)});
+ }
  async function request(url,body,signal){
   const sent={'x-prime-request':'1',...await headers(),...(body?{'content-type':'application/json'}:{})},owner=admission()==='owner';
   const response=await fetch(url,{method:body?'POST':'GET',credentials:'same-origin',headers:sent,...(body?{body:JSON.stringify(body)}:{}),signal});

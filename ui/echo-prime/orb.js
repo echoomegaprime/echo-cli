@@ -35,6 +35,9 @@
  * paints or clips with); a moon behind the limb can be hovered or opened only outside that disc and only while part of its
  * body shows, and the topmost body under the pointer wins. A still mouse is re-tested every animated frame, so a moon that
  * slides behind the sphere loses its name tag and a touch tag goes as soon as its moon is out of sight.
+ * Orbits: ring-like Keplerian ellipses fitted to the canvas size when a moon is assigned and on resize, so every moon stays
+ * fully on the canvas through the whole system spin, outside the sphere, agents inside bots inside swarm (the orbit layout
+ * above KINDS).
  * Allocation: the scene step and the WebGL frame write into preallocated typed arrays, pooled moons and pooled arcs; the
  * 2D fallback takes its colour strings from a bounded cache but still creates CanvasGradient objects each frame (the
  * Canvas 2D API binds a gradient to its coordinates).
@@ -207,7 +210,43 @@ void main(){if(vBehind>.5&&distance(gl_FragCoord.xy,sphere.xy)<sphere.z)discard;
     error:    {energy:.6, swirl:.1, flow:1.2, rim:.3, shimmer:.3, filaments:0,  hue:0},
     success:  {energy:.8, swirl:.1, flow:1.3, rim:1,  shimmer:.9, filaments:0,  hue:0},
   };
-  const KINDS={agent:{size:4.6,radius:1.1,speed:.3,weight:1},bot:{size:7,radius:1.32,speed:.19,weight:3},swarm:{size:9,radius:1.58,speed:.12,weight:2}};
+  // Orbit layout. Every moon rides a Keplerian ellipse with the sphere at a focus (eccentricity ECC_MIN..+ECC_SPAN, so it
+  // still dives past periapsis), opened at most OPEN from edge-on and tilted at most TILT from horizontal, so orbits read
+  // as rings. Each kind's semi-major axis is radius ± spread (agents innermost, then bots, then swarm). Then a fit for the
+  // canvas, computed when a moon is assigned and on resize (never per frame), keeps every moon fully on the canvas at every
+  // angle of the slow system spin, its drawn radius included (see sideReach, kindPull and scene.fit):
+  //  1. per kind, the largest pull f in (0,1] that keeps that kind's widest possible flat ring on the canvas. A moon's axis
+  //     is drawn toward FLOOR (a = FLOOR + f(a0 - FLOOR)) and its eccentricity scaled by f, so periapsis never drops below
+  //     FLOOR (outside the sphere, R .83, with ~8 % to spare for its breathing and pulses); an outer kind caps the inner
+  //     kinds' f, so the three bands never cross;
+  //  2. per moon, the largest u in [0,1] that scales its tilt and its opening beyond OPEN_FLAT so that every sampled point
+  //     of its orbit fits, vertically and horizontally (u = 1 keeps the orbit as hashed; only steep orbits on short
+  //     canvases flatten toward a ring).
+  const KINDS={agent:{size:4.6,radius:1.13,spread:.06,speed:.3,weight:1},bot:{size:7,radius:1.34,spread:.07,speed:.19,weight:3},swarm:{size:9,radius:1.6,spread:.07,speed:.12,weight:2}};
+  const PULL_ORDER=['swarm','bot','agent'],FLOOR=.9,ECC_MIN=.05,ECC_SPAN=.09,TILT=.3,OPEN=.75,OPEN_FLAT=.15,HALF_PI=Math.PI/2;
+  // Both renderers project a point at depth z with k = 1.2*height/(CAM - z) pixels per unit and draw a body of radius
+  // size*BODY_K/(CAM - z) pixels (satellites() reports size*k with k = 1.2/(.37(CAM - z))). The fit adds the busy pulse
+  // (+8 %) and EDGE pixels for the 2D hover ring (size + 3 px, 1 px wide) and the sampling.
+  const CAM=3.3,BODY_K=1.2/.37*1.08,EDGE=4,FIT_SAMPLES=72,FIT_STEPS=18;
+  /** Largest horizontal reach (pixels from the centre, body included) of a point at distance rho from the spin axis over every
+   *  spin angle t: the maximum of (A*rho*sin t + c)/(CAM - rho*cos t), at A*CAM*cos t - c*sin t = A*rho. */
+  function sideReach(rho,c,A){
+    const t=Math.min(Math.PI,Math.max(0,Math.acos(Math.min(1,A*rho/Math.hypot(A*CAM,c)))-Math.atan2(c,A*CAM)));
+    return (A*rho*Math.sin(t)+c)/(CAM-rho*Math.cos(t));
+  }
+  /** Step 1 of the fit for a canvas of w x h CSS pixels: each kind's pull, outermost first, written into `out`. */
+  function kindPull(w,h,out){
+    const A=1.2*h,hw=w/2-EDGE,hh=h/2-EDGE;
+    for(const kind of PULL_ORDER){
+      const K=KINDS[kind],c=K.size*BODY_K,top=K.radius+K.spread;
+      const fits=f=>{const apo=(FLOOR+f*(top-FLOOR))*(1+f*(ECC_MIN+ECC_SPAN));return CAM-apo>.05&&sideReach(apo,c,A)<=hw&&c/(CAM-apo)<=hh;};
+      let lo=1;if(!fits(1)){lo=0;let hi=1;for(let i=0;i<FIT_STEPS;i++){const m=(lo+hi)/2;if(fits(m))lo=m;else hi=m;}}
+      out[kind]=lo;
+    }
+    // An inner kind's widest axis stays inside the next kind's narrowest one: FLOOR + f_in(top_in - FLOOR) < FLOOR + f_out(bottom_out - FLOOR).
+    for(let i=1;i<PULL_ORDER.length;i++){const outer=KINDS[PULL_ORDER[i-1]],inner=KINDS[PULL_ORDER[i]];out[PULL_ORDER[i]]=Math.min(out[PULL_ORDER[i]],out[PULL_ORDER[i-1]]*(outer.radius-outer.spread-FLOOR)/(inner.radius+inner.spread-FLOOR)*.97);}
+    return out;
+  }
   const STATUSES=['paused','idle','running','error'],BOT_ID=/^[0-9a-f]{32}$/;
   const MAX_SATS=24,MAX_ARCS=12,SEGMENTS=16,TRAIL=10,MAX_LIGHTS=4,ERROR_MS=900,SUCCESS_MS=720,TIP_MS=1600,TAU=Math.PI*2;
   // A moon centre is hidden by the sphere once its depth drops below the limb, z < R*R/d (camera at d=3.3, sphere R=.83).
@@ -245,8 +284,13 @@ void main(){if(vBehind>.5&&distance(gl_FragCoord.xy,sphere.xy)<sphere.z)discard;
     const look={energy:.15,swirl:0,flow:1,rim:0,shimmer:.35,filaments:0,hue:0,pulse:0,ripple:0,red:0,flash:0,flashR:0,ampl:0,scale:1,intensity:0,limb:LIMB_Z};
     const goal={energy:.15,swirl:0,flow:1,rim:0,shimmer:.35,filaments:0,hue:0,ripple:0,ampl:0,intensity:0};
     const sources=new Map();
-    const sats=[];for(let i=0;i<MAX_SATS;i++)sats.push({id:'',kind:'agent',name:'',status:'idle',busy:false,group:'',size:4,radius:1.1,speed:.3,incl:0,tilt:0,phase:0,dir:1,ecc:0,peri:0,ci:1,si:0,ct:1,st:0,cp:1,sp:0,sq:1,glow:0,color:new Float32Array(3),x:0,y:0,z:0,sx:0,sy:0,k:1,nextArc:0,nextLink:0,trail:new Float32Array(TRAIL*2),trailLen:0,trailAt:0});
+    // a0/e0/incl/tilt are a moon's hashed orbit; radius/ecc/sq and the ci,si,ct,st rotations are that orbit fitted to the
+    // canvas (fitW x fitH) and are what orbit() flies.
+    const sats=[];for(let i=0;i<MAX_SATS;i++)sats.push({id:'',kind:'agent',name:'',status:'idle',busy:false,group:'',size:4,a0:1.13,e0:0,radius:1.13,speed:.3,incl:0,tilt:0,phase:0,dir:1,ecc:0,peri:0,ci:1,si:0,ct:1,st:0,cp:1,sp:0,sq:1,fitW:-1,fitH:-1,glow:0,color:new Float32Array(3),x:0,y:0,z:0,sx:0,sy:0,k:1,nextArc:0,nextLink:0,trail:new Float32Array(TRAIL*2),trailLen:0,trailAt:0});
     let satCount=0;
+    // The canvas the orbits are fitted to (CSS pixels; 0 until a renderer reports its size, which keeps the hashed orbits),
+    // each kind's pull for it, and a scratch point for the orbit math.
+    let viewW=0,viewH=0;const pull={swarm:1,bot:1,agent:1},PT=new Float64Array(3);
     // Painter's order: indexes into `sats`, back (smallest z) to front, re-sorted in place every orbit step.
     const order=new Uint8Array(MAX_SATS);
     // Arcs remember their ends' ids so a roster rebuild that moves a moon to another slot retires the bolt.
@@ -326,14 +370,55 @@ void main(){if(vBehind>.5&&distance(gl_FragCoord.xy,sphere.xy)<sphere.z)discard;
         for(let i=0;i<satCount;i++){
           const s=sats[i],e=s.ecc,m=(s.phase+clock*s.speed*s.dir)%TAU;
           let E=m+e*Math.sin(m);E-=(E-e*Math.sin(E)-m)/(1-e*Math.cos(E));
-          const ox=(Math.cos(E)-e)*s.radius,oy=Math.sin(E)*s.sq*s.radius;
-          let x=ox*s.cp-oy*s.sp,y=ox*s.sp+oy*s.cp,z=y*s.si;y*=s.ci;
-          const xx=x*s.ct-y*s.st;y=x*s.st+y*s.ct;x=xx;
-          s.x=x*c+z*sn;s.y=y;s.z=z*c-x*sn;x=s.x;z=s.z;
-          if(motion&&clock-s.trailAt>.05){s.trailAt=clock;const n=Math.min(TRAIL,s.trailLen+1);for(let k=n-1;k>0;k--){s.trail[k*2]=s.trail[(k-1)*2];s.trail[k*2+1]=s.trail[(k-1)*2+1];}s.trail[0]=x;s.trail[1]=y;s.trailLen=n;}
+          self.orbitPoint(s,E,PT);const x=PT[0],y=PT[1],z=PT[2];
+          s.x=x*c+z*sn;s.y=y;s.z=z*c-x*sn;
+          if(motion&&clock-s.trailAt>.05){s.trailAt=clock;const n=Math.min(TRAIL,s.trailLen+1);for(let k=n-1;k>0;k--){s.trail[k*2]=s.trail[(k-1)*2];s.trail[k*2+1]=s.trail[(k-1)*2+1];}s.trail[0]=s.x;s.trail[1]=s.y;s.trailLen=n;}
           self.colorFor(s);
         }
         self.sortDepth();
+      },
+      /** A moon's orbit point at eccentric anomaly E before the system spin (which turns it about the vertical axis), written
+       *  into out[0..2]. Shared by the frame and the fit, so the fit checks exactly the ellipse that is flown. */
+      orbitPoint(s,E,out){
+        const ox=(Math.cos(E)-s.ecc)*s.radius,oy=Math.sin(E)*s.sq*s.radius;
+        const x=ox*s.cp-oy*s.sp,w=ox*s.sp+oy*s.cp,y=w*s.ci;
+        out[0]=x*s.ct-y*s.st;out[1]=x*s.st+y*s.ct;out[2]=w*s.si;
+      },
+      /** The canvas size in CSS pixels, from each renderer's resize: a new size refits every moon (step 1 and 2 of the
+       *  layout above) and drops the trails, which still trace the old orbits. Never called per frame. */
+      view(w,h){
+        if(!(w>1&&h>1)||(w===viewW&&h===viewH))return false; // a hidden canvas reports 1 x 1: keep the last fit
+        viewW=w;viewH=h;kindPull(w,h,pull);
+        for(let i=0;i<satCount;i++){self.fit(sats[i]);sats[i].trailLen=0;}
+        return true;
+      },
+      /** Applies a candidate orbit: axis a, eccentricity e, and tilt and opening (beyond OPEN_FLAT) scaled by u. */
+      shape(s,a,e,u){
+        s.radius=a;s.ecc=e;s.sq=Math.sqrt(1-e*e);
+        const open=Math.abs(s.incl-HALF_PI),o=Math.min(open,OPEN_FLAT)+u*Math.max(0,open-OPEN_FLAT),incl=HALF_PI+(s.incl<HALF_PI?-o:o),tilt=s.tilt*u;
+        s.ci=Math.cos(incl);s.si=Math.sin(incl);s.ct=Math.cos(tilt);s.st=Math.sin(tilt);
+      },
+      /** True when every sampled point of the applied orbit keeps the moon's body (busy pulse and hover ring included) on the
+       *  canvas at every spin angle: vertically the worst angle brings the point nearest the camera (z = rho), horizontally
+       *  sideReach solves it. */
+      onCanvas(s){
+        const c=s.size*BODY_K,A=1.2*viewH,hw=viewW/2-EDGE,hh=viewH/2-EDGE;
+        for(let k=0;k<FIT_SAMPLES;k++){
+          self.orbitPoint(s,k*TAU/FIT_SAMPLES,PT);const rho=Math.sqrt(PT[0]*PT[0]+PT[2]*PT[2]),d=CAM-rho;
+          if(d<=.05||(A*Math.abs(PT[1])+c)/d>hh||sideReach(rho,c,A)>hw)return false;
+        }
+        return true;
+      },
+      /** Fits one moon's hashed orbit to the canvas: the kind's pull (step 1), then the least flattening that fits (step 2).
+       *  A canvas too small even for the flattest ring (never the sizes the page uses) pulls this moon further toward FLOOR. */
+      fit(s){
+        s.fitW=viewW;s.fitH=viewH;
+        const f=viewW>0?pull[s.kind]:1,a=FLOOR+f*(s.a0-FLOOR),e=f*s.e0;
+        self.shape(s,a,e,1);if(!viewW||self.onCanvas(s))return;
+        let lo=0,hi=1;self.shape(s,a,e,0);
+        if(self.onCanvas(s)){for(let i=0;i<FIT_STEPS;i++){const m=(lo+hi)/2;self.shape(s,a,e,m);if(self.onCanvas(s))lo=m;else hi=m;}self.shape(s,a,e,lo);return;}
+        for(let i=0;i<FIT_STEPS;i++){const m=(lo+hi)/2;self.shape(s,FLOOR+m*(a-FLOOR),m*e,0);if(self.onCanvas(s))lo=m;else hi=m;}
+        self.shape(s,FLOOR+lo*(a-FLOOR),lo*e,0);
       },
       /** Insertion sort of `order` by depth, back to front. Frame to frame the order barely changes, so this is ~O(n). */
       sortDepth(){
@@ -395,15 +480,17 @@ void main(){if(vBehind>.5&&distance(gl_FragCoord.xy,sphere.xy)<sphere.z)discard;
         all.sort((a,b)=>(b.busy-a.busy)||(KINDS[b.kind].weight-KINDS[a.kind].weight)||(a.id<b.id?-1:a.id>b.id?1:0));
         const n=Math.min(MAX_SATS,all.length);
         for(let i=0;i<n;i++){
-          const src=all[i],s=sats[i],K=KINDS[src.kind];
-          if(s.id!==src.id){
+          const src=all[i],s=sats[i],K=KINDS[src.kind],fresh=s.id!==src.id||s.kind!==src.kind;
+          if(fresh){
+            // The hashed orbit (see the orbit layout above KINDS): ring-like, opened up to OPEN and tilted up to TILT.
             s.trailLen=0;s.nextArc=0;s.nextLink=0;
             const h=hash(src.id),h2=hash(src.id+'/t'),h3=hash(src.id+'/p');
-            s.incl=.55+h*1.9;s.tilt=h2*TAU;s.phase=h3*TAU;s.dir=h2>.5?1:-1;s.ecc=.06+hash(src.id+'/e')*.09;s.peri=hash(src.id+'/q')*TAU;
-            s.ci=Math.cos(s.incl);s.si=Math.sin(s.incl);s.ct=Math.cos(s.tilt);s.st=Math.sin(s.tilt);s.cp=Math.cos(s.peri);s.sp=Math.sin(s.peri);s.sq=Math.sqrt(1-s.ecc*s.ecc);
+            s.incl=HALF_PI+(h-.5)*2*OPEN;s.tilt=(hash(src.id+'/w')-.5)*2*TILT;s.phase=h3*TAU;s.dir=h2>.5?1:-1;s.e0=ECC_MIN+hash(src.id+'/e')*ECC_SPAN;s.peri=hash(src.id+'/q')*TAU;
+            s.cp=Math.cos(s.peri);s.sp=Math.sin(s.peri);s.a0=K.radius+(hash(src.id+'/r')-.5)*2*K.spread;
           }
           s.id=src.id;s.kind=src.kind;s.name=src.name;s.status=src.status;s.busy=src.busy;s.group=src.group;
-          s.size=K.size;s.radius=K.radius+(hash(src.id+'/r')-.5)*.14;s.speed=K.speed*(.85+hash(src.id+'/s')*.3);
+          s.size=K.size;s.speed=K.speed*(.85+hash(src.id+'/s')*.3);
+          if(fresh||s.fitW!==viewW||s.fitH!==viewH)self.fit(s);
         }
         satCount=n;
         // The hovered moon may now sit in another slot (or be gone); follow it by id.
@@ -513,6 +600,8 @@ void main(){if(vBehind>.5&&distance(gl_FragCoord.xy,sphere.xy)<sphere.z)discard;
     let tip=null,tipName=null,tipMeta=null,pointerType='mouse',tipTimer=0,filledIndex=-1,filledVersion=-1,left=NaN,top=NaN;
     // The mouse position over the canvas (CSS pixels), NaN while the pointer is elsewhere; re-tested every animated frame.
     let mouseX=NaN,mouseY=NaN;
+    // The canvas states its hover from the start (the stylesheet shows the pointer cursor for data-orb-hover="true").
+    try{if(canvas.dataset)canvas.dataset.orbHover='false';}catch{}
     // The tag and its two lines are built once; a hover change only rewrites their text.
     function ensureTip(){
       if(tip||!canvas.parentNode||typeof document.createElement!=='function')return;
@@ -662,7 +751,7 @@ void main(){if(vBehind>.5&&distance(gl_FragCoord.xy,sphere.xy)<sphere.z)discard;
       if(!motion)links(true);moons(true);if(motion)bolts();
       ctx.globalCompositeOperation='source-over';
     }
-    function resize(){const r=canvas.getBoundingClientRect();width=Math.max(1,r.width);height=Math.max(1,r.height);dpr=Math.min(devicePixelRatio||1,quality==='high'?2:quality==='quiet'?1:1.5);canvas.width=Math.round(width*dpr);canvas.height=Math.round(height*dpr);scene.step(0,motion);draw();}
+    function resize(){const r=canvas.getBoundingClientRect();width=Math.max(1,r.width);height=Math.max(1,r.height);dpr=Math.min(devicePixelRatio||1,quality==='high'?2:quality==='quiet'?1:1.5);canvas.width=Math.round(width*dpr);canvas.height=Math.round(height*dpr);scene.view(width,height);scene.step(0,motion);draw();}
     function tick(stamp){frame=0;if(dead||!motion||document.hidden)return;const dt=last?Math.min((stamp-last)/1000,.06):0;last=stamp;pointer[0]+=(target[0]-pointer[0])*.035;pointer[1]+=(target[1]-pointer[1])*.035;scene.step(dt,true);draw();bridge.refresh();frame=requestAnimationFrame(tick);}
     function schedule(){if(frame)cancelAnimationFrame(frame);frame=0;last=0;if(motion&&!dead&&!document.hidden)frame=requestAnimationFrame(tick);else if(!dead){scene.step(0,false);draw();}}
     function move(e){const r=canvas.getBoundingClientRect();target[0]=(e.clientX-r.left)/r.width*2-1;target[1]=1-(e.clientY-r.top)/r.height*2;if(!motion){pointer[0]=target[0];pointer[1]=target[1];draw();}}
@@ -708,7 +797,7 @@ void main(){if(vBehind>.5&&distance(gl_FragCoord.xy,sphere.xy)<sphere.z)discard;
       cloud=buffer(data);count=data.length/5;
     }
     function init(){locations.clear();core=program(VERTEX,FRAGMENT);particles=program(PARTICLE_VERTEX,PARTICLE_FRAGMENT);moonProgram=program(MOON_VERTEX,MOON_FRAGMENT);lineProgram=program(LINE_VERTEX,LINE_FRAGMENT);quad=buffer([-1,-1,1,-1,-1,1,-1,1,1,-1,1,1]);moonBuffer=buffer(moonData,gl.DYNAMIC_DRAW);lineBuffer=buffer(lineData,gl.DYNAMIC_DRAW);makeCloud();ready=true;resize();}
-    function resize(){const rect=canvas.getBoundingClientRect();width=Math.max(1,rect.width);height=Math.max(1,rect.height);const cap=quality==='high'?2:quality==='quiet'?.85:adaptiveCap;ratio=Math.min(devicePixelRatio||1,cap);canvas.width=Math.round(width*ratio);canvas.height=Math.round(height*ratio);if(!lost&&!dead){scene.step(0,motion);draw();}}
+    function resize(){const rect=canvas.getBoundingClientRect();width=Math.max(1,rect.width);height=Math.max(1,rect.height);const cap=quality==='high'?2:quality==='quiet'?.85:adaptiveCap;ratio=Math.min(devicePixelRatio||1,cap);canvas.width=Math.round(width*ratio);canvas.height=Math.round(height*ratio);scene.view(width,height);if(!lost&&!dead){scene.step(0,motion);draw();}}
     // Uniform locations, looked up once per program and name (each program's map is made when the program is linked).
     function location(prog,name){const map=locations.get(prog);let loc=map.get(name);if(loc===undefined){loc=gl.getUniformLocation(prog,name);map.set(name,loc);}return loc;}
     // Fixed-arity uniform setters: no rest parameters or spreads, so setting a uniform allocates nothing.

@@ -69,7 +69,10 @@ function fakeGL() {
   };
   return { gl, uploads, draws, uniforms, enabled, initial };
 }
-interface Opts { webgl?: boolean; twoD?: boolean; reduced?: boolean; gl?: ReturnType<typeof fakeGL> }
+interface Opts { webgl?: boolean; twoD?: boolean; reduced?: boolean; gl?: ReturnType<typeof fakeGL>; size?: [number, number] }
+// orb.js runs as is; this prologue only binds the context's own Math lexically. Without it every Math call inside the vm
+// context goes through the contextified global's property interceptor, which makes a 2D frame about 15 times slower.
+const LEXICAL_MATH = 'const Math=globalThis.Math;';
 interface Moon { id: string; kind: string; name: string; status: string; busy: boolean; size: number; color: number[]; x: number; y: number; z: number; sx: number; sy: number; radius: number; front: boolean; hidden: boolean }
 interface OrbApi { setState(d: unknown): boolean; getState(): Record<string, unknown> & { mode: string; hover: { id: string; name: string; kind: string } | null; sphere: { x: number; y: number; r: number }; claims: string[]; pulse: number; ripple: number; amplitude: number; intensity: number; transient: string | null; arcs: number; satellites: number; energy: number; swirl: number; flow: number; filaments: number; hue: number; ampl: number };
   pulse(s?: number): number; setSatellites(d: unknown): boolean; satellites(): Moon[];
@@ -82,7 +85,8 @@ function setup(opts: Opts = {}) {
   const stage = element('div'), canvas = element('canvas') as El & { width: number; height: number; getBoundingClientRect(): { left: number; top: number; width: number; height: number }; getContext(kind: string): unknown };
   stage.append(canvas); canvas.width = 0; canvas.height = 0;
   const ctx = context2d();
-  canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width: 640, height: 440 });
+  let [width, height] = opts.size ?? [640, 440];
+  canvas.getBoundingClientRect = () => ({ left: 0, top: 0, width, height });
   canvas.getContext = (kind: string) => kind === 'webgl' ? (opts.gl ? opts.gl.gl : opts.webgl ? {} : null) : kind === '2d' ? (opts.twoD === false ? null : ctx) : null;
   const rafs = new Map<number, (t: number) => void>(); let rafId = 0, cancelled = 0;
   const media = { matches: opts.reduced === true, handlers: [] as Fn[], addEventListener(_n: string, fn: Fn) { media.handlers.push(fn); }, removeEventListener() { /* noop */ } };
@@ -93,13 +97,13 @@ function setup(opts: Opts = {}) {
   };
   const winFire = (type: string, detail?: unknown) => { for (const fn of winHandlers.get(type) ?? []) fn(new CustomEvent(type, { detail })); };
   const winListeners = (type: string) => winHandlers.get(type)?.size ?? 0;
-  const fallback = vi.fn(), motionChange = vi.fn();
+  const fallback = vi.fn(), motionChange = vi.fn(), observers: (() => void)[] = [];
   const context = {
-    window: win, document: doc, matchMedia: () => media, ResizeObserver: class { observe() { /* noop */ } disconnect() { /* noop */ } },
+    window: win, document: doc, matchMedia: () => media, ResizeObserver: class { constructor(fn: () => void) { observers.push(fn); } observe() { /* noop */ } disconnect() { /* noop */ } },
     requestAnimationFrame: (fn: (t: number) => void) => { rafs.set(++rafId, fn); return rafId; }, cancelAnimationFrame: (id: number) => { if (rafs.delete(id)) cancelled++; },
     devicePixelRatio: 1, setTimeout, clearTimeout, Date, CustomEvent, console: { warn: vi.fn(), debug: vi.fn() },
   };
-  runInNewContext(source, context);
+  runInNewContext(LEXICAL_MATH + source, context);
   const mount = (win.EchoPrimeOrb as { mount(c: unknown, o: unknown): Mounted }).mount;
   const orb = mount(canvas, { onFallback: fallback, onMotionChange: motionChange });
   if (opts.twoD !== false && !opts.gl) orb.setQuality('quiet'); // fewer points: the fake context records every call, so frames stay cheap
@@ -109,7 +113,9 @@ function setup(opts: Opts = {}) {
   const api = () => win.EchoOrb as OrbApi | undefined;
   const dispatch = (type: string, detail: unknown) => doc.dispatchEvent(new CustomEvent(type, { detail }));
   const sat = (id: string, kind: string, over: Record<string, unknown> = {}) => ({ id, kind, name: id.toUpperCase(), status: 'idle', busy: false, ...over });
-  return { doc, stage, canvas, ctx, orb, api, frame, dispatch, sat, rafs, media, fallback, motionChange, cancelled: () => cancelled, win, winFire, winListeners };
+  /** The stage changes size: the canvas reports w x h and the ResizeObserver fires, as a browser does. */
+  const resize = (w: number, h: number) => { width = w; height = h; for (const fn of observers) fn(); };
+  return { doc, stage, canvas, ctx, orb, api, frame, dispatch, sat, rafs, media, fallback, motionChange, cancelled: () => cancelled, win, winFire, winListeners, resize };
 }
 const lum = (c: number[]) => c[0] + c[1] + c[2];
 /** Steps frames until moon `id` orbits in front of the sphere (behind it, the sphere may hide it), then returns it. */
@@ -785,6 +791,79 @@ describe('WebGL renderer (stub context)', () => {
   });
 });
 
+describe('orbits fit the canvas: every moon stays on it, outside the sphere, agents inside bots inside swarm', () => {
+  // The stage sizes styles.css produces: the desktop default (640 x 440), the max-width:430px phone (440 x 350, and 390 x
+  // 350 on a 390-wide phone where max-width:115% wins), the tall desktop (500 high) and wide stages at that height.
+  const SIZES: [number, number][] = [[640, 440], [440, 350], [390, 350], [1000, 500], [1600, 500]];
+  // 1500 frames of 60 ms are 90 s of orbit: the slowest moon flies more than one full orbit, the system spin turns 2.2 rad.
+  const FRAMES = 1500;
+  const renderers: [string, boolean][] = [['2D', false], ['WebGL', true]];
+  type Sat = ReturnType<ReturnType<typeof setup>['sat']>;
+  const rosters: Record<string, (s: ReturnType<typeof setup>) => Sat[]> = {
+    '8 bot, 4 swarm, 12 agent': s => [...Array.from({ length: 8 }, (_, i) => s.sat('bot:fit' + i, 'bot')), ...Array.from({ length: 4 }, (_, i) => s.sat('swarm:fit' + i, 'swarm')), ...Array.from({ length: 12 }, (_, i) => s.sat('agent:fit' + i, 'agent'))],
+    '24 swarm': s => Array.from({ length: 24 }, (_, i) => s.sat('swarm:all' + i, 'swarm')),
+  };
+  interface Flight { off: Record<string, number>; inside: number; covered: number; peri: number; axes: Record<string, number[]> }
+  /** Flies one roster for FRAMES frames on a w x h canvas and records, per kind, the frames in which a moon's body (the
+   *  radius satellites() reports) left the canvas; moons inside the sphere; front moons over the disc but behind its
+   *  surface; the lowest periapsis; and each moon's semi-major axis ((nearest + farthest) / 2). */
+  function fly(webgl: boolean, roster: string, w: number, h: number): Flight {
+    const s = setup({ size: [w, h], ...(webgl ? { gl: fakeGL() } : {}) }); const api = s.api()!;
+    s.dispatch('echo-orb-satellites', { source: 'fit', satellites: rosters[roster](s) });
+    const off: Record<string, number> = {}, near = new Map<string, [string, number, number]>(); let inside = 0, covered = 0, peri = Infinity;
+    for (let f = 0; f < FRAMES; f++) {
+      s.frame(60);
+      // The sphere's world radius as it breathes: its disc is .312 (2D) / .3152 (WebGL clip) of the height per unit of scale.
+      const sphere = api.getState().sphere, R = .83 * sphere.r / ((webgl ? .3152 : .312) * h), kinds = new Set<string>();
+      for (const m of api.satellites()) {
+        if (m.sx - m.radius < 0 || m.sx + m.radius > w || m.sy - m.radius < 0 || m.sy + m.radius > h) kinds.add(m.kind);
+        const r = Math.hypot(m.x, m.y, m.z); if (r <= R) inside++; peri = Math.min(peri, r);
+        const seen = near.get(m.id) ?? [m.kind, Infinity, 0]; seen[1] = Math.min(seen[1], r); seen[2] = Math.max(seen[2], r); near.set(m.id, seen);
+        // A front moon over the disc is painted over the sphere, so it must lie before the sphere's surface on its view ray
+        // from the camera (0, 0, 3.3): the ray's first hit of the sphere comes after the moon (t > 1), or there is none.
+        if (m.front && Math.hypot(m.sx - sphere.x, m.sy - sphere.y) < sphere.r) {
+          const dz = m.z - 3.3, a = m.x * m.x + m.y * m.y + dz * dz, b = 2 * 3.3 * dz, c = 3.3 * 3.3 - R * R, disc = b * b - 4 * a * c;
+          if (disc >= 0 && (-b - Math.sqrt(disc)) / (2 * a) < 1) covered++;
+        }
+      }
+      for (const k of kinds) off[k] = (off[k] ?? 0) + 1;
+    }
+    const axes: Record<string, number[]> = {}; for (const [kind, lo, hi] of near.values()) (axes[kind] ??= []).push((lo + hi) / 2);
+    s.orb.destroy(); return { off, inside, covered, peri, axes };
+  }
+  // Both tests read the same flights; each is flown once, by whichever test asks first.
+  const flights = new Map<string, Flight>();
+  const flight = (webgl: boolean, roster: string, w: number, h: number) => { const key = [webgl, roster, w, h].join('|'); if (!flights.has(key)) flights.set(key, fly(webgl, roster, w, h)); return flights.get(key)!; };
+  const cases = renderers.flatMap(([name, webgl]) => Object.keys(rosters).map(roster => [name, roster, webgl] as [string, string, boolean]));
+  it.each(cases)('%s, %s: no moon leaves the canvas in any frame at any stage size, and the kinds keep their order', (_name, roster, webgl) => {
+    for (const [w, h] of SIZES) {
+      const { off, axes } = flight(webgl, roster, w, h);
+      expect(off, `frames with a moon off a ${w} x ${h} canvas, by kind`).toEqual({});
+      const lo = (k: string) => Math.min(...axes[k]), hi = (k: string) => Math.max(...axes[k]);
+      if (axes.agent) { expect(hi('agent'), `${w} x ${h}: agents inside bots`).toBeLessThan(lo('bot')); expect(hi('bot'), `${w} x ${h}: bots inside swarm`).toBeLessThan(lo('swarm')); }
+    }
+  }, 120_000);
+  it.each(cases)('%s, %s: periapsis stays outside the sphere, and a front moon over the disc is always before its surface', (_name, roster, webgl) => {
+    for (const [w, h] of SIZES) {
+      const { inside, covered, peri } = flight(webgl, roster, w, h);
+      expect(inside, `${w} x ${h}: moon positions inside the sphere`).toBe(0); expect(covered, `${w} x ${h}: front moons behind the sphere's face`).toBe(0);
+      expect(peri, `${w} x ${h}: lowest periapsis (the sphere is .83, and breathes up to ~8 %)`).toBeGreaterThanOrEqual(.9);
+    }
+  }, 120_000);
+  it.each(renderers)('%s: refits on resize, so moons fitted to a wide stage stay on it when it shrinks to a phone', (_name, webgl) => {
+    const s = setup({ size: [1600, 500], ...(webgl ? { gl: fakeGL() } : {}) }); const api = s.api()!;
+    s.dispatch('echo-orb-satellites', { source: 'fit', satellites: rosters['24 swarm'](s) });
+    const reach = () => Math.max(...api.satellites().map(m => Math.hypot(m.x, m.y, m.z)));
+    let wide = 0; for (let f = 0; f < 300; f++) { s.frame(60); wide = Math.max(wide, reach()); }
+    s.resize(390, 350); let narrow = 0, off = 0;
+    for (let f = 0; f < 600; f++) {
+      s.frame(60); narrow = Math.max(narrow, reach());
+      if (api.satellites().some(m => m.sx - m.radius < 0 || m.sx + m.radius > 390 || m.sy - m.radius < 0 || m.sy + m.radius > 350)) off++;
+    }
+    expect(s.canvas.width).toBe(390); expect(off).toBe(0); expect(narrow).toBeLessThan(wide - .2);
+  }, 30_000);
+});
+
 describe('the animated frame path allocates nothing', () => {
   // A syntax guard over the per-frame functions (scene step, WebGL frame, name-tag placement). It cannot see what an
   // engine allocates internally, but it fails on every construct that allocates in JavaScript: new, spreads and rest
@@ -800,7 +879,7 @@ describe('the animated frame path allocates nothing', () => {
     [/\.(map|filter|slice|subarray|concat|join|split|push|splice|from|keys|values|entries)\(/, 'copying array method'], [/`/, 'template literal'],
     [/[=(,:?]\s*\[/, 'array literal'], [/[=(,:?]\s*\{|return\s*\{/, 'object literal'], [/'\s*\+|\+\s*'/, 'string concatenation']];
   const frameFunctions: [string, number][] = [
-    ...['step(dt,motion){', 'orbit(motion){', 'sortDepth(){', 'colorFor(s){', 'busyCount(){', 'activeArcs(){', 'spawn(a,b,t){', 'arcStep(t){', 'lightStep(){', 'makeBolt(x0,y0,x1,y1,seed,t){', 'hidden(i){', 'hit(px,py,maxDistance){'].map(sig => [sig, createScene] as [string, number]),
+    ...['step(dt,motion){', 'orbit(motion){', 'orbitPoint(s,E,out){', 'sortDepth(){', 'colorFor(s){', 'busyCount(){', 'activeArcs(){', 'spawn(a,b,t){', 'arcStep(t){', 'lightStep(){', 'makeBolt(x0,y0,x1,y1,seed,t){', 'hidden(i){', 'hit(px,py,maxDistance){'].map(sig => [sig, createScene] as [string, number]),
     ...['function draw(){', 'function fillMoons(){', 'function fillLines(){', 'function vertex(px,py,r,g,b,a,behind){', 'function anchor(s){', 'function satScreen(){', 'function project(x,y,z){', 'function tick(stamp){',
       'function location(prog,name){', 'function u1(prog,name,a){', 'function u2(prog,name,a,b){', 'function u3(prog,name,a,b,c){', 'function u4(prog,name,a,b,c,d){', 'function u4v(prog,name,v){', 'function colors(prog){', 'function off(loc){',
       'function attrib(prog,name,size,stride,offset){'].map(sig => [sig, mountGL] as [string, number]),

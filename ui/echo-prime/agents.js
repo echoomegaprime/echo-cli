@@ -12,6 +12,9 @@
  const POLL_MS=3000,TICK_MS=1000,GRACE_S=120,MAX_FAILURES=5,MAX_CHARS=12000,COOLDOWN_MS=5000,STORAGE_KEY='echo-prime-adk-v1';
  const status=$('#agents-status'),list=$('#agents-list'),form=$('#agents-form'),select=$('#agents-agent'),prompt=$('#agents-prompt'),calls=$('#agents-calls'),cost=$('#agents-cost'),wall=$('#agents-wall'),submit=$('#agents-submit'),runView=$('#agents-run'),runsList=$('#agents-runs');
  let generation=0,controller=null,health=null,agents=[],run=null,busy=false,failedAt=-Infinity,remembered=null;
+ // The definitions the orb shows: the last list Echo ADK returned. A reload keeps it until its fetch answers, so Refresh,
+ // reopening the view or a moon click never blanks the moons (which would reset their orbits, trails and arcs).
+ let orbAgents=[];
  try{const stored=JSON.parse(localStorage.getItem(STORAGE_KEY)||'null');if(stored&&typeof stored==='object'&&!Array.isArray(stored))remembered={agent:typeof stored.agent==='string'?stored.agent.slice(0,64):'',prompt:typeof stored.prompt==='string'?stored.prompt.slice(0,MAX_CHARS):''};}catch{}
  const obj=v=>v&&typeof v==='object'&&!Array.isArray(v)?v:{};
  const num=v=>typeof v==='number'&&Number.isFinite(v)?v:null;
@@ -38,7 +41,15 @@
  // watched run puts the orb in deep thought. Silent where no event can be dispatched; nothing is fetched for the orb.
  function orbEvent(name,detail){try{if(typeof document.dispatchEvent==='function'&&typeof CustomEvent==='function')document.dispatchEvent(new CustomEvent(name,{detail}));}catch{}}
  function orb(mode){orbEvent('echo-orb-state',{mode,source:'agents'});}
- function publishSatellites(){orbEvent('echo-orb-satellites',{source:'agents',satellites:agents.slice(0,24).map(a=>{const busy=!!run&&run.agent===a.name;return {id:'agent:'+a.name,kind:'agent',name:String(a.name),status:busy?'running':'idle',busy};})});}
+ // The orb keeps 24 moons across every publisher, busy first; the watched agent goes first here, so it orbits wherever it is listed.
+ function publishSatellites(){
+  const moons=orbAgents.map(a=>{const busy=!!run&&run.agent===a.name;return {id:'agent:'+a.name,kind:'agent',name:String(a.name),status:busy?'running':'idle',busy};});
+  moons.sort((a,b)=>Number(b.busy)-Number(a.busy));
+  orbEvent('echo-orb-satellites',{source:'agents',satellites:moons.slice(0,24)});
+ }
+ /** Publishes what a load settled: the definitions Echo ADK listed, or none when it answered that there are none to show
+  *  (signed out, member, Echo ADK off or unavailable). A failed or superseded load publishes nothing. */
+ function showAgents(list){orbAgents=list;publishSatellites();}
  async function api(path,body,signal,method){
   const sent={'x-prime-request':'1',...await headers(),...(body!==undefined?{'content-type':'application/json'}:{})},owner=admission()==='owner';
   const response=await fetch('/api/prime/adk/'+path,{method:method||(body!==undefined?'POST':'GET'),credentials:'same-origin',headers:sent,...(body!==undefined?{body:JSON.stringify(body)}:{}),signal});
@@ -81,7 +92,6 @@
   const wanted=remembered&&agents.some(a=>a.name===remembered.agent)?remembered.agent:agents.length?String(agents[0].name):'';
   select.value=wanted;
   if(remembered&&remembered.prompt&&!prompt.value)prompt.value=remembered.prompt;
-  publishSatellites();
  }
  function renderRuns(rows){
   const items=Array.isArray(rows)?rows.filter(r=>r&&typeof r==='object'&&typeof r.runId==='string'):[];
@@ -101,15 +111,15 @@
   if(mine!==generation)return;
   const access=admission();
   agents=[];renderAgents();runsList.replaceChildren();lock(true);
-  if(access==='signin'){status.textContent='Sign in to use Agents. Nothing was requested from Echo ADK.';debug('adk_health','skipped',{reason:'signin'});return;}
-  if(access==='member'){status.textContent='Agents are available to the primary owner only. Nothing was requested from Echo ADK.';debug('adk_health','skipped',{reason:'owner_only'});return;}
+  if(access==='signin'){showAgents([]);status.textContent='Sign in to use Agents. Nothing was requested from Echo ADK.';debug('adk_health','skipped',{reason:'signin'});return;}
+  if(access==='member'){showAgents([]);status.textContent='Agents are available to the primary owner only. Nothing was requested from Echo ADK.';debug('adk_health','skipped',{reason:'owner_only'});return;}
   if(Date.now()-failedAt<COOLDOWN_MS){status.textContent='Echo ADK status check failed a moment ago; try Refresh in a few seconds.';debug('adk_health','cooldown');return;}
   status.textContent='Checking Echo ADK…';
   try{
    health=await api('health',undefined,controller.signal);
    if(mine!==generation)return;
-   if(health.configured!==true){status.textContent=typeof health.reason==='string'?health.reason:'Echo ADK is off: add an `adk` section to the Prime config';debug('adk_health','off');return;}
-   if(health.available!==true){status.textContent='Echo ADK is unavailable: '+(typeof health.reason==='string'?health.reason:'no reason given')+'. Nothing was started.';debug('adk_health','unavailable');return;}
+   if(health.configured!==true){showAgents([]);status.textContent=typeof health.reason==='string'?health.reason:'Echo ADK is off: add an `adk` section to the Prime config';debug('adk_health','off');return;}
+   if(health.available!==true){showAgents([]);status.textContent='Echo ADK is unavailable: '+(typeof health.reason==='string'?health.reason:'no reason given')+'. Nothing was started.';debug('adk_health','unavailable');return;}
    const b=obj(health.defaultBudget);
    if(num(b.max_calls)!==null&&!calls.value)calls.value=String(b.max_calls);
    if(num(b.max_cost_usd)!==null&&!cost.value)cost.value=String(b.max_cost_usd);
@@ -117,7 +127,7 @@
    const [listed,recent]=await Promise.all([api('agents',undefined,controller.signal),api('runs?limit=20',undefined,controller.signal).catch(e=>({runs:[],error:e instanceof Error?e.message:'runs unavailable'}))]);
    if(mine!==generation)return;
    agents=Array.isArray(listed.agents)?listed.agents.filter(a=>a&&typeof a==='object'&&typeof a.name==='string'):[];
-   renderAgents();renderRuns(recent.runs);
+   renderAgents();showAgents(agents);renderRuns(recent.runs);
    const svc=obj(health.service);
    status.textContent='Echo ADK '+(typeof svc.version==='string'?svc.version:'(version not reported)')+' · '+agents.length+' agent'+(agents.length===1?'':'s')+' · '+(num(svc.runsActive)??0)+' active run'+(num(svc.runsActive)===1?'':'s')+' · default '+budgetText(health.defaultBudget)+(recent.error?' · recent runs unavailable ('+recent.error+')':'');
    lock(false);debug('adk_health','returned',{agents:agents.length});
@@ -348,7 +358,7 @@
  function clearPrivate(){
   generation++;controller?.abort();controller=null;
   if(run)stopWatching(run,true);
-  agents=[];health=null;list.replaceChildren();select.replaceChildren();runsList.replaceChildren();runView.replaceChildren();runView.hidden=true;prompt.value='';calls.value='';cost.value='';wall.value='';
+  agents=[];orbAgents=[];health=null;list.replaceChildren();select.replaceChildren();runsList.replaceChildren();runView.replaceChildren();runView.hidden=true;prompt.value='';calls.value='';cost.value='';wall.value='';
   status.textContent='Agents have not been checked.';lock(true);
   if(panel.open)panel.close();
   publishSatellites();
