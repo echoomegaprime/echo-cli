@@ -26,7 +26,11 @@ user's own picture — a bare image noun with edit verbs still means edit, but e
 image noun do not. `STYLE_RULES` tag zero or more style cues (photoreal, illustration, product, portrait,
 logo, anime, cinematic, 3d, pixel, watercolor, sketch, typography) and count once for `image` when no medium
 noun was named. `ASPECT_RULES` and the `duration()` helper (number words included, 1–600 s) read aspect ratio
-and clip/track length. The highest-scoring kind wins ties by `MEDIA_KINDS` order; confidence is
+and clip/track length. Video is scored last: once another medium has been named (any signal other than the generic
+scene phrase), a video noun that only says what the thing is *for* ("an orchestral soundtrack for a trailer",
+"sound effects for a video game") or that modifies an audio noun ("epic trailer music") is removed before the
+video rules run (`FOR_PICTURE`), so those prompts classify as music / sfx instead of tying with video; "a trailer
+with an epic orchestral soundtrack" still classifies as video. The highest-scoring kind wins ties by `MEDIA_KINDS` order; confidence is
 `0.55 + 0.25 * min(top score, 1.5) − 0.2 * second-best score`, clamped to `[0.35, 0.98]`. A mode tab the user
 already chose (`hint`) wins outright at confidence 1 and is never second-guessed (`source: 'hint'`).
 
@@ -48,13 +52,31 @@ was attempted, so the caller can show it was consulted even when its answer was 
 
 ## 3. Ranking
 
-`describeCandidate` turns one capability record into a `Candidate`: it runs the id + description through
-`EXCLUDE` first (deprecated/retired markers, test-debug entries, `.stt$`/transcribe/translate, dubbing,
-voice-changer/voice-design, batch/stream/status/backends plumbing, bare `echo.llm.*` outside the
-together/openrouter/fireworks namespaces, and more — anything matched here is not a generation capability at
-all and never appears anywhere in a route result). A surviving id is looked up in `RANKING` (first match
-wins, so specific entries precede family entries); unlisted ids fall back to `KIND_HINT` regexes to guess a
-kind, or are dropped if none match. `costOf` reads the ranking's own cost tier, else the capability's
+`describeCandidate` turns one capability record into a `Candidate`. Two separate mechanisms decide what is not
+ranked, and only the first one drops anything:
+
+1. **`NOT_A_GENERATOR` — operations, judged on the capability id only.** Job polls and status reads
+   (`job_status`, `status`, `backends`, `artifact`), listings (`voices`), retrieval (`video_retrieve`),
+   transcription and translation (`stt`, `speech_to_text`, `transcribe`, `translate`), transforms of existing
+   audio (`stems`, `upload`, `isolate`/`isolation`, `dub`/`dubbing`, `infill`, `voice_changer`, `voice_design`,
+   `video_to_music`), music fine-tune management (`finetune`), persona configuration (`personas`,
+   `configure_persona`), streaming/turn plumbing (`synthesize_stream`, `progressive`, `turn_state`,
+   `interrupt`, `compose_plan`), batch wrappers (`batch`), `forgeplugin` internals and the OpenRouter audio
+   *chat* models (`openai-gpt-audio`). Each word must be a whole id token (tokens are separated by `.`, `_` or
+   `-`). The description is never tested here: registry descriptions mention these words in passing
+   (`echo.media.image_generate` says "poll echo.media.job_status", the OpenRouter image models list
+   "system?" among their parameters, `echo.google.vertex.imagen_edit` mentions "MinIO upload"), and testing them
+   dropped real generators. Such an id is not a generation capability at all and is not part of a route result;
+   no `RANKING` row names one (checked against the shipped catalog in `tests/prime-media.test.ts`).
+2. **Lifecycle markers — listed under `excluded`, never dropped.** A generator whose registry description
+   carries the registry's uppercase `DEPRECATED` or `RETIRED` marker, or "Duplicate Test", or whose id ends in
+   `-test-debug`, is described like any other candidate and moved to `excluded` with the marker as its reason
+   (for example "marked RETIRED in the registry (use echo.voice.speak / echo.voice.elevenlabs.tts instead)").
+   Lowercase prose such as "replaces the deprecated alias" is not a marker.
+
+A remaining id is looked up in `RANKING` (first match wins, so specific entries precede family entries);
+unlisted ids fall back to `KIND_HINT` regexes, tested against the id and the description separately (so the `$`
+anchors bind to the end of the id), or are not generators if none match. `costOf` reads the ranking's own cost tier, else the capability's
 description (`$0`/on-prem → free, "COSTS QUOTA" → quota, "COSTS $" → paid-low, `max`/`ultra`/`master`/`pro` in
 the id → paid-mid, else paid-low).
 
@@ -71,9 +93,11 @@ score = fit × HEALTH_WEIGHT[health] × COST_WEIGHT[cost] × (quality / 10) × (
 unregistered: 0}`. Ties break on health weight, then cost weight, then quality, then capability id
 (`a.id.localeCompare(b.id)`), all descending except the id compare.
 
-A candidate is moved to `excluded` (never picked, never offered as an alternative) when:
+A candidate is moved to `excluded` (never picked, never offered as an alternative, but always listed with its
+reason — the route returns every excluded generator, uncapped) when:
 
 - it is not registered (`c.registered === false`);
+- it carries a lifecycle marker (deprecated, retired, duplicate test, test-debug; see above);
 - its health maps to a zero `HEALTH_WEIGHT` (red, orphaned, unregistered — "the Studio refuses it at review");
 - it is `echo.media.video_generate` — owner-disabled on TEMPER for RAM budget; this client never passes
   `force_video`;
@@ -110,11 +134,23 @@ Tokens are distinctive on purpose: the broker refuses an answer the catalog mark
 refuses any answer over 100 rows. Each row's id must match `^echo\.[A-Za-z0-9_.-]{1,180}$`. Live rows are
 overlaid on the snapshot (`mergeCatalog`): the live registration, health, description and scope win; the
 snapshot's Studio medium (`category`) is kept, and a tool only the live catalog lists is filed under the
-classified kind's medium. Ids the live catalog listed rank with `healthSource: 'catalog'` and
-`catalogSource: 'live'`; ids only the snapshot lists say "listed only in the shipped snapshot" in their reason.
-An answered kind is cached 60 s; a search that throws, times out or over-answers is named in `catalog.failed`
-and never retried silently. The hub keeps live rows in its own catalog, as `/api/search` does (the snapshot's
-medium is preserved there too), so `/api/status` shows them to the Studio.
+classified kind's medium. Ids the live catalog listed rank with `catalogSource: 'live'` and, when their live row
+carried a health value, `healthSource: 'catalog'`; ids only the snapshot lists say "listed only in the shipped
+snapshot" in their reason. An answered kind is cached 60 s; a search that throws, times out or over-answers is
+named in `catalog.failed` and never retried silently. The hub keeps live rows in its own catalog, as
+`/api/search` does (the snapshot's medium is preserved there too), so `/api/status` shows them to the Studio.
+
+What production's live rows carry: the broker is `sdkBroker` over the SDK stdio bridge
+(`src/bridge/sdk-stdio.ts`, see `PRIME_SDK_BRIDGE.md`). The bridge's `mapSearch` turns a gate `echo.caps.search`
+row into `{registered, health_status, …}`: a row without `registered` becomes `registered: true` (a listed row is
+a registry row; `tests/prime-sdk-bridge.test.ts` checks it), and a row without health becomes
+`health_status: 'unknown'`. So a live row is never excluded as "not registered" merely because the gate omitted
+the field, and an explicit `registered: false` is shown under `excluded`. A live row whose health is `unknown`
+does **not** erase a known snapshot health: `mergeCatalog` (and the hub's own catalog update) keep the snapshot's
+value, and the reason says so ("health amber (snapshot; the live catalog row carries no health)",
+`healthSource: 'snapshot'`). The top-3 probe below then reads the exact record, whose `health_status` comes from
+`echo.caps.detail`. `tests/prime-media.test.ts` ("live catalog through the real sdkBroker") runs this chain with
+the real `sdkBroker` over a connection that returns the bridge's exact row shape.
 
 Every route result says which catalog it ranked (`catalog.source`):
 
@@ -130,8 +166,9 @@ Every route result says which catalog it ranked (`catalog.source`):
 the pick and the alternatives, so the browser Studio can select a tool only the live catalog lists.
 
 `MediaRouter.route` probes the **live health of the top 3 ranked candidates** (`probeCount`, default 3)
-before finalising the order: it reads each id through the same SDK `read` that `PrimeHub.prepare` trusts, race
-d against a 5 s timeout (`probeTimeoutMs`), cached 60 s per id (`PROBE_CACHE_MS`) so repeated routes in the same
+before finalising the order: it reads each id through the same SDK `read` that `PrimeHub.prepare` trusts, bounded
+by a 5 s timeout (`probeTimeoutMs`, through the same `within()` helper the searches use, which clears its timer and
+removes its abort listener however the read settles), cached 60 s per id (`PROBE_CACHE_MS`) so repeated routes in the same
 minute do not re-probe. A read that throws or times out leaves that id's health `unknown` rather than
 failing the route; `prime_media_probe_failed` logs the reason. The probed health replaces the snapshot health
 and the catalog is re-ranked, so a probe can move a candidate between `candidates` and `excluded`.
@@ -278,7 +315,11 @@ Echo's own fleet has previously confirmed working).
   explicitly ("nothing was prepared and no other kind was substituted") rather than quietly offering a
   different medium.
 - **Pass owner controls.** `buildArguments` never emits `force_video` or any other owner-gated override; the
-  on-prem video capability stays excluded exactly as the registry has it configured.
+  on-prem video capability (`echo.media.video_generate`) is listed under `excluded` with the reason
+  "owner-disabled on TEMPER (RAM budget); this client never force-enables video", exactly as the registry has it
+  configured (checked against the shipped catalog in `tests/prime-media.test.ts`).
+- **Drop a generator silently.** Only ids `NOT_A_GENERATOR` names (operations, not generators) are left out; every
+  generator the catalog lists for the kind is either ranked or listed under `excluded` with its reason.
 
 ## 5. API
 
@@ -306,44 +347,55 @@ Request:
 says what an unclassifiable prompt means (`"image"` for the Studio, `"chat"` for the composer). `probe` and
 `classifier` default to `true` and let tests or callers skip the live health probe / model classification turn.
 
-Response (shape; values from a synthetic catalog):
+Response — a real run of the router over the shipped `ui/echo-prime/catalog.json` snapshot with no SDK connected
+(`classifier: false`, `probe: false`), so `catalog.source` is `snapshot` and says why; three of the six
+alternatives are shown, and each alternative carries the same fields as `picked`:
 
 ```json
 {
   "classification": {
     "kind": "image",
-    "confidence": 0.98,
+    "confidence": 0.93,
+    "signals": ["image-noun", "photo-craft", "scene-phrase"],
+    "source": "rules",
     "styles": ["photoreal", "portrait"],
-    "aspect": "16:9",
-    "signals": ["image-noun", "photo-craft", "model:image"],
-    "source": "rules+model",
-    "model": {"id": "qwen", "label": "Qwen", "requested": "c3po-code:echo-qwen38-abliterated-256k", "model": "c3po-code:echo-qwen38-abliterated-256k", "reported": true, "answered": true}
+    "aspect": "16:9"
   },
   "picked": {
-    "id": "echo.llm.together.google-flash-image-3.1",
-    "cap": "echo.llm.together.google-flash-image-3.1",
-    "label": "Gemini 3.1 Flash Image (Nano Banana 2)",
+    "id": "echo.llm.together.ByteDance-Seed-Seedream-4.0",
+    "cap": "echo.llm.together.ByteDance-Seed-Seedream-4.0",
+    "label": "Seedream 4.0 (Together)",
     "provider": "Together AI",
-    "reason": "Picked Gemini 3.1 Flash Image (Nano Banana 2) because image + photoreal · health green (probed now) · provider charges apply · quality 8.5/10, speed 8/10",
+    "reason": "Picked Seedream 4.0 (Together) because image + photoreal · health green (snapshot) · provider charges apply · quality 8.5/10, speed 7/10 · listed only in the shipped snapshot",
     "health": "green",
-    "healthSource": "probe",
-    "catalogSource": "live",
+    "healthSource": "snapshot",
+    "catalogSource": "snapshot",
     "cost": "paid-low",
     "costNote": "provider charges apply",
     "quality": 8.5,
-    "speed": 8,
-    "score": 0.759,
+    "speed": 7,
+    "score": 0.747,
     "argumentShape": "modeled",
-    "note": "fast Gemini image tier",
-    "request": {"target": "sdk", "name": "echo.llm.together.google-flash-image-3.1", "arguments": {"command": "call", "options": {"prompt": "a photoreal portrait of a fox at golden hour, 16:9"}}}
+    "note": "ByteDance current image tier",
+    "request": {"target": "sdk", "name": "echo.llm.together.ByteDance-Seed-Seedream-4.0", "arguments": {"command": "call", "options": {"prompt": "a photoreal portrait of a fox at golden hour, 16:9"}}}
   },
-  "alternatives": [{"id": "echo.media.image_generate", "...": "same fields as picked"}],
-  "excluded": [{"id": "echo.llm.together.black-forest-labs-FLUX.1-kontext-max", "label": "FLUX.1 Kontext [max] (Together)", "reason": "needs a source image the capability reads itself; ..."}],
-  "probe": {"probed": ["echo.llm.together.google-flash-image-3.1", "echo.media.image_generate"], "source": "live"},
-  "catalog": {"source": "live", "queries": ["image_generate", "text-to-image", "flux", "imagen"], "listed": 14, "failed": [], "cached": false},
-  "records": [{"id": "echo.llm.together.google-flash-image-3.1", "registered": true, "health": "green", "category": "image", "description": "Call Together Gemini 3.1 Flash Image ...", "scope": "llm.invoke", "tier": 1}]
+  "alternatives": [
+    {"id": "echo.llm.together.Rundiffusion-Juggernaut-Lightning-Flux", "label": "Juggernaut Lightning Flux (Together)", "health": "green", "score": 0.717, "...": "same fields as picked"},
+    {"id": "echo.llm.openrouter.google-gemini-2.5-flash-image", "label": "Gemini 2.5 Flash Image (Nano Banana)", "health": "green", "score": 0.714, "...": "same fields as picked"},
+    {"id": "echo.llm.openrouter.google-gemini-3.1-flash-image", "label": "Gemini 3.1 Flash Image (Nano Banana 2)", "health": "amber", "score": 0.607, "...": "same fields as picked"}
+  ],
+  "excluded": [{"id": "echo.google.vertex.imagen_generate", "label": "Vertex Imagen 3", "reason": "health orphaned (the Studio refuses it at review)"}],
+  "probe": {"probed": [], "source": "none"},
+  "catalog": {"source": "snapshot", "queries": [], "listed": 0, "failed": [], "cached": false, "reason": "The live capability catalog is not connected (the Prime config has no `sdk` section); ranked from the shipped catalog snapshot, whose health may be stale."},
+  "records": [{"id": "echo.llm.together.ByteDance-Seed-Seedream-4.0", "registered": true, "health": "green", "category": "image", "description": "Call Together ByteDance Seedream 4.0 (ByteDance-Seed/Seedream-4.0); type=image; provider endpoint=https://api.together.xyz/v1/images/generations; call_kind=together_image_generation.", "scope": "llm.invoke", "tier": 1}]
 }
 ```
+
+On the same snapshot, "anime girl with a katana under cherry blossoms" ranks `echo.media.image_generate` (amber in
+the snapshot, anime style match) third at 0.562 behind Seedream 4.0 (0.649); once the live catalog or the probe
+reports it green it scores 0.703 and is the pick (the `$0` on-prem route), as `tests/prime-media.test.ts` checks.
+With a live SDK, `catalog.source` is `live`, `probe.probed` lists the top three ids and their `healthSource` is
+`probe`.
 
 `reason` (top-level) is only present when nothing was picked — chat, `image-edit` without a source, or no
 healthy generator for the kind. Error statuses: **400** for an invalid request shape, an empty or
@@ -435,7 +487,10 @@ call `POST /api/prime/media/route` with `mode: 'auto', fallback: 'chat'` instead
 `chat` classification falls through to a normal chat send, anything else opens the Creative Studio
 (`EchoPrimeStudio.open('auto', text, null, route)`) with the route already attached so it is not re-fetched.
 An "Enhance" control (the page's own `#i-spark` sparkle icon, a provider `<select>`, and an "Undo enhance"
-button) sits in the composer's send-actions row.
+button) sits in the composer's send-actions row, just before Send. `composer.js` mounts it (a deferred script, so
+it runs after `media-router.js`) through `window.EchoPrimeMediaRouter.mountEnhance`, which supplies the shared
+provider chip, primary-owner gate, Undo, "what I added" list and account reset; `media-router.js` itself mounts
+only the Studio control.
 
 **Creative Studio**: `"Auto · Echo picks the tool"` is the first `<option>` in the medium `<select>`
 (`#creative-category`) and is what the Studio opens to from the sidebar/nav entry (`studio.open('all', …)` is
@@ -445,9 +500,10 @@ pick's label/provider, its reason, and badges for classification confidence + st
 quality/speed; an unmodeled argument shape gets an extra "review request details" badge. `studio.apply()`
 pre-selects the picked capability and writes its exact prepared arguments into the request-details textarea.
 
-**Override**: "Use a different tool (`N`)" expands a list of every ranked alternative (label, provider,
-health, cost, quality/10) plus the excluded tools and why; clicking one calls `studio.apply()` with that
-candidate instead — an explicit, one-click override, never automatic.
+**Override (one tap)**: the ranked alternatives (label, provider, health, cost, quality/10 and the reason) are
+always on screen under the pick, titled "Or use one of these instead (one tap):"; tapping one calls
+`studio.apply()` with that candidate — an explicit, one-tap override, never automatic. Every excluded tool and
+why is listed in a collapsed "Not used for this brief (`N`)" section below them.
 
 **Failure offer**: `window.addEventListener('echo-studio-executed', …)` watches for the Studio's own
 `blocked`/`uncertain`/`refused`/`failed` states on the exact capability Auto picked. It shows what happened and,
@@ -478,17 +534,23 @@ existing "Review request" → "Run this exact request" buttons are still the onl
   per route) both add latency to a route call; `probe: false` / `classifier: false` exist for callers that
   need to skip them.
 - The ranking is static: nothing here learns from which picks actually succeeded or failed over time.
-- The live catalog discovery (`MEDIA_SEARCHES`) is tested against a synthetic broker only; it has not been run
-  against the production SDK broker. The search tokens were chosen from the known capability ids, not from
-  measured live result counts, so a token the live catalog answers with more than 100 rows shows up as a named
-  failure in `catalog.failed` (and `partial`/`snapshot` in the UI) until it is narrowed.
+- The live catalog discovery (`MEDIA_SEARCHES`) is tested with stand-in brokers and with the real `sdkBroker`
+  over a connection that returns the SDK bridge's exact row shape; it has not been run against the production
+  gate. Whether the gate's `echo.caps.search` rows carry health is not verified; when they do not, the ranking
+  uses the snapshot's health (labelled as such) until the top-3 probe reads the exact record. The search tokens
+  were chosen from the known capability ids, not from measured live result counts, so a token the live catalog
+  answers with more than 100 rows shows up as a named failure in `catalog.failed` (and `partial`/`snapshot` in
+  the UI) until it is narrowed.
 
 ## 9. Tests
 
 `tests/prime-media.test.ts` (classifier fixtures, ranking, arguments, router, live catalog discovery, hub wiring,
-owner-only routes), `tests/prime-enhance.test.ts` (modes, providers, rate limit, redaction, failures, route),
-`tests/prime-media-ui.test.ts` (Auto tab, Studio panel, overrides, failure offers, catalog badges, Studio
-`merge`, Enhance controls, Undo, gates).
+the shipped `ui/echo-prime/catalog.json` with its real registry descriptions — no `RANKING`-listed generator may
+vanish, the owner-disabled video and retired voice tools land in `excluded`, the on-prem router wins an anime
+prompt once live health is green — the real `sdkBroker` with bridge-shaped rows, owner-only routes),
+`tests/prime-enhance.test.ts` (modes, providers, rate limit, redaction, failures, route),
+`tests/prime-media-ui.test.ts` (Auto tab, Studio panel, one-tap overrides, excluded list, failure offers, catalog
+badges, Studio `merge`, the composer Enhance mounted by `composer.js`, Enhance controls, Undo, gates).
 
 ## 10. Logging
 

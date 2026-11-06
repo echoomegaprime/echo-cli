@@ -278,5 +278,29 @@
   "kind": "chat",
   "styles": [],
   "why": "a question about wording is chat"
+ },
+ {
+  "text": "An epic orchestral soundtrack for a trailer.",
+  "kind": "music",
+  "styles": [],
+  "why": "the trailer is what the soundtrack is for, so it does not tie the music request with video"
+ },
+ {
+  "text": "Epic trailer music with big drums and rising strings.",
+  "kind": "music",
+  "styles": [],
+  "why": "trailer modifies the music noun"
+ },
+ {
+  "text": "Sound effects for a video game menu: hover, select and back.",
+  "kind": "sfx",
+  "styles": [],
+  "why": "the video game is what the sound effects are for"
+ },
+ {
+  "text": "A trailer with an epic orchestral soundtrack.",
+  "kind": "video",
+  "styles": [],
+  "why": "the trailer itself is requested; the soundtrack is part of it"
  }
 ]

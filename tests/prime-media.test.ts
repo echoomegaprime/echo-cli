@@ -1,17 +1,18 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- focused SDK/model stand-ins */
 import {afterEach, describe, expect, it, vi} from 'vitest';
-import {mkdtempSync, rmSync, writeFileSync} from 'node:fs';
+import {mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {createServer, type Server} from 'node:http';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import cases from './fixtures/media-classifier-cases.json';
 import type {ModelRouter} from '../src/code/model-factory.js';
 import type {PromptEnhancer} from '../src/prime/enhance.js';
-import {PrimeHub, type Capability, type SdkBroker} from '../src/prime/hub.js';
+import {PrimeHub, type Capability, type Json, type SdkBroker} from '../src/prime/hub.js';
+import {sdkBroker} from '../src/prime/sdk.js';
 import {startPrimeServer} from '../src/prime/server.js';
 import {
   buildArguments, classifyPrompt, classifyWithModel, describeCandidate, MEDIA_SEARCHES, MediaError, MediaRouter,
-  mergeCatalog, RANKING, rankCandidates,
+  mergeCatalog, NOT_A_GENERATOR, RANKING, rankCandidates, type MediaKind,
 } from '../src/prime/media.js';
 
 const cap=(id:string,extra:Partial<Capability>={}):Capability=>({id,registered:true,health:'green',category:'image',description:'generator',...extra});
@@ -100,8 +101,21 @@ describe('candidate ranking and arguments',()=>{
     const result=rankCandidates('image',[cap('echo.llm.together.black-forest-labs-FLUX.2-max'),cap('echo.llm.together.stabilityai-stable-diffusion-xl-base-1.0')],{text:'fox',styles:['photoreal']});
     expect(result.candidates.find(x=>x.id.includes('FLUX.2-max'))!.fit).toBeGreaterThan(result.candidates.find(x=>x.id.includes('stable-diffusion'))!.fit);
   });
-  it('filters retrieval, speech-to-text, and deprecated capabilities',()=>{
-    for(const c of [cap('echo.elevenlabs.speech_to_text.stt'),cap('echo.x.video_retrieve'),cap('echo.any.image',{description:'DEPRECATED image generator'})])expect(describeCandidate(c)).toBeNull();
+  it('drops ids that are not generation entry points, judged on the id only',()=>{
+    for(const c of [cap('echo.elevenlabs.speech_to_text.stt'),cap('echo.x.video_retrieve'),cap('echo.media.job_status',{description:'poll image_generate jobs'}),cap('echo.cartesia.voices',{description:'list TTS voices'}),cap('echo.voice.speak.batch',{description:'text to speech for many lines'})])expect(describeCandidate(c),c.id).toBeNull();
+    // Words that name a non-generator operation inside a description never drop a generator.
+    for(const description of ['If still running: poll echo.media.job_status.','Params: prompt|messages, system?, max_tokens?','base image + prompt; MinIO upload.','returns stems of the track'])
+      expect(describeCandidate(cap('echo.media.image_generate',{description})),description).toMatchObject({id:'echo.media.image_generate',kinds:['image']});
+  });
+  it('lists deprecated, retired, duplicate-test and test-debug generators as excluded with the registry reason',()=>{
+    const rows=[cap('echo.voice.tts',{category:'voice',description:'[RETIRED -> echo.voice.speak / echo.voice.elevenlabs.tts] voice.tts'}),cap('echo.llm.cartesia.tts',{category:'voice',description:'Cartesia TTS [DEPRECATED -> use echo.voice.speak]'})];
+    const voice=rankCandidates('voice',rows,{text:'hello'});
+    expect(voice.candidates).toEqual([]);
+    expect(voice.excluded.map(c=>[c.id,c.unavailable])).toEqual(expect.arrayContaining([['echo.voice.tts','marked RETIRED in the registry (use echo.voice.speak / echo.voice.elevenlabs.tts instead)'],['echo.llm.cartesia.tts','marked DEPRECATED in the registry (use echo.voice.speak instead)']]));
+    const video=rankCandidates('video',[cap('echo.llm.together.google-veo-3.0',{description:'Call Together Duplicate Test (google/veo-3.0); type=video'}),cap('echo.llm.together.google-veo-3.1-test-debug',{description:'type=video'})],{text:'waves'});
+    expect(video.candidates).toEqual([]);expect(video.excluded.map(c=>c.unavailable)).toEqual(expect.arrayContaining([expect.stringContaining('duplicate test'),expect.stringContaining('test/debug')]));
+    // Lowercase prose is not a registry marker.
+    expect(describeCandidate(cap('echo.voice.speak',{description:'Unified TTS; replaces the deprecated echo.voice.tts'}))!.unavailable).toBeUndefined();
   });
   it('builds image dimensions and style',()=>{
     expect(buildArguments('echo.media.image_generate','image','fox',{styles:['anime'],aspect:'16:9'})).toEqual({shape:'modeled',arguments:{command:'image_generate',options:{prompt:'fox',wait:false,style:'anime',width:1024,height:576}}});
@@ -229,6 +243,80 @@ describe('live catalog discovery',()=>{
     const r=await hub.mediaRoute({text:'a photoreal fox image',classifier:false,probe:false});
     expect(r.catalog.source).toBe('live');expect(r.picked!.id).toBe(FLUX);
     expect(hub.capabilities()).toEqual(expect.arrayContaining([expect.objectContaining({id:FLUX,category:'image'}),expect.objectContaining({id:'echo.fal.generate',category:'image',health:'amber'})]));
+  });
+});
+
+// The shipped ui/echo-prime/catalog.json carries the registry's real descriptions (183 rows); the synthetic fixtures above
+// cannot catch a rule that misfires on real description text.
+describe('shipped catalog snapshot',()=>{
+  const snapshot=(JSON.parse(readFileSync(new URL('../ui/echo-prime/catalog.json',import.meta.url),'utf8')) as {capabilities:Capability[]}).capabilities;
+  const row=(id:string)=>{const found=snapshot.find(c=>c.id===id);if(!found)throw new Error('snapshot is missing '+id);return found;};
+  const OPENROUTER_IMAGE=['google-gemini-2.5-flash-image','google-gemini-3-pro-image','google-gemini-3-pro-image-preview','google-gemini-3.1-flash-image','google-gemini-3.1-flash-image-preview','google-gemini-3.1-flash-lite-image','openai-gpt-5-image','openai-gpt-5-image-mini','openai-gpt-5.4-image-2'].map(m=>'echo.llm.openrouter.'+m);
+  it('keeps every RANKING-listed generator: each is a candidate or excluded with a reason for every kind it ranks for',()=>{
+    const ranked=snapshot.filter(c=>RANKING.some(r=>r.match.test(c.id)));
+    expect(ranked.length).toBeGreaterThan(100);
+    const byKind=new Map<MediaKind,Set<string>>();
+    for(const kind of ['image','image-edit','video','music','sfx','voice'] as MediaKind[]){const r=rankCandidates(kind,snapshot,{text:'a prompt'});byKind.set(kind,new Set([...r.candidates,...r.excluded].map(c=>c.id)));}
+    const vanished=ranked.filter(c=>RANKING.find(r=>r.match.test(c.id))!.kinds.some(kind=>!byKind.get(kind)!.has(c.id))).map(c=>c.id);
+    expect(vanished).toEqual([]);
+    for(const c of snapshot.filter(c=>NOT_A_GENERATOR.test(c.id)))expect(RANKING.some(r=>r.match.test(c.id)),c.id).toBe(false);
+  });
+  it('ranks the generators whose real descriptions mention job_status, system? or MinIO upload',()=>{
+    expect(row('echo.media.image_generate').description).toContain('job_status');
+    for(const id of OPENROUTER_IMAGE)expect(row(id).description,id).toContain('system?');
+    expect(row('echo.google.vertex.imagen_edit').description).toContain('upload');
+    const image=rankCandidates('image',snapshot,{text:'a fox'}).candidates.map(c=>c.id);
+    for(const id of ['echo.media.image_generate',...OPENROUTER_IMAGE])expect(image,id).toContain(id);
+    const edit=rankCandidates('image-edit',snapshot,{text:'edit this photo'});
+    expect(edit.excluded.find(c=>c.id==='echo.google.vertex.imagen_edit')!.unavailable).toContain('health orphaned');
+  });
+  it('lists the owner-disabled on-prem video tool and the registry test rows under excluded, uncapped',async()=>{
+    const r=await new MediaRouter({catalog:()=>snapshot}).route({text:'a ten second video of waves at dusk',classifier:false,probe:false});
+    expect(r.classification.kind).toBe('video');
+    expect(r.excluded.find(x=>x.id==='echo.media.video_generate')!.reason).toContain('owner-disabled');
+    expect(r.excluded.find(x=>x.id==='echo.llm.together.google-veo-3.0')!.reason).toContain('duplicate test');
+    expect(r.excluded.find(x=>x.id==='echo.llm.together.google-veo-3.1-test-debug')!.reason).toContain('test/debug');
+    expect(r.excluded.length).toBeGreaterThan(8);
+    expect(r.picked!.id).not.toBe('echo.media.video_generate');
+  });
+  it('shows retired voice tools as excluded and never offers a voice listing as a generator',async()=>{
+    const r=await new MediaRouter({catalog:()=>snapshot}).route({text:'read this aloud in a calm voice: welcome home',classifier:false,probe:false});
+    expect(r.classification.kind).toBe('voice');
+    expect(r.excluded.find(x=>x.id==='echo.voice.tts')!.reason).toContain('RETIRED');
+    const offered=[r.picked!,...r.alternatives].map(p=>p.id),listed=[...offered,...r.excluded.map(x=>x.id)];
+    for(const id of ['echo.elevenlabs.voices','echo.cartesia.voices','echo.voice.speak.batch','echo.voice.stt'])expect(listed,id).not.toContain(id);
+  });
+  it('picks the $0 on-prem router for an anime prompt once the live catalog reports it green',async()=>{
+    const live=row('echo.media.image_generate');
+    const search=vi.fn(async(q:string)=>q==='image_generate'?[{id:live.id,description:live.description,registered:true,health:'green'}]:[]);
+    const r=await new MediaRouter({catalog:()=>snapshot,search}).route({text:'anime girl with a katana under cherry blossoms',classifier:false,probe:false});
+    expect(r.classification).toMatchObject({kind:'image',styles:expect.arrayContaining(['anime'])});
+    expect(r.picked).toMatchObject({id:'echo.media.image_generate',health:'green',healthSource:'catalog',catalogSource:'live',cost:'free',request:{arguments:{options:{style:'anime',wait:false}}}});
+    expect(r.alternatives.map(a=>a.id)).toContain('echo.llm.together.ByteDance-Seed-Seedream-4.0');
+    // Snapshot only (amber), the hosted Seedream tier outranks it; the result says the ranking is the snapshot's.
+    const offline=await new MediaRouter({catalog:()=>snapshot}).route({text:'anime girl with a katana under cherry blossoms',classifier:false,probe:false});
+    expect(offline.catalog.source).toBe('snapshot');expect([offline.picked!.id,...offline.alternatives.map(a=>a.id)]).toContain('echo.media.image_generate');
+  });
+});
+
+// The production chain: gate echo.caps.search -> src/bridge/sdk-stdio.ts mapSearch (a row without `registered` becomes
+// registered:true, one without health becomes health_status:'unknown'; tests/prime-sdk-bridge.test.ts) -> sdkBroker.search.
+describe('live catalog through the real sdkBroker',()=>{
+  it('ranks a bridge row that carries no health with the snapshot health, labelled as such, and keeps it in the hub',async()=>{
+    const results=[{id:'echo.media.image_generate',description:'Routed on-prem text-to-image ($0). If still running: poll echo.media.job_status.',registered:true,health_status:'unknown',metadata:{required_scope:'media.generate',danger_tier:1}}];
+    const calls:Json[]=[];
+    const connection={
+      listTools:async()=>['sdk_search','sdk_read','sdk_invoke'].map(name=>({name,inputSchema:{type:'object'}})),
+      call:async(name:string,args:Json)=>{calls.push({name,...args});return {content:[{type:'text',text:JSON.stringify(name==='sdk_search'&&args.query==='image_generate'?{results,sdk_catalog:{truncated:false}}:{results:[],sdk_catalog:{truncated:false}})}]};},
+    };
+    const sdk=await sdkBroker(connection as never,{search:'sdk_search',read:'sdk_read',invoke:'sdk_invoke'});
+    const hub=new PrimeHub({capabilities:[cap('echo.media.image_generate',{health:'amber',description:'snapshot'})],sdk});
+    const r=await hub.mediaRoute({text:'anime girl with a katana under cherry blossoms',classifier:false,probe:false});
+    expect(calls.filter(c=>c.name==='sdk_search').map(c=>c.query)).toEqual([...MEDIA_SEARCHES.image]);
+    expect(r.catalog.source).toBe('live');
+    expect(r.picked).toMatchObject({id:'echo.media.image_generate',health:'amber',healthSource:'snapshot',catalogSource:'live',reason:expect.stringContaining('health amber (snapshot; the live catalog row carries no health)')});
+    expect(r.excluded).toEqual([]);
+    expect(hub.capabilities().find(c=>c.id==='echo.media.image_generate')).toMatchObject({health:'amber',registered:true,category:'image'});
   });
 });
 

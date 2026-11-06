@@ -25,7 +25,13 @@
 .media-failure{border-top:1px solid #4a3030;padding-top:10px;font-size:12px;color:#e2b9b9;line-height:1.55;display:grid;gap:8px}
 .media-failure[hidden]{display:none}
 .media-failure .media-uncertain{color:#f0dd9d}
-.media-excluded{margin:0;padding:0;list-style:none;font-size:11px;color:#86a095;display:grid;gap:3px}
+.media-alternatives-title{margin:2px 0 0;font-size:11px;color:#9fbfb3}
+.media-alternatives-title[hidden]{display:none}
+/* Generators listed for the kind that Auto will not use, each with its reason; collapsed so the one-tap list stays short. */
+.media-excluded-wrap{font-size:11px;color:#86a095}
+.media-excluded-wrap[hidden]{display:none}
+.media-excluded-wrap summary{cursor:pointer;color:#9fbfb3;padding:2px 0}
+.media-excluded{margin:6px 0 0;padding:0;list-style:none;font-size:11px;color:#86a095;display:grid;gap:3px;overflow-wrap:anywhere}
 .enhance-wrap{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0}
 .enhance-button{display:inline-flex;align-items:center;gap:6px;border:1px solid #456e5b;background:#172b22;border-radius:7px;padding:8px 11px;font-size:11px;color:#d5efdf;white-space:nowrap}
 .enhance-button:disabled{opacity:.55}

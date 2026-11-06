@@ -219,6 +219,23 @@
   window.addEventListener('echo-account-changed',()=>{for(const made of [ui.saveDialog,ui.attachDialog])if(made?.dialog.open)made.dialog.close();});
   sync();
  }
+ // ---- Enhance prompt (sparkle) ---------------------------------------------
+ // The chat composer's Enhance button, beside Send. media-router.js (a classic script, so it has run before this deferred
+ // one) owns the shared control: provider chip, primary-owner gate, Undo, the "what I added" list and the account reset,
+ // so the composer and every Studio mode behave the same. Enhance only replaces the draft; it never sends the message.
+ function mountEnhance(){
+  const router=window.EchoPrimeMediaRouter,composer=$('#composer');
+  if(!composer||ui.enhance||typeof router?.mountEnhance!=='function')return;
+  const actions=$('#composer .send-actions');
+  ui.enhance=router.mountEnhance({name:'composer',textarea:()=>$('#prompt'),mode:()=>router.composerMode(),
+   mount(wrap,note,added){
+    const send=actions?.querySelector('.send');
+    if(send)send.before(wrap);else if(actions)actions.append(wrap);else composer.append(wrap);
+    const anchor=$('#enhance-composer-notice')||$('.composer-caption');
+    if(anchor)anchor.after(note,added);else composer.append(note,added);
+   }});
+ }
+ try{mountEnhance();}catch(error){console.debug('[echo.enhance]',{schema_version:1,event:'prime_enhance_mount_failed',reason:error instanceof Error?error.message:'failed'});}
  (async()=>{
   try{
    const workspace=window.EchoPrimeWorkspace;if(!workspace||!await workspace.ready||!workspace.enabled)return;

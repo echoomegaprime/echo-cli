@@ -4,6 +4,8 @@ import {readFileSync} from 'node:fs';
 import {runInNewContext} from 'node:vm';
 
 const source=readFileSync(new URL('../ui/echo-prime/media-router.js',import.meta.url),'utf8');
+// composer.js is a deferred script, so in the page it runs after media-router.js; the harness runs it second, the same way.
+const composerSource=readFileSync(new URL('../ui/echo-prime/composer.js',import.meta.url),'utf8');
 const tick=async()=>{for(let i=0;i<4;i++)await new Promise(r=>setTimeout(r,0));};
 
 class TestEvent {type:string;target:any=null;detail:any;defaultPrevented=false;propagationStopped=false;immediateStopped=false;constructor(type:string,init:any={}){this.type=type;this.detail=init.detail;}preventDefault(){this.defaultPrevented=true;}stopPropagation(){this.propagationStopped=true;}stopImmediatePropagation(){this.immediateStopped=true;this.propagationStopped=true;}}
@@ -54,7 +56,9 @@ async function harness(options:any={}){
  const models=options.models??{configured:true,routing:true,providers:[{id:'claude',available:true},{id:'gpt',available:true},{id:'grok',available:false,reason:'not logged in'},{id:'argon',available:true},{id:'qwen',available:true}]};
  const fetch=vi.fn(async(url:string,init:any={})=>{calls.push({url,init,body:init.body?JSON.parse(init.body):undefined});if(url==='/api/prime/models')return jsonResponse(models);if(url==='/api/prime/media/route')return jsonResponse(typeof options.route==='function'?options.route():options.route??mediaResult());if(url==='/api/prime/enhance'){if(options.pendingEnhance)return new Promise(resolve=>enhanceResolver=()=>resolve(jsonResponse(options.enhance??enhanced)));return jsonResponse(options.enhance??enhanced);}throw new Error(url);});
  const enhanced={mode:'image',text:'ENHANCED',added:['golden hour'],provider:'claude',providerLabel:'Claude',model:{id:'claude',label:'Claude',model:'claude-sonnet-5-5',reported:true,answered:true}};
- runInNewContext(source,{window,document,fetch,location:{protocol:'https:'},AbortSignal,CustomEvent:class extends TestEvent{constructor(t:string,i:any){super(t,i);}},Event:TestEvent,console:{debug:vi.fn()},setTimeout,clearTimeout,Promise,JSON,Object,Array,String,Number,Math,Error,Set,Map,Boolean});
+ const context={window,document,fetch,location:{protocol:'https:'},AbortSignal,CustomEvent:class extends TestEvent{constructor(t:string,i:any){super(t,i);}},Event:TestEvent,console:{debug:vi.fn()},setTimeout,clearTimeout,Promise,JSON,Object,Array,String,Number,Math,Error,Set,Map,Boolean};
+ runInNewContext(source,context);
+ if(options.composerScript!==false)runInNewContext(composerSource,context);
  await window.EchoPrimeMediaRouter.ready;await tick();
  const all=()=>[root,...walk(root)],find=(attr:string,value?:string)=>all().find(n=>n.getAttribute(attr)!==null&&(value===undefined||n.getAttribute(attr)===value)),button=(text:string)=>all().find(n=>n.tagName==='BUTTON'&&n.textContent.trim()===text);
  return {root,document,window,studio,originalOpen,workspace,fetch,calls,tabs,composer,prompt,brief,category,ownSubmit,all,find,button,resolveEnhance:()=>enhanceResolver?.(),modelsCalls:()=>calls.filter(c=>c.url==='/api/prime/models')};
@@ -67,6 +71,29 @@ it('Auto chat classification passes through exactly once',async()=>{const w=awai
 it('Studio wrapper preserves inputs and does not route an empty prompt',async()=>{const w=await harness(),inputs=[{upload_id:'upl_'+'0'.repeat(32),role:'reference'}];w.fetch.mockClear();w.studio.open('image','',inputs);await tick();expect(w.originalOpen).toHaveBeenCalledWith('image','',inputs);expect(w.fetch).not.toHaveBeenCalledWith('/api/prime/media/route',expect.anything());});
 it('Studio medium routes as the hint and image fallback',async()=>{const w=await harness();w.studio.open('image','a red fox');await tick();expect(w.calls.filter(c=>c.url==='/api/prime/media/route').at(-1).body).toEqual({text:'a red fox',mode:'image',fallback:'image'});});
 it('Studio Auto renders and applies the pick with badges',async()=>{const w=await harness();w.studio.open('auto','fox');await tick();const panel=w.find('data-media-auto')!;expect(panel.hidden).toBe(false);expect(panel.textContent).toContain('On-prem image · TEMPER');expect(panel.textContent).toContain('Picked On-prem image');for(const text of ['image · 91% sure','health green','$0 on-prem','quality 8/10'])expect(panel.textContent).toContain(text);expect(w.studio.apply).toHaveBeenCalledWith({id:defaultPick.id,arguments:defaultPick.request.arguments});});
+it('shows the alternatives beside the pick so one tap overrides it (no toggle in between)',async()=>{
+ const w=await harness();w.studio.open('auto','fox');await tick();
+ expect(w.find('data-media-alternatives')!.hidden).toBe(false);expect(w.find('data-media-alternatives-title')!.textContent).toContain('one tap');
+ expect(w.find('data-media-alternatives-toggle')).toBeUndefined();
+ w.studio.apply.mockClear();w.find('data-media-alternative',alternative.id)!.click();
+ expect(w.studio.apply).toHaveBeenCalledTimes(1);expect(w.studio.apply).toHaveBeenCalledWith({id:alternative.id,arguments:alternative.request.arguments});
+});
+it('lists every excluded tool with its reason in a collapsed section',async()=>{
+ const excluded=[{id:'echo.media.video_generate',label:'On-prem video',reason:'owner-disabled on TEMPER (RAM budget)'},{id:'echo.voice.tts',label:'voice.tts',reason:'marked RETIRED in the registry'}];
+ const w=await harness({route:()=>({...mediaResult(),excluded})});w.studio.open('auto','fox');await tick();
+ const box=w.find('data-media-excluded')!;expect(box.tagName).toBe('DETAILS');expect(box.hidden).toBe(false);
+ expect(box.textContent).toContain('Not used for this brief (2)');for(const x of excluded)expect(box.textContent).toContain(x.label+': '+x.reason);
+ const none=await harness();none.studio.open('auto','fox');await tick();expect(none.find('data-media-excluded')!.hidden).toBe(true);
+});
+it('composer.js mounts the chat Enhance button beside Send; media-router.js alone mounts only the Studio one',async()=>{
+ const alone=await harness({composerScript:false});
+ expect(alone.find('data-enhance','composer')).toBeUndefined();expect(alone.find('data-enhance','studio')).toBeTruthy();
+ const w=await harness(),actions=w.all().find(n=>n.className==='send-actions')!,button=w.find('data-enhance','composer')!;
+ const wrapAt=actions.children.findIndex(n=>n.children.includes(button)),sendAt=actions.children.findIndex(n=>n.className==='send');
+ expect(wrapAt).toBeGreaterThanOrEqual(0);expect(wrapAt).toBeLessThan(sendAt);
+ expect(w.find('data-enhance-provider','composer')!.children.map(o=>o.textContent)).toContain('Claude');
+ expect(w.window.EchoPrimeMediaRouter.mountEnhance({name:'composer',textarea:()=>null,mode:()=>'chat',mount(){throw new Error('mounted twice');}}).button).toBe(button);
+});
 it('alternative selection applies it and reports the choice',async()=>{const w=await harness();w.studio.open('auto','fox');await tick();w.find('data-media-alternative',alternative.id)!.click();expect(w.studio.apply).toHaveBeenLastCalledWith({id:alternative.id,arguments:alternative.request.arguments});expect(w.find('data-media-auto')!.textContent).toContain('You chose FLUX Max');});
 it('failed picks offer but never automatically apply the alternative',async()=>{const w=await harness();w.studio.open('auto','fox');await tick();w.studio.apply.mockClear();w.window.dispatchEvent(new (class extends TestEvent{} )('echo-studio-executed',{detail:{state:'blocked',detail:'boom',name:defaultPick.id}}));const failure=w.find('data-media-failure')!;expect(failure.hidden).toBe(false);expect(failure.textContent).toContain('Nothing was retried');expect(failure.textContent).toContain('Use FLUX Max instead');expect(w.studio.apply).not.toHaveBeenCalled();w.find('data-media-next',alternative.id)!.click();expect(w.studio.apply).toHaveBeenCalledWith({id:alternative.id,arguments:alternative.request.arguments});});
 it('refused and failed trigger offers, returned does not, and uncertain warns',async()=>{for(const state of ['refused','failed','uncertain']){const w=await harness();w.studio.open('auto','fox');await tick();w.window.dispatchEvent(new TestEvent('echo-studio-executed',{detail:{state,name:defaultPick.id}}));expect(w.find('data-media-failure')!.hidden).toBe(false);if(state==='uncertain')expect(w.find('data-media-failure')!.textContent).toContain('outcome is unknown');}const w=await harness();w.studio.open('auto','fox');await tick();w.window.dispatchEvent(new TestEvent('echo-studio-executed',{detail:{state:'returned',name:defaultPick.id}}));expect(w.find('data-media-failure')!.hidden).toBe(true);});

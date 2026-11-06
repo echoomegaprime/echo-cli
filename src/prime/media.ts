@@ -45,6 +45,11 @@ const KIND_RULES:Record<Exclude<MediaKind,'chat'>,Rule[]>={
  image:[[/\b(?:image|picture|photo(?:graph)?|illustration|poster|logo|portrait|render(?:ing)?|wallpaper|icon|painting|sketch|drawing|artwork|concept art|thumbnail|banner|mockup|packshot|product shot|headshot|avatar|emblem|infographic|comic panel|pixel art|watercolou?r|oil painting|digital art|still)\b/i,1,'image-noun'],[/(?<!\b(?:this|my|the|a|an|your|our|rough|old|existing|pencil|quick)\s)\b(?:draw|paint|sketch|illustrate|depict|visuali[sz]e|design a logo|generate art)\b/i,0.8,'image-verb'],[/\b(?:4k|8k|dslr|35mm|50mm|85mm|bokeh|f\/\d|golden hour|studio lighting|rim light|wide[- ]angle|macro shot)\b/i,0.6,'photo-craft'],[/^(?:a|an|the|two|three|some)\s+\w+/i,0.45,'scene-phrase']],
 };
 const CHAT_RULES:Rule[]=[[/\b(?:explain|what is|what are|what's|who is|where is|when did|how do|how does|how to|how can|why (?:is|does|do|did)|summari[sz]e|compare|list the|tell me|write (?:a|an|the|me)?\s*(?:\w+\s){0,2}(?:function|code|script|email|essay|poem|story|summary|plan|regex|query|test)|debug|fix (?:this|the) (?:bug|error|code)|translate (?:this|the following)|calculate|define|does this|is this|can you (?:check|explain|review))\b/i,1,'chat-verb'],[/\?\s*$/,0.6,'question-mark']];
+/** "an orchestral soundtrack for a trailer", "sound effects for a video game", "epic trailer music": once another medium is
+ * named, a video noun that only says what the thing is FOR (or modifies an audio noun) does not vote for video. */
+const PICTURE_NOUN='(?:video(?:\\s+game)?|trailer|clip|footage|reels?|animation|film|movie)s?';
+const FOR_PICTURE=new RegExp('\\b(?:for|to|over|behind|under)\\s+(?:(?:a|an|the|my|our|this|your|some)\\s+)?(?:[\\w-]+\\s+){0,2}?'+PICTURE_NOUN+'\\b'
+ +'|\\b'+PICTURE_NOUN+'\\s+(?=(?:music|score|soundtrack|theme|song|jingle|sound effects?|sfx|sounds?|foley|voice-?over|narration)\\b)','gi');
 /** Negated media words ("no music", "without vocals", "no titles") must not vote for the thing they exclude. */
 const NEGATED=/\b(?:no|without|not|never)\s+(?:any\s+)?(?:a\s+)?(?:music|vocals?|titles?|text|people|sound|video|voice|narration|watermarks?|captions?|logos?)\b/gi;
 const STYLE_RULES:[StyleCue,RegExp][]=[
@@ -84,7 +89,11 @@ export function classifyPrompt(text:string,options:ClassifyOptions={}):Classific
  }
  const scores=new Map<MediaKind,{score:number;signals:string[]}>();
  const add=(kind:MediaKind,weight:number,signal:string)=>{const row=scores.get(kind)??{score:0,signals:[]};row.score+=weight;row.signals.push(signal);scores.set(kind,row);};
- for(const [kind,rules] of Object.entries(KIND_RULES) as [MediaKind,Rule[]][])for(const [rx,weight,signal] of rules)if(rx.test(body))add(kind,weight,signal);
+ for(const [kind,rules] of Object.entries(KIND_RULES) as [MediaKind,Rule[]][])if(kind!=='video')for(const [rx,weight,signal] of rules)if(rx.test(body))add(kind,weight,signal);
+ // Video scores last: when another medium was named (not just the generic scene phrase), "for a trailer" does not count.
+ const named=[...scores.values()].some(row=>row.signals.some(s=>s!=='scene-phrase'));
+ const videoBody=named?body.replace(FOR_PICTURE,' '):body;
+ for(const [rx,weight,signal] of KIND_RULES.video)if(rx.test(videoBody))add('video',weight,signal);
  for(const [rx,weight,signal] of CHAT_RULES)if(rx.test(body))add('chat',weight,signal);
  // Style cues count for image when no medium noun was named ("a photoreal fox at golden hour").
  if(styles.length&&!scores.has('image'))add('image',0.5,'style-cue');
@@ -252,14 +261,33 @@ export const RANKING:readonly Ranking[]=[
  {match:/^echo\.echo_talk\.speak$/,kinds:['voice'],quality:6,speed:6,cost:'free',label:'ECHO_TALK pipeline',note:'full ARCS -> TTS pipeline, not a plain synthesizer',source:'cap description'},
  {match:/^echo\.personality\.speak$/,kinds:['voice'],quality:7,speed:7,label:'Personality Forge voice',note:'persona-configured TTS',source:'cap description'},
 ];
-const EXCLUDE=/\b(?:DEPRECATED|RETIRED)\b|test-debug|Duplicate Test|video_retrieve|video_to_music|stem|upload|finetune|dubbing|\.dub$|isolat|infill|voice_changer|voice_design|\.stt$|transcri|translate|personas|configure_persona|\.batch$|synthesize_stream|progressive|turn_state|interrupt|\.voices$|job_status|\.backends$|\.artifact$|\.status$|compose_plan|forgeplugin|\.synthesize$|\.tts\.named$|\.tts\.batch$|openrouter\.openai-gpt-audio|^echo\.llm\.(?!together\.|openrouter\.|fireworks\.)/i;
+/** Capability ids that are not generation entry points at all: job polls and status reads, listings, artifact fetches,
+ * transcription and translation, transforms of existing audio (stems, isolation, dubbing, voice changers, infill), music
+ * fine-tune management, persona configuration, streaming/turn plumbing, batch wrappers and audio chat models. Matched
+ * against the capability id only, one whole id token at a time (tokens are separated by `.`, `_` or `-`): registry
+ * descriptions mention these words in passing ("poll echo.media.job_status", "system?", "MinIO upload"), so testing the
+ * description would silently drop real generators. A RANKING row never names one of these ids (tests/prime-media.test.ts
+ * checks that against the shipped catalog). */
+export const NOT_A_GENERATOR=/(?:^|[._-])(?:job_status|status|backends|artifacts?|voices|video_retrieve|video_to_music|stems?|upload|finetunes?|dub|dubbing|dubbed|isolate|isolation|infill|voice_changer|voice_design|stt|speech_to_text|transcribe|transcription|transcripts?|translate|translation|personas|configure_persona|batch|synthesize_stream|progressive|turn_state|interrupt|compose_plan|forgeplugin|openai-gpt-audio)(?=$|[._-])/i;
+/** The registry's own lifecycle markers. A generator that carries one is listed under `excluded` with the marker as its
+ * reason; it is never ranked and never dropped silently. Only the registry's uppercase markers count, so prose such as
+ * "replaces the deprecated alias" is not a marker. */
+function lifecycleOf(c:Capability):string|undefined{
+ const description=c.description||'',marker=/\b(DEPRECATED|RETIRED)\b(?:\s*->\s*(?:use\s+)?([^\]]{1,120}))?/.exec(description);
+ if(marker)return 'marked '+marker[1]+' in the registry'+(marker[2]?' (use '+marker[2].trim()+' instead)':'');
+ if(/\bDuplicate Test\b/.test(description))return 'a registry duplicate test entry, not a production route';
+ if(/(?:^|[._-])test-debug$/i.test(c.id))return 'a registry test/debug entry, not a production route';
+ return undefined;
+}
+/** Kind guesses for ids RANKING does not list. Each pattern is tested against the id and the description separately, so
+ * the `$` anchors bind to the end of the id. */
 const KIND_HINT:[MediaKind,RegExp][]=[
  ['image-edit',/kontext|imagen_edit|img2img|image[- ]to[- ]image/i],
  ['video',/type=video|video_generate|-t2v|-i2v|-r2v|T2V|I2V|veo-|sora-|kling-|seedance|hailuo|vidu-|pixverse|happyhorse|video-01/i],
  ['music',/music_generation|elevenlabs\.music$|compose music/i],
  ['sfx',/sound_generation|\.sfx$|sound effect/i],
- ['voice',/\btts\b|text-to-speech|\.speak$|synthesize speech|type=audio|polly|cognitive_speech|speech\.tts|minimax-speech|orpheus|kokoro|sonic|aura|rime-/i],
- ['image',/type=image|text-to-image|text2img|image_generate|imagen|flux|seedream|ideogram|stable-diffusion|qwen-image|wan2\.6-image|-image(?:-preview)?$|gpt-image|gpt-5(?:\.\d)?-image|flash-image|deepai\.image|fal\.generate/i],
+ ['voice',/\btts\b|text-to-speech|\.speak$|synthesize speech|type=audio|polly|cognitive_speech|speech\.tts|minimax-speech|orpheus|kokoro|\bsonic\b|\baura\b|\brime-/i],
+ ['image',/type=image|text-to-image|text2img|image_generate|\bimagen|\bflux\b|seedream|ideogram|stable-diffusion|qwen-image|wan2\.6-image|-image(?:-preview)?$|gpt-image|gpt-5(?:\.\d)?-image|flash-image|deepai\.image|fal\.generate/i],
 ];
 export interface Candidate {
  id:string;label:string;provider:string;kinds:MediaKind[];styles:StyleCue[];quality:number;speed:number;cost:CostTier;costNote:string;
@@ -322,20 +350,22 @@ export function buildArguments(id:string,kind:MediaKind,text:string,classificati
  if(/^echo\.(?:voice\.speak|elevenlabs\.tts|cartesia\.tts|voice\.cartesia\.tts|voice\.elevenlabs\.tts|aws\.polly_tts|azure\.cognitive_speech_tts|voice\.elevenlabs\.sfx|voice\.elevenlabs\.music)$/.test(id))return {arguments:{command:verb,options:{text:prompt}},shape:'modeled'};
  return {arguments:{command:verb,options:kind==='voice'||kind==='sfx'?{text:prompt}:{prompt}},shape:'unmodeled'};
 }
-/** Reads a capability record (snapshot or live) into a ranked candidate, or null when it is not a generator for any kind. */
+/** Reads a capability record (snapshot or live) into a ranked candidate, or null when it is not a generator for any kind:
+ * an id NOT_A_GENERATOR names, or an id neither RANKING nor KIND_HINT recognises. Every other generator becomes a
+ * candidate; one that cannot be used now carries `unavailable` and is listed under `excluded` with that reason. */
 export function describeCandidate(c:Capability):Candidate|null{
- const haystack=c.id+' '+(c.description||'');
- if(EXCLUDE.test(haystack))return null;
- const ranking=RANKING.find(r=>r.match.test(c.id));
+ if(NOT_A_GENERATOR.test(c.id))return null;
+ const description=c.description||'',ranking=RANKING.find(r=>r.match.test(c.id));
  let kinds:MediaKind[]=ranking?[...ranking.kinds]:[];
- if(!kinds.length){const hit=KIND_HINT.find(([,rx])=>rx.test(haystack));if(!hit)return null;kinds=[hit[0]];}
- const {cost,note:costNote}=costOf(c,ranking),health=String(c.health||'unknown').toLowerCase();
+ if(!kinds.length){const hit=KIND_HINT.find(([,rx])=>rx.test(c.id)||rx.test(description));if(!hit)return null;kinds=[hit[0]];}
+ const {cost,note:costNote}=costOf(c,ranking),health=String(c.health||'unknown').toLowerCase(),lifecycle=lifecycleOf(c);
  const candidate:Candidate={
   id:c.id,label:ranking?.label??c.id.replace(/^echo\./,''),provider:providerOf(c.id),kinds,styles:ranking?.styles??[],quality:ranking?.quality??5,speed:ranking?.speed??5,
-  cost,costNote,health,healthSource:c.health?'snapshot':'none',fit:0,score:0,reasons:[],node:(c as {node?:string}).node,catalogSource:'snapshot',
+  cost,costNote,health,healthSource:health!=='unknown'?'snapshot':'none',fit:0,score:0,reasons:[],node:(c as {node?:string}).node,catalogSource:'snapshot',
   argumentShape:'unmodeled',rankingSource:ranking?.source??'unranked default (quality 5, speed 5)',note:ranking?.note??'',
  };
  if(c.registered===false)candidate.unavailable='not registered';
+ else if(lifecycle)candidate.unavailable=lifecycle;
  else if((HEALTH_WEIGHT[health]??0.6)===0)candidate.unavailable='health '+health+' (the Studio refuses it at review)';
  else if(c.id==='echo.media.video_generate')candidate.unavailable='owner-disabled on TEMPER (RAM budget); this client never force-enables video';
  else if(/-(?:i2v|r2v)\b|I2V|kontext|imagen_edit/i.test(c.id))candidate.unavailable='needs a source image the capability reads itself; Auto never prepares it from a text-only brief (attach a reference in the Studio and pick it yourself)';
@@ -343,20 +373,27 @@ export function describeCandidate(c:Capability):Candidate|null{
 }
 export interface RankOptions {text:string;styles?:StyleCue[];aspect?:Aspect;durationSeconds?:number;
  /** Ids the live catalog listed for this route: their record (health, registration) is the live one, not the snapshot's. */
- live?:ReadonlySet<string>}
+ live?:ReadonlySet<string>;
+ /** Of those, the ids whose live row carried a health value. A live row without one keeps the snapshot's health
+  * (mergeCatalog) and is labelled as such; absent, every live-listed id counts as carrying live health. */
+ liveHealth?:ReadonlySet<string>}
 export interface RankResult {candidates:Candidate[];excluded:Candidate[]}
 /** Deterministic ranking: fit x health x cost x quality (x a light speed factor). Ties: health, cost, quality, id. */
 export function rankCandidates(kind:MediaKind,catalog:Capability[],options:RankOptions):RankResult{
  const styles=options.styles??[],candidates:Candidate[]=[],excluded:Candidate[]=[];
  for(const c of catalog){
   const cand=describeCandidate(c);if(!cand||!cand.kinds.includes(kind))continue;
-  if(options.live?.has(cand.id)){cand.catalogSource='live';cand.healthSource='catalog';}
+  if(options.live?.has(cand.id)){
+   cand.catalogSource='live';
+   cand.healthSource=!options.liveHealth||options.liveHealth.has(cand.id)?'catalog':cand.health==='unknown'?'none':'snapshot';
+  }
   const matched=cand.styles.filter(s=>styles.includes(s));
   cand.fit=1+Math.min(0.3,0.15*matched.length);
   if(cand.id==='echo.cartesia.tts'&&options.text.length>400)cand.unavailable='text longer than the 400-character Cartesia bound';
   const healthWeight=HEALTH_WEIGHT[cand.health]??0.6;
   cand.score=Math.round(cand.fit*healthWeight*COST_WEIGHT[cand.cost]*(cand.quality/10)*(0.85+0.015*cand.speed)*1000)/1000;
-  cand.reasons=[kind+(matched.length?' + '+matched.join(', '):''),'health '+cand.health+(cand.healthSource==='probe'?' (probed now)':cand.healthSource==='catalog'?' (live catalog)':cand.healthSource==='snapshot'?' (snapshot)':' (unknown)'),cand.costNote,'quality '+cand.quality+'/10, speed '+cand.speed+'/10'];
+  const healthNote=cand.healthSource==='probe'?' (probed now)':cand.healthSource==='catalog'?' (live catalog)':cand.healthSource==='snapshot'?(cand.catalogSource==='live'?' (snapshot; the live catalog row carries no health)':' (snapshot)'):' (not reported)';
+  cand.reasons=[kind+(matched.length?' + '+matched.join(', '):''),'health '+cand.health+healthNote,cand.costNote,'quality '+cand.quality+'/10, speed '+cand.speed+'/10'];
   if(cand.catalogSource==='snapshot')cand.reasons.push('listed only in the shipped snapshot');
   const built=buildArguments(cand.id,kind,options.text,{styles,aspect:options.aspect,durationSeconds:options.durationSeconds});cand.argumentShape=built.shape;
   if(cand.argumentShape==='unmodeled')cand.reasons.push('argument shape not modeled; review the request details');
@@ -404,12 +441,14 @@ function liveRow(row:unknown,kind:GenerationKind):Capability|null{
   ...(typeof r.scope==='string'&&r.scope?{scope:r.scope.slice(0,120)}:{}),...(typeof r.tier==='number'&&Number.isFinite(r.tier)?{tier:r.tier}:{})};
 }
 /** Overlays live rows on the snapshot: the live record's registration, health, description and scope win; the snapshot's
- * Studio medium (category) and node are kept so the Studio filters still find the tool. */
+ * Studio medium (category) and node are kept so the Studio filters still find the tool. A live row that carries no health
+ * (`unknown`, what the SDK bridge emits when the gate's search row has none) keeps the snapshot's health rather than
+ * erasing it; rankCandidates then labels that health as the snapshot's. */
 export function mergeCatalog(snapshot:Capability[],live:Capability[]):Capability[]{
  const byId=new Map(snapshot.map(c=>[c.id,c] as const));
  for(const row of live){
   const old=byId.get(row.id);
-  byId.set(row.id,old?{...old,registered:row.registered,health:row.health,description:row.description||old.description,...(row.scope?{scope:row.scope}:{}),...(row.tier!==undefined?{tier:row.tier}:{})}:row);
+  byId.set(row.id,old?{...old,registered:row.registered,health:row.health==='unknown'&&old.health?old.health:row.health,description:row.description||old.description,...(row.scope?{scope:row.scope}:{}),...(row.tier!==undefined?{tier:row.tier}:{})}:row);
  }
  return [...byId.values()];
 }
@@ -488,7 +527,8 @@ export class MediaRouter {
   if(cached&&this.now()-cached.at<PROBE_CACHE_MS)return {health:cached.health,source:'cached'};
   let health='unknown';
   try{
-   const record=obj(await Promise.race([this.options.read!(id),new Promise<never>((_,reject)=>{const t=setTimeout(()=>reject(new Error('probe timed out')),this.options.probeTimeoutMs??5000);signal?.addEventListener('abort',()=>{clearTimeout(t);reject(new Error('Interrupted'));},{once:true});})]));
+   // within() clears its timer and removes its abort listener whichever way the read settles.
+   const record=obj(await within(this.options.read!(id),this.options.probeTimeoutMs??5000,'Health probe',signal));
    const state=String(record.registration_state??''),status=String(record.health_status??'').toLowerCase();
    health=state&&state!=='registered'?'unregistered':status||'unknown';
   }catch(error){debug('%j',{event:'prime_media_probe_failed',id,reason:error instanceof Error?redact(error.message).slice(0,120):'failed'});}
@@ -524,7 +564,8 @@ export class MediaRouter {
   // Classify first, then ask the live catalog about that one kind only.
   const discovery=await this.discover(kind,signal);
   const base=mergeCatalog(this.options.catalog(),discovery.rows),listed=new Set(discovery.rows.map(c=>c.id));
-  const rankWith=(catalog:Capability[])=>rankCandidates(kind,catalog,{text,styles:classification.styles,aspect:classification.aspect,durationSeconds:classification.durationSeconds,live:listed});
+  const liveHealth=new Set(discovery.rows.filter(c=>c.health!=='unknown').map(c=>c.id));
+  const rankWith=(catalog:Capability[])=>rankCandidates(kind,catalog,{text,styles:classification.styles,aspect:classification.aspect,durationSeconds:classification.durationSeconds,live:listed,liveHealth});
   let ranked=rankWith(base);
   if(this.options.read&&data.probe!==false&&ranked.candidates.length){
    const top=ranked.candidates.slice(0,this.options.probeCount??3),results=await Promise.all(top.map(c=>this.probe(c.id,signal)));
@@ -535,7 +576,8 @@ export class MediaRouter {
    for(const c of [...ranked.candidates,...ranked.excluded])if(live.has(c.id)){c.healthSource='probe';c.reasons=c.reasons.map(r=>r.startsWith('health ')?'health '+c.health+' (probed now)':r);}
   }
   const picks=ranked.candidates.map(c=>this.toPick(c,kind,text,classification));
-  const excluded=ranked.excluded.slice(0,8).map(c=>({id:c.id,label:c.label,reason:c.unavailable!}));
+  // Every excluded generator is listed with its reason (no cap): nothing the catalog offers for this kind disappears.
+  const excluded=ranked.excluded.map(c=>({id:c.id,label:c.label,reason:c.unavailable!}));
   let reason:string|undefined;
   if(kind==='image-edit')reason='This asks to edit an existing image. Auto does not prepare edits: attach the source image in the Studio (Library → Use in Studio) and pick one of the editing-capable tools listed below yourself. Nothing was prepared.';
   else if(!picks.length)reason='No healthy '+kind+' generator is listed in the catalog right now; nothing was prepared and no other kind was substituted.';

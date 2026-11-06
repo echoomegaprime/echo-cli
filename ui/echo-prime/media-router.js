@@ -200,14 +200,16 @@
  const panel=el('div',{id:'media-auto',class:'media-auto','data-media-auto':''});panel.hidden=true;
  const status=el('p',{class:'media-status',role:'status','aria-live':'polite'});
  const pickBox=el('div',{class:'media-pick','data-media-pick':''});pickBox.hidden=true;
+ // The alternatives are always on screen next to the pick: overriding is one tap on the tool you want.
+ const alternativesTitle=el('p',{class:'media-alternatives-title','data-media-alternatives-title':''});
  const alternatives=el('div',{class:'media-alternatives',role:'list','data-media-alternatives':''});alternatives.hidden=true;
+ const excludedBox=el('details',{class:'media-excluded-wrap','data-media-excluded':''});excludedBox.hidden=true;
  const failure=el('div',{class:'media-failure',role:'alert','data-media-failure':''});failure.hidden=true;
  const repick=el('button',{type:'button',class:'quiet-button','data-media-repick':''},'Pick again for this brief');
- const toggle=el('button',{type:'button',class:'quiet-button','data-media-alternatives-toggle':'','aria-expanded':'false'},'Use a different tool');
- const actions=el('div',{class:'media-actions'},toggle,repick);
- panel.append(status,pickBox,actions,alternatives,failure);
+ const actions=el('div',{class:'media-actions'},repick);
+ panel.append(status,pickBox,alternativesTitle,alternatives,excludedBox,actions,failure);
  if(tools)tools.before(panel);
- toggle.addEventListener('click',()=>{alternatives.hidden=!alternatives.hidden;toggle.setAttribute('aria-expanded',String(!alternatives.hidden));});
+ alternativesTitle.hidden=true;
  repick.addEventListener('click',()=>{void routeInStudio(brief?brief.value.trim():'',null,HINT_OF_CATEGORY[category?category.value:'auto']);});
  const badge=(text,cls)=>el('span',{class:'media-badge'+(cls?' '+cls:'')},text);
  function applyPick(pick,how){
@@ -226,7 +228,7 @@
   return null;
  }
  function renderPick(r){
-  pickBox.replaceChildren();alternatives.replaceChildren();failure.hidden=true;failure.replaceChildren();
+  pickBox.replaceChildren();alternatives.replaceChildren();excludedBox.replaceChildren();failure.hidden=true;failure.replaceChildren();
   const c=r.classification||{},kind=c.kind||'unknown',sure=Math.round((c.confidence||0)*100);
   repick.textContent=r.picked?'Pick again for this brief':'Pick the best tool';
   const alts=Array.isArray(r.alternatives)?r.alternatives:[],excluded=Array.isArray(r.excluded)?r.excluded:[];
@@ -244,19 +246,21 @@
    pickBox.hidden=true;
    status.textContent=(r.reason||'Nothing was picked.')+catalogNote;
   }
-  toggle.hidden=!alts.length;toggle.textContent=r.picked?'Use a different tool ('+alts.length+')':'Tools for this ('+alts.length+')';
-  alternatives.hidden=!(alts.length&&!r.picked);toggle.setAttribute('aria-expanded',String(!alternatives.hidden));
+  alternatives.hidden=!alts.length;alternativesTitle.hidden=!alts.length;
+  alternativesTitle.textContent=r.picked?'Or use one of these instead (one tap):':'Tools for this ('+alts.length+'):';
   for(const a of alts){
    const b=el('button',{type:'button',class:'media-alternative',role:'listitem','data-media-alternative':a.id},el('strong',{},a.label+' · '+a.provider),el('span',{},'health '+a.health+' · '+a.costNote+' · '+a.quality+'/10'),el('small',{},a.reason));
    b.addEventListener('click',()=>{if(applyPick(a,'override')){status.textContent='You chose '+a.label+'. Review the request below, then submit it yourself.';lastRoute.picked=a;}});
    alternatives.append(b);
   }
-  if(excluded.length)alternatives.append(el('ul',{class:'media-excluded'},...excluded.map(x=>el('li',{},x.label+': '+x.reason))));
+  // Every generator the catalog lists for this kind but Auto will not use, with the reason (collapsed to keep the list short).
+  excludedBox.hidden=!excluded.length;
+  if(excluded.length)excludedBox.append(el('summary',{},'Not used for this brief ('+excluded.length+')'),el('ul',{class:'media-excluded'},...excluded.map(x=>el('li',{},x.label+': '+x.reason))));
  }
  async function routeInStudio(text,route,hint){
   const current=generation;
   panel.hidden=false;
-  if(!text){status.textContent='Type a brief above and Echo picks the best tool for it.';repick.textContent='Pick the best tool';pickBox.hidden=true;alternatives.hidden=true;toggle.hidden=true;failure.hidden=true;return;}
+  if(!text){status.textContent='Type a brief above and Echo picks the best tool for it.';repick.textContent='Pick the best tool';pickBox.hidden=true;alternatives.hidden=true;alternativesTitle.hidden=true;excludedBox.hidden=true;failure.hidden=true;return;}
   if(routing&&!route)return;
   if(route){lastRoute=route;renderPick(route);return;}
   const mode=hint||'auto';routing=true;status.textContent='Choosing the best '+(hint?hint+' ':'')+'tool…';
@@ -323,18 +327,22 @@
   debug('media','media_pick_failed',{id:d.name,state:d.state,next:next?next.id:null});
  });
 
- // ---- mount the two Enhance controls ----------------------------------------------------------------------------------
- if(composer){
-  const sendActions=$('#composer .send-actions');
-  mountEnhance({name:'composer',textarea:()=>$('#prompt'),mode:()=>autoMode?'auto':(MODE_OF[composerMode]||'chat'),
-   mount(wrap,note,added){if(sendActions){const send=sendActions.querySelector('.send');if(send)send.before(wrap);else sendActions.append(wrap);}else composer.append(wrap);composerNotice.after(note,added);}});
- }
+ // ---- Enhance controls ------------------------------------------------------------------------------------------------
+ // The Studio control is mounted here; the chat composer's control is mounted by composer.js (a deferred script, so it
+ // runs after this file) through window.EchoPrimeMediaRouter.mountEnhance with the shared provider chip, gate and Undo.
  if(brief){
   mountEnhance({name:'studio',textarea:()=>$('#creative-prompt'),mode:()=>{const cat=category?category.value:'auto';if(cat==='auto'||cat==='all'){const k=lastRoute&&lastRoute.classification&&lastRoute.classification.kind;return k&&k!=='chat'&&k!=='image-edit'?k:k==='image-edit'?'image':'auto';}return CATEGORY_MODE[cat]||'auto';},
    mount(wrap,note,added){const row=$('.creative-actions');if(row)row.append(wrap);else brief.after(wrap);(row||brief).after(note,added);}});
  }
- window.addEventListener('echo-account-changed',()=>{generation++;if(autoTimer){clearTimeout(autoTimer);autoTimer=null;}busy=false;routing=false;lastRoute=null;setAuto(false);notice('');panel.hidden=true;pickBox.replaceChildren();alternatives.replaceChildren();failure.replaceChildren();for(const s of enhancers){s.previous=null;s.undo.hidden=true;s.added.replaceChildren();s.added.hidden=true;s.note.hidden=true;s.busy=false;}report=null;reportState='loading';renderEnhance();void loadModels();});
+ window.addEventListener('echo-account-changed',()=>{generation++;if(autoTimer){clearTimeout(autoTimer);autoTimer=null;}busy=false;routing=false;lastRoute=null;setAuto(false);notice('');panel.hidden=true;pickBox.replaceChildren();alternatives.replaceChildren();excludedBox.replaceChildren();failure.replaceChildren();for(const s of enhancers){s.previous=null;s.undo.hidden=true;s.added.replaceChildren();s.added.hidden=true;s.note.hidden=true;s.busy=false;}report=null;reportState='loading';renderEnhance();void loadModels();});
  renderEnhance();
  const ready=loadModels();
- window.EchoPrimeMediaRouter={ready,refresh:loadModels,route:routeInStudio,isAuto:()=>autoMode,setAuto,provider:()=>provider,lastRoute:()=>lastRoute};
+ // Another surface (composer.js) mounts an Enhance control that shares this provider chip, owner gate and account reset.
+ function mountShared(options){
+  if(!options||typeof options.name!=='string'||typeof options.textarea!=='function'||typeof options.mode!=='function'||typeof options.mount!=='function')throw new Error('Invalid Enhance mount');
+  const existing=enhancers.find(s=>s.options.name===options.name);if(existing)return existing;
+  const state=mountEnhance(options);renderEnhance();return state;
+ }
+ window.EchoPrimeMediaRouter={ready,refresh:loadModels,route:routeInStudio,isAuto:()=>autoMode,setAuto,provider:()=>provider,lastRoute:()=>lastRoute,
+  mountEnhance:mountShared,composerMode:()=>autoMode?'auto':(MODE_OF[composerMode]||'chat')};
 })();

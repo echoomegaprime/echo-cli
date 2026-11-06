@@ -355,12 +355,13 @@ export class PrimeHub {
   * Spends nothing: the pick is a request shape for the existing prepare -> review -> execute path. Health probes reuse the
   * same `sdk.read` that `prepare` trusts (unwrapped, bounded, cached 60 s in the router). The candidates come from the live
   * catalog: kind-scoped `sdk.search` calls through the broker (5 s each, cached 60 s per kind), overlaid on the snapshot;
-  * live rows are kept in this hub's catalog like `/api/search` results (the snapshot's Studio medium is preserved). */
+  * live rows are kept in this hub's catalog like `/api/search` results (the snapshot's Studio medium is preserved, and a
+  * live row without health keeps the snapshot's health instead of erasing it). */
  async mediaRoute(input:unknown,signal?:AbortSignal){
   const sdk=this.options.sdk;
   this.media??=this.options.media??new MediaRouter({catalog:()=>this.capabilities(),read:sdk?id=>bounded(()=>sdk.read(id),8000).then(unwrap):undefined,
    search:sdk?query=>sdk.search(query):undefined,
-   onDiscovered:rows=>{for(const c of rows){if(!/^echo\.[A-Za-z0-9_.-]+$/.test(c.id))continue;const old=this.catalog.get(c.id);this.catalog.set(c.id,old?{...old,registered:c.registered,health:c.health}:{...c});}},
+   onDiscovered:rows=>{for(const c of rows){if(!/^echo\.[A-Za-z0-9_.-]+$/.test(c.id))continue;const old=this.catalog.get(c.id);this.catalog.set(c.id,old?{...old,registered:c.registered,health:c.health==='unknown'&&old.health?old.health:c.health}:{...c});}},
    models:this.options.models});
   return this.media.route(input,signal);
  }
