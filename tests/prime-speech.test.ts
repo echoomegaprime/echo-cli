@@ -65,7 +65,7 @@ function fakeBridge(over:Record<string,any>={}){
   startConversation:vi.fn(async()=>{}),stopVoice:vi.fn(async()=>{}),interrupt:vi.fn(async()=>{}),setChat:vi.fn(),onStatus:vi.fn((fn:(t:string)=>void)=>{hooks.push(fn);}),...over.bridge};
  return bridge;
 }
-async function world(files:string[],bridge:any,options:{enabled?:boolean;storage?:Map<string,string>;storageThrows?:boolean;rms?:{value:number};real?:{Transport:any};fetch?:any;hidden?:boolean}={}):Promise<World>{
+async function world(files:string[],bridge:any,options:{enabled?:boolean;storage?:Map<string,string>;storageThrows?:boolean;rms?:{value:number};real?:{Transport:any};fetch?:any;hidden?:boolean;now?:()=>number}={}):Promise<World>{
  const nodes=new Map<string,Node>(),events:Record<string,((event:any)=>unknown)[]>={},documentEvents:Record<string,((event:any)=>unknown)[]>={},orb:any[]=[],debug:any[]=[],utterances:any[]=[];
  const storage=options.storage??new Map<string,string>();
  const get=(selector:string)=>{if(!nodes.has(selector))nodes.set(selector,new Node());return nodes.get(selector)!;};
@@ -96,7 +96,7 @@ async function world(files:string[],bridge:any,options:{enabled?:boolean;storage
  const context={window,document,localStorage,sessionStorage:localStorage,navigator:{mediaDevices:{getUserMedia:media.getUserMedia}},crypto:{randomUUID},Event,CustomEvent,setTimeout,clearTimeout,console:{debug:(_tag:string,event:any)=>debug.push(event),warn:vi.fn()},
   Audio:FakeAudio,URL:{createObjectURL:()=>'blob:echo-'+(++urls),revokeObjectURL:vi.fn()},Blob,atob:(x:string)=>Buffer.from(x,'base64').toString('binary'),btoa:(x:string)=>Buffer.from(x,'binary').toString('base64'),
   speechSynthesis:synth,SpeechSynthesisUtterance,AudioContext,AbortController,AbortSignal,TextEncoder,TextDecoder,Error,Number,Math,JSON,Set,Map,Array,Object,String,Promise,Boolean,Float32Array,Uint8Array,ArrayBuffer,DataView,Infinity,
-  ...(options.fetch?{fetch:options.fetch}:{})};
+  ...(options.fetch?{fetch:options.fetch}:{}),...(options.now?{performance:{now:options.now}}:{})};
  if(options.hidden)document.hidden=true;
  if(options.real)get('#workspace-chat-kind').value='workspace';
  for(const file of files)runInNewContext(source(file),context);
@@ -583,7 +583,7 @@ function primeRoute(over:{status?:()=>unknown;speak?:(body:any,n:number,init:any
  });
  return {fetch,calls,speaks:()=>calls.filter(c=>c.url==='/api/prime/voice/speak'),statuses:()=>calls.filter(c=>c.url==='/api/prime/voice/status')};
 }
-async function primeWorld(route=primeRoute(),over:Record<string,any>={}){const bridge=fakeBridge(over);const w=await world(['speech.js'],bridge,{fetch:route.fetch});await vi.waitFor(()=>expect(w.speech.primeVoice).not.toBeNull());return {w,bridge,route};}
+async function primeWorld(route=primeRoute(),over:Record<string,any>={},now?:()=>number){const bridge=fakeBridge(over);const w=await world(['speech.js'],bridge,{fetch:route.fetch,...(now?{now}:{})});await vi.waitFor(()=>expect(w.speech.primeVoice).not.toBeNull());return {w,bridge,route};}
 const codeReply=(w:World,text='See https://x.y/z for 3 items.',article=new Node('article'))=>{w.emit('echo-code-reply',{text,article,status:'completed',sessionId:'s1'});return article;};
 async function playing(w:World,count=1){await vi.waitFor(()=>expect(w.spoken().length).toBeGreaterThanOrEqual(count));const audio=w.spoken()[count-1];await vi.waitFor(()=>expect(audio.paused).toBe(false));return audio;}
 const statusText=(w:World)=>w.attr('data-speech-status')!.textContent;
@@ -824,6 +824,21 @@ it('hiding the tab mid-reply pauses Echo and Resume Echo replays the same reply'
  w.document.hidden=false;w.emitDocument('visibilitychange');
  await w.attr('data-speech-resume')!.click();
  await vi.waitFor(()=>expect(route.speaks()).toHaveLength(2));expect(route.speaks()[1].body.text).toBe('See link for three items.');
+ w.dispose();
+});
+it('re-reads an unavailable verdict after a minute so Echo speaks again once the gateway is back',async()=>{
+ let up=false,now=1000;
+ const route=primeRoute({status:()=>jsonReply(200,up?primeStatus():{configured:true,available:false,reason:'Voice gateway unreachable at http://127.0.0.1:8239'})});
+ const {w}=await primeWorld(route,{},()=>now);
+ const article=codeReply(w,'Back online soon.');await tick();
+ expect(route.speaks()).toHaveLength(0);expect(statusText(w)).toContain('Voice gateway unreachable');
+ const speak=walk(article).find(n=>n.tagName==='BUTTON')!;
+ up=true;now+=30000;await speak.click();await tick();
+ expect(route.statuses()).toHaveLength(1);expect(route.speaks()).toHaveLength(0);// still inside the minute: the cached verdict answers
+ now+=31000;await speak.click();
+ await playing(w);
+ expect(route.statuses()).toHaveLength(2);expect(route.speaks()[0].body.text).toBe('Back online soon.');
+ expect(w.speech.primeVoice).toMatchObject({configured:true,available:true});
  w.dispose();
 });
 it('reports a failed or refused status check as the reason',async()=>{

@@ -396,8 +396,12 @@
  async function primeHeaders(extra={}){const ws=window.EchoPrimeWorkspace;const owner=typeof ws?.ownerHeaders==='function'?await ws.ownerHeaders():{};return {'x-prime-request':'1',...owner,...extra};}
  const primeOff=reason=>({configured:false,available:false,reason});
  const primeVoiceNow=()=>{const p=S.prime;return p&&p.epoch===bridge()?.state?.accountEpoch&&p.owner===ownerSession()?p:null;};
+ // An owner's "unavailable" verdict is re-read after a minute (the gateway may have come back); "available" stays cached
+ // for the identity, and a later synthesis failure still shows its own reason.
+ const PRIME_RECHECK_MS=60000;
+ const primeVoiceFresh=()=>{const p=primeVoiceNow();return p&&p.owner&&!(p.configured&&p.available)&&clock()-p.at>PRIME_RECHECK_MS?null:p;};
  function refreshPrimeVoice(){
-  const epoch=bridge()?.state?.accountEpoch,owner=ownerSession(),keep=value=>{S.prime={epoch,owner,...value};return S.prime;};
+  const epoch=bridge()?.state?.accountEpoch,owner=ownerSession(),keep=value=>{S.prime={epoch,owner,at:clock(),...value};return S.prime;};
   if(!owner)return Promise.resolve(keep(primeOff(signedIn()?"Echo's voice for these replies is owner-only":'sign in to an approved account')));
   if(typeof fetch!=='function')return Promise.resolve(keep(primeOff('this browser cannot reach the Prime voice route')));
   if(S.primeLoading&&S.primeLoading.epoch===epoch)return S.primeLoading.promise;
@@ -454,7 +458,7 @@
   const b=bridge(),source=options.source||'text',key=options.key||null,label=sourceLabel(source);
   if(!b)return false;
   if(typeof text!=='string'||!text.trim()){setStatus('Nothing to speak yet.');return false;}
-  const pv=primeVoiceNow()||await refreshPrimeVoice();
+  const pv=primeVoiceFresh()||await refreshPrimeVoice();
   if(!pv.configured||pv.available===false){
    // Device voice only behind its explicit toggle, and only because Echo's voice cannot reach this text at all.
    if(prefs.device)return speakText(text,{source,key});
