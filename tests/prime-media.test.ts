@@ -1,0 +1,400 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- focused SDK/model stand-ins */
+import {afterEach, describe, expect, it, vi} from 'vitest';
+import {mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
+import {createServer, type Server} from 'node:http';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import cases from './fixtures/media-classifier-cases.json';
+import type {ModelRouter} from '../src/code/model-factory.js';
+import type {PromptEnhancer} from '../src/prime/enhance.js';
+import {DEFAULT_GATE_CALL_KINDS,defaultMediaConfig} from '../src/prime/media-collect.js';
+import {MediaOutcomes} from '../src/prime/media-outcomes.js';
+import {PrimeHub, type Capability, type Json, type SdkBroker} from '../src/prime/hub.js';
+import {sdkBroker} from '../src/prime/sdk.js';
+import {startPrimeServer} from '../src/prime/server.js';
+import {
+  argumentTemplate, buildArguments, classifyPrompt, classifyWithModel, describeCandidate, materialize, MEDIA_SEARCHES, MediaError, MediaRouter,
+  mergeCatalog, NOT_A_GENERATOR, RANKING, rankCandidates, shapeOf, SNAPSHOT_ONLY, type MediaKind,
+} from '../src/prime/media.js';
+
+const cap=(id:string,extra:Partial<Capability>={}):Capability=>({id,registered:true,health:'green',category:'image',description:'generator',...extra});
+// Together image caps as the registry describes them (call_kind=together_image_generation). The gate does not run that
+// kind on 2026-11-06, so tests that rank them say the gate runs it (RUNS); the default list excludes them.
+const TI='Call Together image; type=image; call_kind=together_image_generation.';
+const RUNS=[...DEFAULT_GATE_CALL_KINDS,'together_image_generation'];
+const imageCatalog=()=>[
+  cap('echo.llm.together.black-forest-labs-FLUX.2-max',{description:TI}),
+  cap('echo.llm.together.google-flash-image-2.5',{description:TI}),
+  cap('echo.media.image_generate'),
+  cap('echo.llm.together.stabilityai-stable-diffusion-xl-base-1.0',{description:TI}),
+];
+
+function modelStub(action:any={action:'final',content:JSON.stringify({kind:'video',styles:['cinematic']})}){
+  const next=vi.fn(async()=>action),turn=vi.fn((_id:string)=>({model:{next},answered(){return null;},info(){return {id:'qwen',label:'Qwen',requested:'q',model:'q',reported:true,answered:true};}}));
+  return {router:{turn} as unknown as ModelRouter,next,turn};
+}
+
+it.each(cases)('classifies fixture: $why',testCase=>{
+  const result=classifyPrompt(testCase.text);
+  expect(result.kind).toBe(testCase.kind);
+  for(const style of testCase.styles)expect(result.styles).toContain(style);
+  if(testCase.aspect)expect(result.aspect).toBe(testCase.aspect);
+  if(testCase.durationSeconds)expect(result.durationSeconds).toBe(testCase.durationSeconds);
+});
+
+describe('rules and model classification',()=>{
+  it('lets a valid hint win with full confidence',()=>expect(classifyPrompt('a cat',{hint:'music'})).toMatchObject({kind:'music',confidence:1,source:'hint'}));
+  it('rejects an invalid hint',()=>expect(()=>classifyPrompt('a cat',{hint:'bogus' as any})).toThrow(expect.objectContaining({status:400} as MediaError)));
+  it('removes negated music and voice signals',()=>expect(['music','voice']).not.toContain(classifyPrompt('a quiet forest photo, no music, no voice').kind));
+  it('uses image and chat fallbacks at 0.3 confidence',()=>{
+    expect(classifyPrompt('zzzz qqqq')).toMatchObject({kind:'image',confidence:.3});
+    expect(classifyPrompt('zzzz qqqq',{fallback:'chat'})).toMatchObject({kind:'chat',confidence:.3});
+  });
+  it('parses seconds and minutes',()=>{
+    expect(classifyPrompt('a ten second clip of waves').durationSeconds).toBe(10);
+    expect(classifyPrompt('2 minutes of ambient music').durationSeconds).toBe(120);
+  });
+  it('raises confidence when the model agrees',async()=>{
+    const s=modelStub(),rules=classifyPrompt('a ten second video clip');
+    const result=await classifyWithModel(s.router,'a ten second video clip',rules);
+    expect(result.confidence).toBe(Math.min(.98,rules.confidence+.15));expect(result.signals).toContain('model:video');expect(s.turn).toHaveBeenCalledWith('qwen');
+  });
+  it('lets the model replace weak rules with 0.8 confidence',async()=>{
+    const s=modelStub(),rules=classifyPrompt('zzzz qqqq');
+    expect(await classifyWithModel(s.router,'zzzz qqqq',rules)).toMatchObject({kind:'video',confidence:.8});
+  });
+  it('keeps strong rules when the model disagrees',async()=>{
+    const s=modelStub({action:'final',content:JSON.stringify({kind:'music',styles:[]})}),rules=classifyPrompt('video clip footage trailer');
+    expect(rules.confidence).toBeGreaterThanOrEqual(.75);expect((await classifyWithModel(s.router,'video clip footage trailer',rules)).kind).toBe('video');
+  });
+  it('keeps rules for malformed model content',async()=>{
+    const s=modelStub({action:'final',content:'not json'}),rules=classifyPrompt('a photo');const result=await classifyWithModel(s.router,'a photo',rules);
+    expect(result.kind).toBe(rules.kind);expect(result.modelReason).toContain('rules result kept');
+  });
+  it('keeps rules for a model tool action',async()=>{
+    const s=modelStub({action:'list',path:'.'}),rules=classifyPrompt('a photo');const result=await classifyWithModel(s.router,'a photo',rules);
+    expect(result.kind).toBe(rules.kind);expect(result.modelReason).toContain('tool action');
+  });
+  it('keeps rules when the model throws',async()=>{
+    const s=modelStub();s.next.mockRejectedValueOnce(new Error('offline'));const rules=classifyPrompt('a photo');
+    await expect(classifyWithModel(s.router,'a photo',rules)).resolves.toMatchObject({kind:rules.kind,modelReason:expect.any(String)});
+  });
+  it('redacts API-key-looking prompt text before model inference',async()=>{
+    const secret='ghp_'+'a'.repeat(36),s=modelStub();await classifyWithModel(s.router,'video '+secret,classifyPrompt('video '+secret));
+    expect(JSON.stringify(s.next.mock.calls[0][0])).not.toContain(secret);expect(s.turn).toHaveBeenCalledWith('qwen');
+  });
+});
+
+describe('candidate ranking and arguments',()=>{
+  it('sorts candidates by descending score',()=>{
+    const rows=rankCandidates('image',imageCatalog(),{text:'make an image'}).candidates;
+    expect(rows.map(r=>r.score)).toEqual([...rows.map(r=>r.score)].sort((a,b)=>b-a));
+  });
+  it('uses health, cost, quality, then id for equal-score ties',()=>{
+    const ids=['echo.llm.together.acme-image-b','echo.llm.together.acme-image-a'];
+    const rows=rankCandidates('image',ids.map(id=>cap(id,{description:'text-to-image generator; '+TI})),{text:'image',callKinds:RUNS}).candidates;
+    expect(rows.map(r=>r.id)).toEqual([...ids].sort());
+  });
+  it('excludes red and unregistered candidates with explicit reasons',()=>{
+    const result=rankCandidates('image',[cap('echo.image.generate',{health:'red'}),cap('echo.media.image_generate',{registered:false})],{text:'image'});
+    expect(result.candidates).toHaveLength(0);expect(result.excluded.map(x=>x.unavailable)).toEqual(expect.arrayContaining([expect.stringContaining('health red'),'not registered']));
+  });
+  it('excludes Cartesia voice text over 400 characters',()=>{
+    const result=rankCandidates('voice',[cap('echo.cartesia.tts',{category:'voice'})],{text:'x'.repeat(401)});
+    expect(result.excluded[0].unavailable).toContain('400');
+  });
+  it('raises fit for a matching photoreal style',()=>{
+    const result=rankCandidates('image',[cap('echo.llm.together.black-forest-labs-FLUX.2-max',{description:TI}),cap('echo.llm.together.stabilityai-stable-diffusion-xl-base-1.0',{description:TI})],{text:'fox',styles:['photoreal'],callKinds:RUNS});
+    expect(result.candidates.find(x=>x.id.includes('FLUX.2-max'))!.fit).toBeGreaterThan(result.candidates.find(x=>x.id.includes('stable-diffusion'))!.fit);
+  });
+  it('drops ids that are not generation entry points, judged on the id only',()=>{
+    for(const c of [cap('echo.elevenlabs.speech_to_text.stt'),cap('echo.x.video_retrieve'),cap('echo.media.job_status',{description:'poll image_generate jobs'}),cap('echo.cartesia.voices',{description:'list TTS voices'}),cap('echo.voice.speak.batch',{description:'text to speech for many lines'})])expect(describeCandidate(c),c.id).toBeNull();
+    // Words that name a non-generator operation inside a description never drop a generator.
+    for(const description of ['If still running: poll echo.media.job_status.','Params: prompt|messages, system?, max_tokens?','base image + prompt; MinIO upload.','returns stems of the track'])
+      expect(describeCandidate(cap('echo.media.image_generate',{description})),description).toMatchObject({id:'echo.media.image_generate',kinds:['image']});
+  });
+  it('lists deprecated, retired, duplicate-test and test-debug generators as excluded with the registry reason',()=>{
+    const rows=[cap('echo.voice.tts',{category:'voice',description:'[RETIRED -> echo.voice.speak / echo.voice.elevenlabs.tts] voice.tts'}),cap('echo.llm.cartesia.tts',{category:'voice',description:'Cartesia TTS [DEPRECATED -> use echo.voice.speak]'})];
+    const voice=rankCandidates('voice',rows,{text:'hello'});
+    expect(voice.candidates).toEqual([]);
+    expect(voice.excluded.map(c=>[c.id,c.unavailable])).toEqual(expect.arrayContaining([['echo.voice.tts','marked RETIRED in the registry (use echo.voice.speak / echo.voice.elevenlabs.tts instead)'],['echo.llm.cartesia.tts','marked DEPRECATED in the registry (use echo.voice.speak instead)']]));
+    const video=rankCandidates('video',[cap('echo.llm.together.google-veo-3.0',{description:'Call Together Duplicate Test (google/veo-3.0); type=video'}),cap('echo.llm.together.google-veo-3.1-test-debug',{description:'type=video'})],{text:'waves'});
+    expect(video.candidates).toEqual([]);expect(video.excluded.map(c=>c.unavailable)).toEqual(expect.arrayContaining([expect.stringContaining('duplicate test'),expect.stringContaining('test/debug')]));
+    // Lowercase prose is not a registry marker.
+    expect(describeCandidate(cap('echo.voice.speak',{description:'Unified TTS; replaces the deprecated echo.voice.tts'}))!.unavailable).toBeUndefined();
+  });
+  it('builds flat on-prem image fields with dimensions and style (http json_body: the gate validates top-level prompt)',()=>{
+    expect(buildArguments('echo.media.image_generate','image','fox',{styles:['anime'],aspect:'16:9'})).toMatchObject({shape:'modeled',arguments:{prompt:'fox',wait:false,style:'anime',width:1024,height:576}});
+    expect(buildArguments('echo.media.image_generate','image','fox',{styles:[],aspect:'9:16'}).arguments).toEqual({prompt:'fox',wait:false,width:576,height:1024});
+  });
+  it('sends json_body voice caps flat params, never a {command,options} envelope (the gate answered: text is a required property)',()=>{
+    for(const id of ['echo.voice.speak','echo.elevenlabs.tts','echo.cartesia.tts','echo.voice.cartesia.tts','echo.aws.polly_tts'])expect(buildArguments(id,'voice','hello').arguments,id).toEqual({text:'hello'});
+  });
+  it('sends the ElevenLabs op router flat fields (elevenlabs_full.py forwards the body to ElevenLabs) with clamped lengths',()=>{
+    expect(buildArguments('echo.elevenlabs.music_generation.generate','music','song',{styles:[],durationSeconds:30}).arguments).toEqual({prompt:'song',music_length_ms:30000});
+    expect(buildArguments('echo.elevenlabs.music_generation.compose_detailed','music','song',{styles:[],durationSeconds:1}).arguments).toEqual({prompt:'song',music_length_ms:3000});
+    expect(buildArguments('echo.elevenlabs.sound_generation.sound_generation','sfx','boom',{styles:[],durationSeconds:90}).arguments).toEqual({text:'boom',duration_seconds:30});
+    expect(buildArguments('echo.unknown.generator','image','hello')).toMatchObject({shape:'unmodeled',arguments:{command:'generator',prompt:'hello',options:{prompt:'hello'}}});
+  });
+  it('uses the uniform "call" command at the top level for echo.llm model caps whose ids contain version dots',()=>{
+    expect(buildArguments('echo.llm.together.black-forest-labs-FLUX.2-max','image','fox')).toMatchObject({shape:'modeled',arguments:{command:'call',prompt:'fox'}});
+    expect(buildArguments('echo.llm.together.google-veo-3.1','video','waves').arguments).toEqual({command:'call',prompt:'waves'});
+    expect(buildArguments('echo.fal.generate','image','fox').arguments).toEqual({prompt:'fox'});
+  });
+  it('puts the requested length into video requests: Together seconds as a string 1-10, on-prem frames at a frame rate',()=>{
+    expect(buildArguments('echo.llm.together.openai-sora-2','video','boat',{styles:[],durationSeconds:5}).arguments).toEqual({command:'call',prompt:'boat',seconds:'5'});
+    expect(buildArguments('echo.llm.together.openai-sora-2','video','boat',{styles:[],durationSeconds:30}).arguments).toMatchObject({seconds:'10'});
+    expect(buildArguments('echo.media.video_generate','video','boat',{styles:[],durationSeconds:5}).arguments).toEqual({prompt:'boat',wait:false,fps:24,length:121});
+    expect(buildArguments('echo.media.video_generate','video','boat',{styles:[],durationSeconds:16}).arguments).toMatchObject({fps:8,length:129});
+    expect(buildArguments('echo.llm.together.openai-sora-2','video','boat').arguments).toEqual({command:'call',prompt:'boat'});
+    expect(materialize(argumentTemplate('echo.llm.together.openai-sora-2','video'),'new brief',3)).toEqual({command:'call',prompt:'new brief',seconds:'3'});
+  });
+  it('lets the live registry record decide an unknown cap: http json_body is flat on its declared field, router is dual and unmodeled',()=>{
+    const http=shapeOf({capability:{handler_kind:'http',args_mode:'json_body',params:[{name:'text',required:true},{name:'voice',required:false}]}});
+    expect(http).toEqual({handlerKind:'http',argsMode:'json_body',params:[{name:'text',required:true},{name:'voice',required:false}]});
+    expect(buildArguments('echo.acme.narrate','voice','hi',undefined,http)).toMatchObject({shape:'modeled',arguments:{text:'hi'}});
+    expect(buildArguments('echo.acme.paint','image','fox',undefined,shapeOf({capability:{handler_kind:'http',params:[{name:'prompt',required:true}]}}))).toMatchObject({shape:'modeled',arguments:{prompt:'fox'}});
+    expect(buildArguments('echo.acme.render','image','fox',undefined,shapeOf({capability:{handler_kind:'router',params:[]}}))).toMatchObject({shape:'unmodeled',arguments:{command:'render',prompt:'fox',options:{prompt:'fox'}}});
+    expect(shapeOf({capability:{}})).toBeUndefined();
+  });
+  it('never builds a prepare-forbidden argument key for at least 25 ranked ids',()=>{
+    const forbidden=/"(?:force_video|grant|api_key|access_token|authorization|confirm|bypass_reason)"\s*:/i;
+    const samples=[
+      'echo.media.image_generate','echo.image.qwen.generate','echo.image.generate','echo.llm.together.gemini-3-pro-image','echo.llm.together.gemini-3.1-flash-image','echo.llm.together.FLUX.2-max','echo.llm.together.FLUX.2-pro','echo.llm.together.FLUX.2-flex','echo.llm.together.FLUX.1-schnell','echo.llm.together.Seedream-4.0','echo.llm.together.gpt-image-2','echo.llm.together.imagen-4.0','echo.llm.together.ideogram-4.0','echo.llm.together.Qwen-Image-2.0-Pro','echo.llm.together.stable-diffusion-xl','echo.media.video_generate','echo.llm.together.veo-3.1','echo.llm.together.sora-2-pro','echo.llm.together.kling-2.1-master','echo.llm.together.Seedance-2.0','echo.elevenlabs.music_generation.generate','echo.elevenlabs.music_generation.compose_detailed','echo.elevenlabs.sound_generation.sound_generation','echo.elevenlabs.tts','echo.voice.speak','echo.cartesia.tts','echo.aws.polly_tts','echo.azure.cognitive_speech_tts','echo.google.speech.tts',
+    ];
+    expect(samples).toHaveLength(29);
+    for(const id of samples){const ranking=RANKING.find(r=>r.match.test(id));expect(ranking,id).toBeTruthy();for(const kind of ranking!.kinds)expect(JSON.stringify(buildArguments(id,kind,'a prompt with api_key word inside text').arguments),id).not.toMatch(forbidden);}
+  });
+});
+
+describe('MediaRouter',()=>{
+  it('passes conversation prompts to chat',async()=>{
+    const r=await new MediaRouter({catalog:imageCatalog}).route({text:'What is the capital of Portugal?',classifier:false});
+    expect(r.picked).toBeNull();expect(r.reason).toMatch(/conversation/i);expect(r.alternatives).toEqual([]);
+  });
+  it('returns one image pick and no duplicate alternatives',async()=>{
+    const r=await new MediaRouter({catalog:imageCatalog}).route({text:'a fox photo',classifier:false,probe:false});
+    expect(r.picked).toMatchObject({cap:expect.any(String),provider:expect.any(String),reason:expect.stringMatching(/^Picked /),request:{target:'sdk',name:expect.any(String),arguments:expect.any(Object)}});
+    expect(r.alternatives.map(x=>x.id)).not.toContain(r.picked!.id);expect(r.alternatives.length).toBeLessThanOrEqual(6);
+  });
+  it('refuses to auto-prepare an image edit',async()=>{
+    const r=await new MediaRouter({catalog:imageCatalog}).route({text:'remove the background from my photo',classifier:false,probe:false});expect(r.picked).toBeNull();expect(r.reason).toMatch(/attach/i);
+  });
+  it('reports when no healthy generator exists',async()=>{
+    const r=await new MediaRouter({catalog:()=>[cap('echo.image.generate',{health:'red'})]}).route({text:'a fox image',classifier:false,probe:false});expect(r.picked).toBeNull();expect(r.reason).toMatch(/No healthy/i);
+  });
+  it.each([{text:'x',extra:1},{text:''},{text:'x'.repeat(12001)},{text:'x',mode:'bad'},{text:'x',fallback:'bad'},{text:'x',probe:'yes'}])('rejects invalid route input %#',async input=>{
+    await expect(new MediaRouter({catalog:imageCatalog}).route(input)).rejects.toMatchObject({status:400});
+  });
+  it('probes, caches for 60 seconds, and refreshes after 61 seconds',async()=>{
+    let now=0;const read=vi.fn(async(id:string)=>({registration_state:'registered',health_status:id.includes('FLUX.2-max')?'red':'green'}));const router=new MediaRouter({catalog:imageCatalog,read,now:()=>now,probeCount:2,callKinds:RUNS});
+    const first=await router.route({text:'photoreal fox image',classifier:false});expect(first.picked!.id).not.toContain('FLUX.2-max');expect(first.probe.source).toBe('live');expect(first.probe.probed).toHaveLength(2);
+    const calls=read.mock.calls.length;now=59000;expect((await router.route({text:'photoreal fox image',classifier:false})).probe.source).toBe('cached');expect(read).toHaveBeenCalledTimes(calls);
+    now=61000;expect((await router.route({text:'photoreal fox image',classifier:false})).probe.source).toBe('live');expect(read.mock.calls.length).toBeGreaterThan(calls);
+  });
+  it('treats a rejected probe as unknown without throwing',async()=>{
+    const r=await new MediaRouter({catalog:()=>[cap('echo.media.image_generate')],read:vi.fn(async()=>{throw new Error('down');}),probeCount:1}).route({text:'fox image',classifier:false});expect(r.picked).toBeTruthy();expect(r.picked!.health).toBe('unknown');
+  });
+  it('consults models only for weak unhinted rules',async()=>{
+    const s=modelStub();await new MediaRouter({catalog:imageCatalog,models:s.router}).route({text:'zzzz qqqq',fallback:'image',classifier:false});expect(s.next).not.toHaveBeenCalled();
+    await new MediaRouter({catalog:imageCatalog,models:s.router}).route({text:'zzzz qqqq',fallback:'image',probe:false});expect(s.next).toHaveBeenCalledTimes(1);
+    s.next.mockClear();await new MediaRouter({catalog:imageCatalog,models:s.router}).route({text:'a fox',mode:'video',probe:false});expect(s.next).not.toHaveBeenCalled();
+  });
+});
+
+describe('live catalog discovery',()=>{
+  const FLUX='echo.llm.together.black-forest-labs-FLUX.2-max';
+  const live=(id:string,extra:Record<string,unknown>={})=>({id,description:'text-to-image generator; '+TI,registered:true,health:'green',...extra});
+  it('ranks a generator only the live catalog lists, with its record for the Studio',async()=>{
+    const search=vi.fn(async(q:string)=>q==='flux'?[live(FLUX)]:[]);
+    const r=await new MediaRouter({catalog:()=>[],search,callKinds:RUNS}).route({text:'a photoreal fox image',classifier:false,probe:false});
+    expect(search.mock.calls.map(c=>c[0])).toEqual([...MEDIA_SEARCHES.image]);
+    expect(r.picked).toMatchObject({id:FLUX,catalogSource:'live',healthSource:'catalog',reason:expect.stringContaining('health green (live catalog)')});
+    expect(r.catalog).toMatchObject({source:'live',listed:1,failed:[],cached:false});expect(r.catalog.reason).toBeUndefined();
+    expect(r.records).toEqual([{id:FLUX,registered:true,health:'green',category:'image',description:'text-to-image generator; '+TI}]);
+  });
+  it('lets the live record replace stale snapshot health while keeping the snapshot medium',async()=>{
+    const snapshot=[cap('echo.media.image_generate',{health:'red',category:'tools'})];
+    const offline=await new MediaRouter({catalog:()=>snapshot}).route({text:'a fox image',classifier:false,probe:false});
+    expect(offline.picked).toBeNull();expect(offline.excluded[0].reason).toContain('health red');
+    const search=vi.fn(async(q:string)=>q==='image_generate'?[live('echo.media.image_generate',{description:''})]:[]);
+    const r=await new MediaRouter({catalog:()=>snapshot,search}).route({text:'a fox image',classifier:false,probe:false});
+    expect(r.picked).toMatchObject({id:'echo.media.image_generate',health:'green',catalogSource:'live'});
+    expect(r.records[0]).toMatchObject({category:'tools',description:'generator',health:'green'});
+  });
+  it('names failed and over-bound searches and marks the result partial',async()=>{
+    const search=vi.fn(async(q:string)=>{if(q==='flux')throw new Error('broker offline');if(q==='imagen')return Array.from({length:101},(_,i)=>live('echo.x.image_'+i));return q==='image_generate'?[live('echo.media.image_generate',{description:'Routed on-prem text-to-image'})]:[];});
+    const r=await new MediaRouter({catalog:imageCatalog,search}).route({text:'a fox image',classifier:false,probe:false});
+    expect(r.catalog.source).toBe('partial');
+    expect(r.catalog.failed).toEqual([{query:'flux',reason:'broker offline'},{query:'imagen',reason:expect.stringContaining('100-row bound')}]);
+    expect(r.catalog.reason).toContain('2 of 4 live catalog searches failed');expect(r.picked).toBeTruthy();
+  });
+  it('says the ranking is the shipped snapshot when every search fails, and retries next time',async()=>{
+    const search=vi.fn(async()=>{throw new Error('Catalog search truncated; use a narrower query');});
+    const router=new MediaRouter({catalog:imageCatalog,search});
+    const r=await router.route({text:'a fox image',classifier:false,probe:false});
+    expect(r.catalog).toMatchObject({source:'snapshot',listed:0,cached:false,reason:expect.stringMatching(/^Every live catalog search failed \(first: Catalog search truncated/)});
+    expect(r.picked!.catalogSource).toBe('snapshot');expect(r.picked!.reason).toContain(SNAPSHOT_ONLY);
+    await router.route({text:'a fox image',classifier:false,probe:false});expect(search).toHaveBeenCalledTimes(8);
+  });
+  it('reports a search that does not answer in time as failed',async()=>{
+    const r=await new MediaRouter({catalog:imageCatalog,search:()=>new Promise(()=>{}),searchTimeoutMs:5}).route({text:'a fox image',classifier:false,probe:false});
+    expect(r.catalog.source).toBe('snapshot');expect(r.catalog.failed.every(f=>f.reason.includes('timed out'))).toBe(true);
+  });
+  it('caches each kind for 60 seconds and searches another kind with its own queries',async()=>{
+    let now=0;const search=vi.fn(async()=>[] as unknown[]),router=new MediaRouter({catalog:imageCatalog,search,now:()=>now});
+    await router.route({text:'a fox image',classifier:false,probe:false});expect(search).toHaveBeenCalledTimes(4);
+    now=30000;expect((await router.route({text:'a fox image',classifier:false,probe:false})).catalog.cached).toBe(true);expect(search).toHaveBeenCalledTimes(4);
+    await router.route({text:'a lofi hip hop beat',classifier:false,probe:false});expect(search.mock.calls.slice(4).map(c=>(c as unknown[])[0])).toEqual([...MEDIA_SEARCHES.music]);
+    now=61000;await router.route({text:'a fox image',classifier:false,probe:false});expect(search).toHaveBeenCalledTimes(10);
+  });
+  it('says there is no live catalog without a search, and does not search for chat',async()=>{
+    const r=await new MediaRouter({catalog:imageCatalog}).route({text:'a fox image',classifier:false,probe:false});
+    expect(r.catalog).toMatchObject({source:'snapshot',queries:[],reason:expect.stringContaining('`sdk` section')});
+    const search=vi.fn(async()=>[]),chat=await new MediaRouter({catalog:imageCatalog,search}).route({text:'What is the capital of Portugal?',classifier:false});
+    expect(chat.catalog.source).toBe('none');expect(chat.records).toEqual([]);expect(search).not.toHaveBeenCalled();
+  });
+  it('overlays live registration and health on a snapshot entry but keeps its medium and description',()=>{
+    expect(mergeCatalog([cap('echo.a.image',{category:'image',health:'red'})],[{id:'echo.a.image',registered:false,health:'green',category:'video',description:''}])).toEqual([cap('echo.a.image',{category:'image',health:'green',registered:false})]);
+  });
+  it('ignores live rows whose ids are not capability ids',async()=>{
+    const r=await new MediaRouter({catalog:()=>[],search:async()=>[{id:'not-an-echo-cap',health:'green'},{id:'echo.bad id',health:'green'},'x',null]}).route({text:'a fox image',classifier:false,probe:false});
+    expect(r.catalog.listed).toBe(0);expect(r.picked).toBeNull();
+  });
+  it('wires the hub to the SDK broker search and keeps live rows in the hub catalog',async()=>{
+    const search=vi.fn(async(q:string)=>q==='flux'?[{id:FLUX,description:'text-to-image; '+TI,registered:true,health:'green',category:'discovered'} as Capability]:q==='image_generate'?[{id:'echo.fal.generate',description:'',registered:true,health:'amber',category:'discovered'} as Capability]:[]);
+    const sdk={search,read:vi.fn(),invoke:vi.fn()} as unknown as SdkBroker;
+    const hub=new PrimeHub({capabilities:[cap('echo.fal.generate',{health:'unknown'})],sdk,mediaConfig:{...defaultMediaConfig(),gateCallKinds:RUNS}});
+    const r=await hub.mediaRoute({text:'a photoreal fox image',classifier:false,probe:false});
+    expect(r.catalog.source).toBe('live');expect(r.picked!.id).toBe(FLUX);
+    expect(hub.capabilities()).toEqual(expect.arrayContaining([expect.objectContaining({id:FLUX,category:'image'}),expect.objectContaining({id:'echo.fal.generate',category:'image',health:'amber'})]));
+  });
+});
+
+// The shipped ui/echo-prime/catalog.json carries the registry's real descriptions (183 rows); the synthetic fixtures above
+// cannot catch a rule that misfires on real description text.
+describe('shipped catalog snapshot',()=>{
+  const snapshot=(JSON.parse(readFileSync(new URL('../ui/echo-prime/catalog.json',import.meta.url),'utf8')) as {capabilities:Capability[]}).capabilities;
+  const row=(id:string)=>{const found=snapshot.find(c=>c.id===id);if(!found)throw new Error('snapshot is missing '+id);return found;};
+  const OPENROUTER_IMAGE=['google-gemini-2.5-flash-image','google-gemini-3-pro-image','google-gemini-3-pro-image-preview','google-gemini-3.1-flash-image','google-gemini-3.1-flash-image-preview','google-gemini-3.1-flash-lite-image','openai-gpt-5-image','openai-gpt-5-image-mini','openai-gpt-5.4-image-2'].map(m=>'echo.llm.openrouter.'+m);
+  it('keeps every RANKING-listed generator: each is a candidate or excluded with a reason for every kind it ranks for',()=>{
+    const ranked=snapshot.filter(c=>RANKING.some(r=>r.match.test(c.id)));
+    expect(ranked.length).toBeGreaterThan(100);
+    const byKind=new Map<MediaKind,Set<string>>();
+    for(const kind of ['image','image-edit','video','music','sfx','voice'] as MediaKind[]){const r=rankCandidates(kind,snapshot,{text:'a prompt'});byKind.set(kind,new Set([...r.candidates,...r.excluded].map(c=>c.id)));}
+    const vanished=ranked.filter(c=>RANKING.find(r=>r.match.test(c.id))!.kinds.some(kind=>!byKind.get(kind)!.has(c.id))).map(c=>c.id);
+    expect(vanished).toEqual([]);
+    for(const c of snapshot.filter(c=>NOT_A_GENERATOR.test(c.id)))expect(RANKING.some(r=>r.match.test(c.id)),c.id).toBe(false);
+  });
+  it('ranks the generators whose real descriptions mention job_status, system? or MinIO upload',()=>{
+    expect(row('echo.media.image_generate').description).toContain('job_status');
+    for(const id of OPENROUTER_IMAGE)expect(row(id).description,id).toContain('system?');
+    expect(row('echo.google.vertex.imagen_edit').description).toContain('upload');
+    const image=rankCandidates('image',snapshot,{text:'a fox'}).candidates.map(c=>c.id);
+    expect(image).toContain('echo.media.image_generate');
+    // OpenRouter image models run through the gate's chat path (openai_compat), which returns text: listed with that reason, never dropped.
+    const out=rankCandidates('image',snapshot,{text:'a fox'}).excluded;
+    for(const id of OPENROUTER_IMAGE)expect(out.find(c=>c.id===id)?.unavailable,id).toContain('chat path');
+    const edit=rankCandidates('image-edit',snapshot,{text:'edit this photo'});
+    expect(edit.excluded.find(c=>c.id==='echo.google.vertex.imagen_edit')!.unavailable).toContain('health orphaned');
+  });
+  it('lists the owner-disabled on-prem video tool and the registry test rows under excluded, ranks an untested call kind lower, and excludes it once the gate refused it',async()=>{
+    const r=await new MediaRouter({catalog:()=>snapshot}).route({text:'a ten second video of waves at dusk',classifier:false,probe:false});
+    expect(r.classification.kind).toBe('video');
+    expect(r.excluded.find(x=>x.id==='echo.media.video_generate')!.reason).toContain('owner-disabled');
+    expect(r.excluded.find(x=>x.id==='echo.llm.together.google-veo-3.0')!.reason).toContain('duplicate test');
+    expect(r.excluded.find(x=>x.id==='echo.llm.together.google-veo-3.1-test-debug')!.reason).toContain('test/debug');
+    expect(r.excluded.length).toBeGreaterThan(2);
+    // The gate's known call kinds (llm_router.py, 2026-11-06) include no Together video kind: those tools are offered ranked
+    // lower with that reason, so the ranking adapts the moment the gate runs them.
+    expect(r.excluded.some(x=>x.id==='echo.llm.together.openai-sora-2')).toBe(false);
+    expect(r.picked!.id).toMatch(/^echo\.llm\.together\./);
+    expect(r.picked!.demoted).toMatchObject({category:'untested',reason:expect.stringContaining('together_video_generation')});
+    expect(r.picked!.reason).toContain('ranked lower');
+    // Once the gate answered "unsupported call_kind", the kind is out: nothing is offered rather than a tool that cannot run.
+    const learned=new MediaOutcomes();learned.record({cap:'echo.llm.together.openai-sora-2',provider:'Together AI',state:'blocked',detail:"unsupported call_kind 'together_video_generation'"});
+    const refused=await new MediaRouter({catalog:()=>snapshot,outcomes:learned}).route({text:'a ten second video of waves at dusk',classifier:false,probe:false});
+    expect(refused.picked).toBeNull();expect(refused.reason).toMatch(/No healthy, runnable video generator/);
+    expect(refused.excluded.find(x=>x.id==='echo.llm.together.openai-sora-2')!.reason).toContain('together_video_generation');
+    const once=await new MediaRouter({catalog:()=>snapshot,callKinds:['openai_compat','together_video_generation']}).route({text:'a ten second video of waves at dusk',classifier:false,probe:false});
+    expect(once.picked!.id).toMatch(/^echo\.llm\.together\./);expect(once.picked!.request.arguments).toMatchObject({command:'call',seconds:'10'});expect(once.picked!.demoted).toBeUndefined();
+  });
+  it('shows retired voice tools as excluded and never offers a voice listing as a generator',async()=>{
+    const r=await new MediaRouter({catalog:()=>snapshot}).route({text:'read this aloud in a calm voice: welcome home',classifier:false,probe:false});
+    expect(r.classification.kind).toBe('voice');
+    expect(r.excluded.find(x=>x.id==='echo.voice.tts')!.reason).toContain('RETIRED');
+    const offered=[r.picked!,...r.alternatives].map(p=>p.id),listed=[...offered,...r.excluded.map(x=>x.id)];
+    for(const id of ['echo.elevenlabs.voices','echo.cartesia.voices','echo.voice.speak.batch','echo.voice.stt'])expect(listed,id).not.toContain(id);
+  });
+  it('picks the $0 on-prem router for an anime prompt once the live catalog reports it green',async()=>{
+    const live=row('echo.media.image_generate');
+    const search=vi.fn(async(q:string)=>q==='image_generate'?[{id:live.id,description:live.description,registered:true,health:'green'}]:[]);
+    const r=await new MediaRouter({catalog:()=>snapshot,search}).route({text:'anime girl with a katana under cherry blossoms',classifier:false,probe:false});
+    expect(r.classification).toMatchObject({kind:'image',styles:expect.arrayContaining(['anime'])});
+    expect(r.picked).toMatchObject({id:'echo.media.image_generate',health:'green',healthSource:'catalog',catalogSource:'live',cost:'free',request:{arguments:{prompt:'anime girl with a katana under cherry blossoms',style:'anime',wait:false}}});
+    // Seedream's call kind (together_image_generation) is untested on this gate: never excluded, and any Together tool
+    // offered is marked ranked lower with that reason.
+    expect(r.excluded.some(x=>x.id==='echo.llm.together.ByteDance-Seed-Seedream-4.0')).toBe(false);
+    for(const a of r.alternatives.filter(a=>a.id.startsWith('echo.llm.together.')))expect(a.demoted,a.id).toMatchObject({category:'untested',reason:expect.stringContaining('together_image_generation')});
+    // Snapshot only (amber), the hosted Seedream tier outranks it; the result says the ranking is the snapshot's.
+    const offline=await new MediaRouter({catalog:()=>snapshot}).route({text:'anime girl with a katana under cherry blossoms',classifier:false,probe:false});
+    expect(offline.catalog.source).toBe('snapshot');expect([offline.picked!.id,...offline.alternatives.map(a=>a.id)]).toContain('echo.media.image_generate');
+  });
+});
+
+// The production chain: gate echo.caps.search -> src/bridge/sdk-stdio.ts mapSearch (a row without `registered` becomes
+// registered:true, one without health becomes health_status:'unknown'; tests/prime-sdk-bridge.test.ts) -> sdkBroker.search.
+describe('live catalog through the real sdkBroker',()=>{
+  it('ranks a bridge row that carries no health with the snapshot health, labelled as such, and keeps it in the hub',async()=>{
+    const results=[{id:'echo.media.image_generate',description:'Routed on-prem text-to-image ($0). If still running: poll echo.media.job_status.',registered:true,health_status:'unknown',metadata:{required_scope:'media.generate',danger_tier:1}}];
+    const calls:Json[]=[];
+    const connection={
+      listTools:async()=>['sdk_search','sdk_read','sdk_invoke'].map(name=>({name,inputSchema:{type:'object'}})),
+      call:async(name:string,args:Json)=>{calls.push({name,...args});return {content:[{type:'text',text:JSON.stringify(name==='sdk_search'&&args.query==='image_generate'?{results,sdk_catalog:{truncated:false}}:{results:[],sdk_catalog:{truncated:false}})}]};},
+    };
+    const sdk=await sdkBroker(connection as never,{search:'sdk_search',read:'sdk_read',invoke:'sdk_invoke'});
+    const hub=new PrimeHub({capabilities:[cap('echo.media.image_generate',{health:'amber',description:'snapshot'})],sdk});
+    const r=await hub.mediaRoute({text:'anime girl with a katana under cherry blossoms',classifier:false,probe:false});
+    expect(calls.filter(c=>c.name==='sdk_search').map(c=>c.query)).toEqual([...MEDIA_SEARCHES.image]);
+    expect(r.catalog.source).toBe('live');
+    expect(r.picked).toMatchObject({id:'echo.media.image_generate',health:'amber',healthSource:'snapshot',catalogSource:'live',reason:expect.stringContaining('health amber (snapshot; the live catalog row carries no health)')});
+    expect(r.excluded).toEqual([]);
+    expect(hub.capabilities().find(c=>c.id==='echo.media.image_generate')).toMatchObject({health:'amber',registered:true,category:'image'});
+  });
+});
+
+describe('owner-only media routes',()=>{
+  const closers:Array<()=>Promise<void>>=[],dirs:string[]=[];
+  afterEach(async()=>{for(const close of closers.splice(0).reverse())await close();for(const dir of dirs.splice(0))rmSync(dir,{recursive:true,force:true});});
+  it('refuses a signed-in member and reaches neither the router nor the enhancer, then admits the owner',async()=>{
+    const backend:Server=createServer((req,res)=>{
+      const cookie=req.headers.cookie??'';res.writeHead(200,{'content-type':'application/json'});
+      if(req.url!=='/api/auth/session'||!cookie){res.end(JSON.stringify({authenticated:false,user:null,csrf:null}));return;}
+      res.end(JSON.stringify(cookie.includes('owner_tok')?{authenticated:true,user:{uid:'owner-1',role:'owner',status:'approved'},csrf:'csrf-owner-1234'}:{authenticated:true,user:{uid:'member-2',role:'member',status:'approved'},csrf:'csrf-member-5678'}));
+    });
+    await new Promise<void>(r=>backend.listen(0,'127.0.0.1',()=>r()));closers.push(()=>new Promise<void>(r=>backend.close(()=>r())));
+    const route=vi.fn(async()=>({picked:null})),enhance=vi.fn(async()=>({text:'better'}));
+    const hub=new PrimeHub({capabilities:[],media:{route} as unknown as MediaRouter,enhancer:{enhance} as unknown as PromptEnhancer});
+    const dir=mkdtempSync(join(tmpdir(),'prime-media-owner-'));dirs.push(dir);writeFileSync(join(dir,'index.html'),'Prime');
+    const server=await startPrimeServer(hub,dir,0,{workspace:{baseUrl:'http://127.0.0.1:'+(backend.address() as {port:number}).port,ownerUid:'owner-1'}});closers.push(server.close);
+    const prime=(await fetch(server.url)).headers.get('set-cookie')!.split(';')[0];
+    const post=(path:string,session:string,csrf:string)=>fetch(server.url+path,{method:'POST',headers:{cookie:prime+'; echo_workspace_session='+session,origin:server.url,'content-type':'application/json','x-prime-request':'1','x-echo-csrf':csrf},body:JSON.stringify({text:'a fox image',mode:'image'})});
+    for(const path of ['/api/prime/media/route','/api/prime/enhance']){
+      const refused=await post(path,'member_tok_'.padEnd(36,'b'),'csrf-member-5678');
+      expect(refused.status).toBe(403);expect(await refused.json()).toEqual({error:'Primary owner admission required'});
+    }
+    expect(route).not.toHaveBeenCalled();expect(enhance).not.toHaveBeenCalled();
+    expect((await post('/api/prime/media/route','owner_tok_'.padEnd(36,'a'),'csrf-owner-1234')).status).toBe(200);
+    expect((await post('/api/prime/enhance','owner_tok_'.padEnd(36,'a'),'csrf-owner-1234')).status).toBe(200);
+    expect(route).toHaveBeenCalledOnce();expect(enhance).toHaveBeenCalledOnce();
+  });
+});
+
+describe('POST /api/prime/media/route',()=>{
+  const cleanups:string[]=[],servers:Array<{close:()=>Promise<void>}>=[];
+  afterEach(async()=>{await Promise.all(servers.splice(0).map(s=>s.close()));for(const dir of cleanups.splice(0))rmSync(dir,{recursive:true,force:true});});
+  async function fixture(){const dir=mkdtempSync(join(tmpdir(),'prime-media-route-'));cleanups.push(dir);writeFileSync(join(dir,'index.html'),'Prime');const server=await startPrimeServer(new PrimeHub({capabilities:imageCatalog()}),dir,0);servers.push(server);const page=await fetch(server.url);const cookie=page.headers.get('set-cookie')!.split(';')[0];return {post:(body:unknown,auth=true)=>fetch(server.url+'/api/prime/media/route',{method:'POST',headers:{...(auth?{cookie}:{}),origin:server.url,'content-type':'application/json','x-prime-request':'1'},body:JSON.stringify(body)})};}
+  it('requires the Prime cookie',async()=>expect((await (await fixture()).post({text:'a fox image'},false)).status).toBe(403));
+  it('returns a routed pick to an authenticated owner session',async()=>{const response=await (await fixture()).post({text:'a fox image',classifier:false,probe:false});expect(response.status).toBe(200);expect(await response.json()).toMatchObject({picked:{cap:expect.any(String)}});});
+  it('returns a 400 error string for invalid input',async()=>{const response=await (await fixture()).post({text:''});expect(response.status).toBe(400);expect(await response.json()).toMatchObject({error:expect.any(String)});});
+});
