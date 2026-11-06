@@ -56,7 +56,10 @@ async function setup(opts: Opts = {}) {
   const toolbar = element(), composer = element(), send = element(), stop = element(), log = element(), welcome = element();
   const nodes: Record<string, El> = { '.composer-toolbar': toolbar, '#composer': composer, '#composer .send': send, '#stop-chat': stop, '#chat-log': log, '#welcome': welcome };
   stop.hidden = true; log.hidden = true;
-  const doc = { hidden: false, querySelector: (s: string) => nodes[s] ?? null, createElement: (t: string) => element(t), addEventListener: vi.fn() };
+  // The living orb listens on document; every echo-orb-* event swarm.js dispatches is recorded here.
+  const orbEvents: { type: string; detail: { mode?: string; source?: string; satellites?: { id: string; kind: string; busy: boolean }[] } }[] = [];
+  const doc = { hidden: false, querySelector: (s: string) => nodes[s] ?? null, createElement: (t: string) => element(t), addEventListener: vi.fn(),
+    dispatchEvent: (e: CustomEvent) => { orbEvents.push({ type: e.type, detail: e.detail }); return true; } };
   const visibility: (() => void)[] = []; doc.addEventListener = vi.fn((name: string, fn: () => void) => { if (name === 'visibilitychange') visibility.push(fn); });
   const calls: { url: string; method: string; body?: unknown }[] = [];
   let polls = 0;
@@ -71,7 +74,7 @@ async function setup(opts: Opts = {}) {
   });
   const chat = { send: vi.fn(async () => ({ sent: true, detail: 'original' })), cancel: vi.fn(), reset: vi.fn() };
   const window: Record<string, unknown> = { addEventListener: vi.fn(), EchoPrimeChat: chat, ...(opts.workspace ? { EchoPrimeWorkspace: opts.workspace } : {}) };
-  const context = { window, document: doc, fetch, localStorage: { getItem: () => null, setItem: () => undefined }, setTimeout, clearTimeout, Date, AbortController, Error, console: { debug: vi.fn(), log: console.log } };
+  const context = { window, document: doc, fetch, localStorage: { getItem: () => null, setItem: () => undefined }, setTimeout, clearTimeout, Date, AbortController, Error, CustomEvent, console: { debug: vi.fn(), log: console.log } };
   runInNewContext(modelsSource, context);
   const models = window.EchoPrimeModels as { ready: Promise<void>; provider(): string | undefined; swarm(): boolean };
   await models.ready;
@@ -86,7 +89,9 @@ async function setup(opts: Opts = {}) {
   const fire = (name: string) => { for (const [registered, fn] of windowHandlers.mock.calls as [string, () => void][]) if (registered === name) fn(); };
   const count = (url: string) => calls.filter(c => c.url === url).length;
   return { chat: window.EchoPrimeChat as { send(t: string): Promise<Record<string, unknown>>; cancel(): void; reset(): void }, original: sentChat, originalCancel: cancelSpy, originalReset: resetSpy,
-    select, choose, toolbar, calls, count, fire, models, swarm, ws: opts.workspace, send, stop, log, doc, visibility, polls: () => polls, windowHandlers };
+    select, choose, toolbar, calls, count, fire, models, swarm, ws: opts.workspace, send, stop, log, doc, visibility, polls: () => polls, windowHandlers,
+    orbModes: () => orbEvents.filter(e => e.type === 'echo-orb-state').map(e => e.detail.mode),
+    moons: () => orbEvents.filter(e => e.type === 'echo-orb-satellites').map(e => e.detail.satellites ?? []) };
 }
 const settle = () => vi.advanceTimersByTimeAsync(0);
 /** Starts a turn, lets the first poll happen on the fake clock, and returns the settled result. */
@@ -245,6 +250,41 @@ describe('a swarm turn', () => {
     const s = await setup(); s.choose('swarm');
     expect(await s.chat.send('x'.repeat(12001))).toMatchObject({ sent: false, detail: expect.stringContaining('12000') });
     expect(s.calls.filter(c => c.url.endsWith('/swarm/run'))).toHaveLength(0);
+  });
+});
+
+describe('the living orb during a swarm run', () => {
+  it('goes deep with one busy swarm moon while the run is watched, then success and idle when the answer lands', async () => {
+    const s = await setup({ runs: n => n < 2 ? { body: { runId: RUN, phase: 'independent', done: false } } : { body: { runId: RUN, phase: 'complete', done: true, result: fusion() } } });
+    s.choose('swarm'); const turn = s.chat.send('q'); await settle();
+    expect(s.orbModes()).toEqual(['deep']);
+    expect(s.moons().at(-1)).toEqual([{ id: 'swarm:' + RUN, kind: 'swarm', name: 'Swarm · run ' + RUN.slice(0, 8), status: 'running', busy: true }]);
+    await vi.advanceTimersByTimeAsync(3100); await expect(turn).resolves.toMatchObject({ sent: true });
+    expect(s.orbModes()).toEqual(['deep', 'success', 'idle']); expect(s.moons().at(-1)).toEqual([]);
+  });
+  it('Stop waiting settles the orb to idle and removes the moon: stopping to wait is not a failure', async () => {
+    const s = await setup();
+    s.choose('swarm'); const turn = s.chat.send('q'); await settle();
+    s.chat.cancel(); await expect(turn).resolves.toMatchObject({ sent: false });
+    expect(s.orbModes()).toEqual(['deep', 'idle', 'idle']); expect(s.orbModes()).not.toContain('error'); expect(s.moons().at(-1)).toEqual([]);
+  });
+  it('the in-card Stop waiting button does not flash error either', async () => {
+    const s = await setup();
+    s.choose('swarm'); const turn = s.chat.send('q'); await settle();
+    flat(s.log).find(e => e.tag === 'button')!.fire('click'); await turn;
+    expect(s.orbModes()).not.toContain('error'); expect(s.orbModes().at(-1)).toBe('idle');
+  });
+  it('a failed run flashes error, then idle', async () => {
+    const s = await setup({ runs: () => ({ body: { runId: RUN, phase: 'failed', done: true, error: 'budget exhausted: max_cost_usd' } }) });
+    s.choose('swarm'); await go(s.chat);
+    expect(s.orbModes()).toEqual(['deep', 'error', 'idle']); expect(s.moons().at(-1)).toEqual([]);
+  });
+  it('an account change stops watching quietly: the orb leaves deep and the moon goes, without an error', async () => {
+    const s = await setup();
+    s.choose('swarm'); const turn = s.chat.send('q'); await settle();
+    s.fire('echo-account-changed'); await expect(turn).resolves.toEqual({ cancelled: true });
+    expect(s.orbModes()).toEqual(['deep', 'idle', 'idle']); expect(s.moons().at(-1)).toEqual([]);
+    const n = s.polls(); await vi.advanceTimersByTimeAsync(20000); expect(s.polls()).toBe(n);
   });
 });
 

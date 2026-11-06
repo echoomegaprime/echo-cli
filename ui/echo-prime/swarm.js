@@ -35,6 +35,10 @@
   return session.ownerAccess===true?'owner':'member';
  }
  function debug(outcome,detail){console.debug('[echo.swarm]',{event:'swarm_health',outcome,...(detail||{})});}
+ // Living orb (additive, optional): a watched swarm run puts the orb in deep thought and orbits as one swarm moon.
+ function orbEvent(name,detail){try{if(typeof document.dispatchEvent==='function'&&typeof CustomEvent==='function')document.dispatchEvent(new CustomEvent(name,{detail}));}catch{}}
+ function orb(mode){orbEvent('echo-orb-state',{mode,source:'swarm'});}
+ function orbSatellites(r){orbEvent('echo-orb-satellites',{source:'swarm',satellites:r?[{id:'swarm:'+r.runId,kind:'swarm',name:'Swarm · run '+String(r.runId).slice(0,8),status:'running',busy:true}]:[]});}
  function report(available,reason){verdict={available,reason};models.setSwarm(verdict);return verdict;}
  async function api(path,body,signal){
   const sent={'x-prime-request':'1',...await headers(),...(body?{'content-type':'application/json'}:{})},owner=admission()==='owner';
@@ -122,9 +126,12 @@
   article.replaceChildren(el('strong','Swarm (40-seat brain)'),el('p',title,'swarm-error'),el('small',detail+' No other model was used.','swarm-meta'));
  }
  function stopTimers(r){if(r.timer)clearTimeout(r.timer);r.timer=null;r.controller.abort();}
- function finish(r,outcome){
+ /** Ends the watch. `stopped` marks the user's own Stop (or a quiet reset): the orb settles to idle, because no longer
+  *  waiting is not a failure. Only a run that failed, vanished or timed out flashes the orb's error. */
+ function finish(r,outcome,stopped){
   if(run!==r)return;
   run=null;stopTimers(r);busy(false);refreshHealth();r.resolve(outcome);
+  orb(outcome&&outcome.sent?'success':stopped||outcome&&outcome.cancelled?'idle':'error');orb('idle');orbSatellites(null);
  }
  async function poll(r){
   r.inflight=true;r.lastPoll=Date.now();
@@ -169,7 +176,7 @@
   if(run!==r)return;
   const detail='Stopped waiting for swarm run '+r.runId+'. The worker has no cancel: the run may continue and spend up to its budget ('+budgetText(r.budget)+').';
   if(!quiet)failBox(r.article,'Stopped waiting.',detail);
-  finish(r,quiet?{cancelled:true}:{sent:false,detail});
+  finish(r,quiet?{cancelled:true}:{sent:false,detail},true);
  }
  async function sendSwarm(text){
   if(run)return {sent:false,detail:'A swarm run is in progress. Wait for it or select Stop (the worker cannot cancel it).'};
@@ -196,7 +203,7 @@
   if(current!==generation)return {cancelled:true};
   return new Promise(resolve=>{
    const r={runId:accepted.runId,phase:typeof accepted.phase==='string'?accepted.phase:'accepted',budget:accepted.budget,startedAt:Date.now(),lastPoll:0,inflight:false,failures:0,note:'',controller,article,timer:null,resolve};
-   run=r;
+   run=r;orb('deep');orbSatellites(r);
    const stop=el('button','Stop waiting','quiet-button swarm-stop');stop.setAttribute('type','button');stop.addEventListener('click',()=>stopWatching(r,false));
    r.statusLine=el('p',undefined,'swarm-status');r.statusLine.setAttribute('role','status');r.elapsed=el('span','0:00','swarm-elapsed');r.elapsed.setAttribute('aria-hidden','true');
    const pending=el('p',undefined,'swarm-badge');pending.append(el('strong','MAXIMALIST_RECONSTRUCTED · historical_parity: false'),el('span',' — a reconstruction, not the historical original. Confirmed from the result when it arrives.'));
@@ -212,7 +219,9 @@
  chat.cancel=()=>{if(run)stopWatching(run,false);else original.cancel.call(chat);};
  chat.reset=()=>{generation++;if(run)stopWatching(run,true);original.reset.call(chat);};
  document.addEventListener('visibilitychange',()=>{if(run){run.lastPoll=0;if(!document.hidden){if(run.timer)clearTimeout(run.timer);tick(run);}else status(run);}});
- window.addEventListener('echo-account-changed',()=>{refreshHealth();});
+ // A watched run belongs to the account that started it: an account change stops watching quietly (orb idle, moon gone;
+ // finish() re-reads health), whether or not the chat reset reaches here first.
+ window.addEventListener('echo-account-changed',()=>{if(run)stopWatching(run,true);else refreshHealth();});
  window.addEventListener('pagehide',()=>{if(run)stopWatching(run,true);});
  window.EchoPrimeSwarm={ready:refreshHealth(),refresh:refreshHealth,active(){return run?run.runId:null;}};
 })();

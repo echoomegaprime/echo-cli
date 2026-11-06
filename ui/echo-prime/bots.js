@@ -31,6 +31,15 @@
   return session.ownerAccess===true?'owner':'member';
  }
  const allowed=()=>{const a=admission();return a==='open'||a==='owner';};
+ function orbEvent(name,detail){try{if(typeof doc.dispatchEvent==='function'&&typeof CustomEvent==='function')doc.dispatchEvent(new CustomEvent(name,{detail}));}catch{}}
+ // The orb keeps 24 moons across every publisher, busy first. Busy bots (running, or in a live group chat) go first here and
+ // the rest keep list order, so the 24 sent always include a running bot or a group member listed past the 24th.
+ function publishSatellites(){
+  const live=!!group&&!group.done;
+  const moons=allowed()?bots.map(bot=>{const inGroup=live&&group.bots.includes(bot.bot_id),satelliteGroup=inGroup?group.groupId:undefined;return {id:'bot:'+bot.bot_id,kind:'bot',name:str(bot.name,80)||shortId(bot.bot_id),status:STATUSES.includes(bot.status)?bot.status:'idle',busy:bot.status==='running'||inGroup,group:satelliteGroup};}):[];
+  moons.sort((a,b)=>Number(b.busy)-Number(a.busy));
+  orbEvent('echo-orb-satellites',{source:'bots',satellites:moons.slice(0,24)});
+ }
  async function request(url,body,signal){
   const sent={'x-prime-request':'1',...await headers(),...(body?{'content-type':'application/json'}:{})},owner=admission()==='owner';
   const response=await fetch(url,{method:body?'POST':'GET',credentials:'same-origin',headers:sent,...(body?{body:JSON.stringify(body)}:{}),signal});
@@ -147,6 +156,7 @@
    const data=await api('list');
    if(gen!==generation)return;
    bots=Array.isArray(data.bots)?data.bots.filter(b=>b&&typeof b==='object'&&HEX.test(String(b.bot_id))):[];
+   publishSatellites();
    lastList=Date.now();
    if(pendingDelete&&!bots.some(b=>b.bot_id===pendingDelete))pendingDelete=null;
    if(selected&&!bots.some(b=>b.bot_id===selected)){stopChat();selected=null;if(pane==='chat')pane='none';}
@@ -178,6 +188,7 @@
     bots=bots.map(b=>b.bot_id===botId?result:b);
     note((action==='pause'?'Paused ':'Resumed ')+name+': status '+(STATUSES.includes(result.status)?result.status:'not reported')+'.');
    }
+   publishSatellites();
    debug('action',{action,outcome:'returned'});
   }catch(error){if(gen!==generation)return;note((action==='delete'?'Delete':action==='pause'?'Pause':'Resume')+' failed for '+name+': '+(error instanceof Error?error.message:'request failed')+'. No automatic retry was made.');debug('action',{action,outcome:'failed'});}
   finally{if(gen===generation){busy=false;renderList();renderPane();}}
@@ -224,6 +235,7 @@
     if(gen!==generation)return;
     if(!bot||!HEX.test(String(bot.bot_id)))throw new Error('the service returned no bot id');
     bots=[...bots.filter(b=>b.bot_id!==bot.bot_id),bot];
+    publishSatellites();
     note('Created '+str(bot.name,80)+': status '+(STATUSES.includes(bot.status)?bot.status:'not reported')+(bot.status==='paused'?' (resume it from its card when ready)':'')+'.');
     debug('create',{outcome:'returned',status:bot.status});
     if(window.EchoPrimeAutoagents&&typeof window.EchoPrimeAutoagents.satellites==='function')window.EchoPrimeAutoagents.satellites({source:'bots',action:'created',botId:bot.bot_id,status:bot.status});// the orb listens for echo-orb-satellites
@@ -335,6 +347,7 @@
      if(!accepted||!HEX.test(String(accepted.groupId)))throw new Error('the service returned no group id');
      stopGroup();
      group={groupId:accepted.groupId,name:n,bots:chosen,runIds:list(accepted.runIds),data:null,controller:new AbortController(),lastPoll:0,inflight:false,failures:0,note:'',done:false,stopped:false,view:null};
+     publishSatellites();
      note('Group '+n+' accepted as '+shortId(accepted.groupId)+' with '+list(accepted.runIds).length+' runs.');debug('group',{outcome:'accepted',bots:chosen.length});
      ensureTimer();renderPane();
     }catch(error){if(gen!==generation)return;note('Group not started: '+(error instanceof Error?error.message:'request failed')+'. No automatic retry was made.');debug('group',{outcome:'failed'});}
@@ -368,7 +381,7 @@
   if(!g.done)nodes.push(button('Stop watching',()=>{stopGroup(true);renderPane();}));
   g.view.replaceChildren(...nodes);
  }
- function stopGroup(keep){if(group){group.controller.abort();group.done=true;if(keep)group.stopped=true;else group=null;}}
+ function stopGroup(keep){if(group){group.controller.abort();group.done=true;if(keep)group.stopped=true;else group=null;publishSatellites();}}
  async function pollGroup(){
   const g=group;if(!g||g.done)return;
   g.inflight=true;g.lastPoll=Date.now();
@@ -376,7 +389,7 @@
    const data=await api('groups/'+g.groupId,undefined,g.controller.signal);
    if(group!==g)return;
    g.failures=0;g.note='';g.data=data;
-   if(!groupRunning(data)){g.done=true;debug('group',{outcome:'finished'});}
+   if(!groupRunning(data)){g.done=true;publishSatellites();debug('group',{outcome:'finished'});}
    renderGroup();
   }catch(error){
    if(group!==g||g.controller.signal.aborted)return;
@@ -385,6 +398,7 @@
    if(error&&error.status===404){g.note='The service does not know group '+g.groupId+' ('+message+'). Polling stopped.';g.done=true;}
    else if(g.failures>=MAX_FAILURES){g.note='Lost contact with the echoBots service after '+MAX_FAILURES+' failed reads: '+message+'. Polling stopped; the runs may still be spending their caps.';g.done=true;}
    else g.note='Group read failed ('+g.failures+'/'+MAX_FAILURES+'): '+message+'. Retrying.';
+   if(g.done)publishSatellites();
    renderGroup();
   }finally{g.inflight=false;}
  }
@@ -462,6 +476,7 @@
  }
  function reset(){
   generation++;stopChat();stopGroup();bots=[];selected=null;pendingDelete=null;pane='none';busy=false;agents=null;agentsLoaded=false;health=null;lastList=0;
+  publishSatellites();
   if(dialog&&dialog.open)dialog.close();
   note('');
  }
@@ -478,6 +493,7 @@
   if(!doc.hidden&&dialog&&dialog.open)ensureTimer();
   else{if(chat)renderTranscript();if(group&&!group.done)renderGroup();}
  });
+ if(typeof doc.addEventListener==='function')doc.addEventListener('echo-orb-open',async event=>{try{const d=event&&event.detail;if(!d||d.kind!=='bot'||typeof d.id!=='string'||!/^bot:[0-9a-f]{32}$/.test(d.id))return;const botId=d.id.slice(4);await open();select(botId);}catch{}});
  window.addEventListener('echo-account-changed',()=>{reset();void refreshHealth();});
  window.addEventListener('pagehide',()=>{stopChat();stopGroup();});
  window.EchoPrimeBots={ready:refreshHealth(),refresh:refreshHealth,open,close(){if(dialog&&dialog.open)dialog.close();},admission,

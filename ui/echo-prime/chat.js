@@ -6,6 +6,10 @@
  const activity=window.EchoPrimeActivity;
  const activityHost=()=>$('#chat-activity');
  let sessionId,active=null,generation=0;
+ // Living orb (additive, optional): the orb mirrors the turn through document events; silent where none can be dispatched.
+ let deepTimer;
+ function orbEvent(name,detail){try{if(typeof document.dispatchEvent==='function'&&typeof CustomEvent==='function')document.dispatchEvent(new CustomEvent(name,{detail}));}catch{}}
+ function orb(mode){orbEvent('echo-orb-state',{mode,source:'chat'});}
  function busy(value){$('#composer .send').disabled=value;$('#stop-chat').hidden=!value;$('#chat-log').setAttribute('aria-busy',String(value));}
  function line(role,text,detail){
   const article=document.createElement('article'),label=document.createElement('strong'),content=document.createElement('p');
@@ -24,7 +28,7 @@
    if(!response.ok){if(response.status===401||response.status===403){if(window.EchoPrimeWorkspace?.invalidate)window.EchoPrimeWorkspace.invalidate();else window.dispatchEvent(new Event('echo-account-changed'));}throw new Error(data.error||'Chat request failed');}return data;
  }
  window.EchoPrimeChat={
-  reset(){generation++;active?.abort();active=null;sessionId=undefined;activity?.clear(activityHost());$('#chat-log').replaceChildren();$('#chat-log').hidden=true;$('#welcome').hidden=false;busy(false);},
+  reset(){generation++;active?.abort();active=null;sessionId=undefined;activity?.clear(activityHost());$('#chat-log').replaceChildren();$('#chat-log').hidden=true;$('#welcome').hidden=false;busy(false);clearTimeout(deepTimer);orb('idle');},
   cancel(){active?.abort();},
   async send(text){
    if(active)return {sent:false,detail:'Wait for the current turn or select Stop.'};
@@ -38,10 +42,12 @@
     if(status.chat?.state!=='attached')return {sent:false,detail:status.chat?.detail||'Shared chat host is not connected. The prompt remains in this tab.'};
     if(status.chat.busy)return {sent:false,detail:'The host is finishing another turn. The prompt remains in this tab.'};
     line('user',text);submitted=true;ensureStrip()?.thinking();
+    orb('thinking');clearTimeout(deepTimer);deepTimer=setTimeout(()=>orb('deep'),8000);
     const rolePin=window.EchoPrimeAutonomy?.pinFor(sessionId);
     const attached=[...(window.EchoPrimeWorkspace?.bridge?.state?.attachments||window.EchoPrimeLibrary?.standaloneAttachments?.()||[])];
     const result=await api('chat',{requestId:crypto.randomUUID(),prompt:text,...(sessionId?{sessionId}:{}),...(attached.length?{attachments:attached}:{}),...(window.EchoPrimeModels?.provider()?{provider:window.EchoPrimeModels.provider()}:{}),...(window.EchoPrimeModels?.model?.()?{model:window.EchoPrimeModels.model()}:{}),...(rolePin!==undefined?{rolePin}:{})},controller.signal);
     if(current!==generation)return {cancelled:true};
+    clearTimeout(deepTimer);orb('replying');orbEvent('echo-orb-pulse',{strength:1});
     sessionId=result.sessionId;
     window.EchoPrimeAutonomy?.renderTurn(result,{api,resume:async receipt=>{
      if(active||current!==generation)return;
@@ -70,16 +76,18 @@
      }).catch(()=>{});
     }
     strip?.done(completed?'Answer received':'Turn '+result.status);
+    orb(completed?'success':'error');
     console.debug('[echo.code]',{schema_version:1,event:'coding_turn',outcome:completed?'completed':'returned'});
     return {sent:completed,detail:completed?'Answer received.':'Turn '+result.status+'. No automatic retry was made.'};
    }catch(error){
     if(current!==generation)return {cancelled:true};
+    if(!controller.signal.aborted)orb('error');
     const detail=controller.signal.aborted?'Turn cancelled. The provider may still be finishing; no retry was made.':
      (error instanceof Error?error.message:'Chat connection failed')+(submitted?' No automatic retry was made.':' The prompt remains in this tab.');
     if(submitted)line('assistant',detail,'Connection result');
     strip?.fail(controller.signal.aborted?'Cancelled.':'Connection failed.');
     return {sent:false,detail};
-   }finally{clearTimeout(timer);if(active===controller){active=null;busy(false);}}
+   }finally{clearTimeout(timer);clearTimeout(deepTimer);if(current===generation)orb('idle');if(active===controller){active=null;busy(false);}}
   },
  };
  $('#stop-chat').addEventListener('click',()=>window.EchoPrimeChat.cancel());

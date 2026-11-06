@@ -184,6 +184,14 @@
   if(requestId){const suffixed=messages.find(m=>isReply(m)&&m.request_id===requestId+':reply');if(suffixed)return suffixed;}
   return null;
  }
+ // Living orb (additive, optional): a Workspace turn drives the orb through document events; silent where none can be
+ // dispatched. send -> thinking; 8 s, or a third tool call in one turn (a long tool loop) -> deep; every token -> pulse,
+ // the first token after thinking -> replying; saved readback or recovery -> success; failure (not a Stop), including a
+ // reply whose saved readback could not be confirmed -> error.
+ let orbDeepTimer;
+ const ORB_DEEP_MS=8000,ORB_DEEP_TOOLS=3;
+ function orbEvent(name,detail){try{if(typeof document.dispatchEvent==='function'&&typeof CustomEvent==='function')document.dispatchEvent(new CustomEvent(name,{detail}));}catch{}}
+ function orb(mode,intensity){orbEvent('echo-orb-state',intensity===undefined?{mode,source:'chat'}:{mode,intensity,source:'chat'});}
  async function send(text){
   await ready;
   if(!state.enabled||$('#workspace-chat-kind').value!=='workspace')return {handled:false};
@@ -198,6 +206,8 @@
   const ensureStrip=()=>{if(!strip&&activity)strip=activity.start(activityHost(),{label:'Activity'});return strip;};
   let answer=null,replyBox=null,answerText='',completed=false,verified=false,spoken=false,recoveryStarted=false;
   let pendingUi=null;const turn=requestId;// speech.js keys the streamed reply by the chat request id
+  let orbMode='thinking',orbTools=0;
+  orb('thinking');clearTimeout(orbDeepTimer);orbDeepTimer=setTimeout(()=>{if(epoch===state.epoch&&orbMode==='thinking'){orbMode='deep';orb('deep');}},ORB_DEEP_MS);
   const active=()=>epoch===state.epoch&&accountEpoch===state.accountEpoch&&(transport.generation??0)===startGen&&state.turn===controller&&state.chat?.id===chatId&&!controller.signal.aborted&&!state.controller.signal.aborted;
   const showInlineStatus=(message,withRetry=false)=>{
    if(!replyBox||!replyBox.isConnected){replyBox=element('article',{class:'chat-message assistant'});$('#chat-log').append(replyBox);$('#chat-log').hidden=false;$('#welcome').hidden=true;}
@@ -227,7 +237,7 @@
    if(!fromReadback){const readback=await api('/chats/'+encodeURIComponent(chatId));if(epoch!==state.epoch)return {handled:true,cancelled:true};state.chat=readback;renderChat();await refresh();}
    else await refresh().catch(()=>{});
    if(epoch!==state.epoch)return {handled:true,cancelled:true};
-   verified=true;strip?.done();log('chat',fromReadback?'recovered_after_transport_drop':'returned_and_read_back');
+   verified=true;strip?.done();log('chat',fromReadback?'recovered_after_transport_drop':'returned_and_read_back');orb('success');
    let detail='Reply returned and saved conversation read back.';
    // speech.js owns spoken replies when loaded (ConvAI queue + prefetch); the legacy hands-free loop keeps its own path.
    if((voiceOptions.spoken||voiceOptions.conversation)&&!document.hidden&&(voiceOptions.conversation||window.EchoPrimeSpeech?.handlesReplies!==true)){
@@ -288,8 +298,10 @@
     if(event.type==='tool_result'&&event.result&&typeof event.result==='object'&&event.result.ui_action)pendingUi=event.result.ui_action;
     const s=ensureStrip();
     if(event.type==='status'){$('#draft-notice').hidden=true;s?.thinking();s?.note(String(event.text||'').slice(0,300));}
-    else if(event.type==='token'&&typeof event.text==='string'){s?.answering();if(!answer){replyBox=element('article',{class:'chat-message assistant'},element('strong',{},'Echo Prime'),answer=element('p',{},''));$('#chat-log').append(replyBox);$('#chat-log').hidden=false;$('#welcome').hidden=true;}answerText+=event.text;if(answerText.length>2_000_000)throw new Error('Answer exceeds display limit.');answer.textContent=answerText;announce('echo-reply-stream',{chatId,turn,text:event.text});}
-    else if(event.type==='tool_started')s?.tool(event.request_id,event.tool);
+    else if(event.type==='token'&&typeof event.text==='string'){s?.answering();if(orbMode!=='replying'){orbMode='replying';clearTimeout(orbDeepTimer);orb('replying');}orbEvent('echo-orb-pulse',{strength:.6});if(!answer){replyBox=element('article',{class:'chat-message assistant'},element('strong',{},'Echo Prime'),answer=element('p',{},''));$('#chat-log').append(replyBox);$('#chat-log').hidden=false;$('#welcome').hidden=true;}answerText+=event.text;if(answerText.length>2_000_000)throw new Error('Answer exceeds display limit.');answer.textContent=answerText;announce('echo-reply-stream',{chatId,turn,text:event.text});}
+    else if(event.type==='tool_started'){s?.tool(event.request_id,event.tool);orbTools++;
+     if(orbTools>=ORB_DEEP_TOOLS){orbMode='deep';clearTimeout(orbDeepTimer);orb('deep',Math.min(1,(orbTools-ORB_DEEP_TOOLS+1)/5));}
+     else if(orbMode!=='deep'){orbMode='thinking';orb('thinking',orbTools/ORB_DEEP_TOOLS);}}
     else if(event.type==='tool_result')s?.result(event.request_id,event.tool,event.evidence?.status,event.evidence);
     else if(event.type==='memory_saved')s?.note('Saved a preference locally');
    },controller.signal);
@@ -303,7 +315,7 @@
     if(controller.signal.aborted){if(!answerText)removeNode(replyBox);const detail='Stopped displaying this turn. The upstream model may finish saving it; reopen the conversation before retrying.';endConversation();strip?.fail('Stopped.');return {handled:true,sent:false,verified:false,detail};}
     if(recovered)return await finishTurn(recovered.chat,recovered.reply,true);
     const timeoutText="Echo's reply did not arrive. Your message was saved.";
-    showInlineStatus(timeoutText,true);endConversation();ensureStrip()?.fail(timeoutText);log('chat','recovery_timed_out');
+    showInlineStatus(timeoutText,true);orb('error');endConversation();ensureStrip()?.fail(timeoutText);log('chat','recovery_timed_out');
     return {handled:true,sent:false,verified:false,detail:timeoutText};
    }
    // The backend finishes persisting the reply even if the stream drops (its writer swallows a
@@ -313,13 +325,16 @@
     strip?.status('Connection dropped — recovering the saved reply…');
     const recovered=await recoverReply(chatId,requestId,epoch,controller.signal);
     if(recovered&&epoch===state.epoch){
-     state.chat=recovered.chat;renderChat();await refresh().catch(()=>{});strip?.done('Recovered after the connection dropped');log('chat','recovered_after_incomplete_stream');
+     state.chat=recovered.chat;renderChat();await refresh().catch(()=>{});strip?.done('Recovered after the connection dropped');log('chat','recovered_after_incomplete_stream');orb('success');
      return {handled:true,sent:true,verified:true,detail:'Reply recovered from the saved conversation after the connection dropped.'};
     }
    }
    const detail=completed?once('Reply returned; saved readback is unavailable. Reopen the conversation before retrying.'):once(error instanceof Error?error.message:'Conversation failed.');
+   // Every path that reaches here failed (a Stop and a recovered reply returned above), including a reply whose saved
+   // readback could not be confirmed, so the orb always flashes error before the finally settles it to idle.
+   orb('error');
    endConversation();strip?.fail(detail);return {handled:true,sent:completed,verified:false,detail};
-  }finally{if(state.turn===controller){state.turn=null;setBusy(false);}if(epoch===state.epoch&&verified&&spoken&&voiceOptions.conversation)scheduleListening();}
+  }finally{clearTimeout(orbDeepTimer);if(epoch===state.epoch)orb('idle');if(state.turn===controller){state.turn=null;setBusy(false);}if(epoch===state.epoch&&verified&&spoken&&voiceOptions.conversation)scheduleListening();}
  }
  // Bounded recovery after an incomplete stream: the saved reply carries request_id `<id>:reply`
  // (app.py message()). Poll the saved conversation a few times (the drop may land before the

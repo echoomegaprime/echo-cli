@@ -55,7 +55,15 @@ const IDS = ['agents-dialog', 'open-agents', 'close-agents', 'refresh-agents', '
 async function setup(opts: Opts = {}) {
   const nodes: Record<string, El> = Object.fromEntries(IDS.map(id => [id, element(id === 'agents-dialog' ? 'dialog' : id === 'agents-form' ? 'form' : id === 'agents-agent' ? 'select' : 'div')]));
   const visibility: (() => void)[] = [];
-  const doc = { hidden: false, querySelector: (s: string) => nodes[s.slice(1)] ?? null, createElement: (t: string) => element(t), addEventListener: vi.fn((name: string, fn: () => void) => { if (name === 'visibilitychange') visibility.push(fn); }) };
+  // The living orb's side of the page: agents.js dispatches echo-orb-state / echo-orb-satellites on document (recorded
+  // here in order) and listens there for echo-orb-open (which fireDoc delivers).
+  const orbEvents: { type: string; detail: Record<string, unknown> }[] = [], docHandlers = new Map<string, ((e?: unknown) => void)[]>();
+  const doc = {
+    hidden: false, querySelector: (s: string) => nodes[s.slice(1)] ?? null, createElement: (t: string) => element(t),
+    addEventListener: vi.fn((name: string, fn: (e?: unknown) => void) => { if (name === 'visibilitychange') visibility.push(fn as () => void); (docHandlers.get(name) ?? docHandlers.set(name, []).get(name)!).push(fn); }),
+    dispatchEvent: (e: CustomEvent) => { orbEvents.push({ type: e.type, detail: e.detail }); return true; },
+  };
+  const fireDoc = (name: string, detail: unknown) => { for (const fn of docHandlers.get(name) ?? []) fn(new CustomEvent(name, { detail })); };
   const calls: { url: string; method: string; body?: unknown }[] = [];
   let polls = 0;
   const fetch = vi.fn(async (url: string, init?: { method?: string; body?: string }) => {
@@ -71,7 +79,7 @@ async function setup(opts: Opts = {}) {
   });
   const store = new Map<string, string>(); if (opts.stored) store.set('echo-prime-adk-v1', opts.stored);
   const window: Record<string, unknown> = { addEventListener: vi.fn(), ...(opts.workspace ? { EchoPrimeWorkspace: opts.workspace } : {}) };
-  const context = { window, document: doc, fetch, localStorage: { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v); } }, setTimeout, clearTimeout, Date, AbortController, Error, Number, String, Math, JSON, Promise, Array, Object, console: { debug: vi.fn(), log: console.log } };
+  const context = { window, document: doc, fetch, localStorage: { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => { store.set(k, v); } }, setTimeout, clearTimeout, Date, AbortController, Error, Number, String, Math, JSON, Promise, Array, Object, CustomEvent, console: { debug: vi.fn(), log: console.log } };
   runInNewContext(source, context);
   const api = window.EchoPrimeAgents as { open(): Promise<void>; refresh(): Promise<void>; active(): string | null };
   const windowHandlers = window.addEventListener as ReturnType<typeof vi.fn>;
@@ -79,7 +87,7 @@ async function setup(opts: Opts = {}) {
   const count = (url: string) => calls.filter(c => c.url === url).length;
   const open = async () => { await nodes['open-agents'].fire('click')[0]; };
   const submit = async (prompt = 'Find the port.', agent = 'researcher') => { nodes['agents-agent'].value = agent; nodes['agents-prompt'].value = prompt; await Promise.all(nodes['agents-form'].fire('submit')); };
-  return { nodes, n: nodes, api, calls, count, fire, open, submit, doc, visibility, polls: () => polls, store, ws: opts.workspace, fetch };
+  return { nodes, n: nodes, api, calls, count, fire, open, submit, doc, visibility, polls: () => polls, store, ws: opts.workspace, fetch, orbEvents, fireDoc };
 }
 const settle = () => vi.advanceTimersByTimeAsync(0);
 
@@ -311,5 +319,92 @@ describe('an agent run', () => {
     s.n['agents-dialog'].close();
     expect(s.api.active()).toBeNull();
     const n = s.calls.length; await vi.advanceTimersByTimeAsync(10000); expect(s.calls.length).toBe(n);
+  });
+});
+
+describe('living orb wiring: agents.js publishes moons and states, and opens an agent from its moon', () => {
+  type Moon = { id: string; kind: string; name: string; status: string; busy: boolean };
+  const states = (s: Awaited<ReturnType<typeof setup>>) => s.orbEvents.filter(e => e.type === 'echo-orb-state').map(e => e.detail.mode);
+  const moons = (s: Awaited<ReturnType<typeof setup>>) => s.orbEvents.filter(e => e.type === 'echo-orb-satellites').at(-1)?.detail.satellites as Moon[] | undefined;
+  const idle = (name: string): Moon => ({ id: 'agent:' + name, kind: 'agent', name, status: 'idle', busy: false });
+  const runningMoon = (name: string): Moon => ({ id: 'agent:' + name, kind: 'agent', name, status: 'running', busy: true });
+  it('dispatches nothing before the view loads, then one idle moon per agent definition, always as the agents source', async () => {
+    const s = await setup({ workspace: workspaceStub(owner()) });
+    expect(s.orbEvents).toEqual([]);
+    await s.open();
+    expect(moons(s)).toEqual([idle('researcher'), idle('builder')]); expect(states(s)).toEqual([]);
+    expect(s.orbEvents.every(e => e.detail.source === 'agents')).toBe(true);
+  });
+  it('anonymous visitor: no agent list is fetched, so no moon is published', async () => {
+    const s = await setup({ workspace: workspaceStub(anonymous()), healthStatus: 401, health: { error: 'Sign in required' } });
+    await s.open();
+    expect(s.calls).toHaveLength(0); expect(s.orbEvents.filter(e => e.type === 'echo-orb-satellites' && (e.detail.satellites as Moon[]).length)).toEqual([]);
+  });
+  it('a watched run puts the orb in deep thought with its moon running; done flashes success, then idle with every moon idle', async () => {
+    const s = await setup({ poll: n => n < 2 ? { body: running() } : { body: finished() } });
+    await s.open(); await s.submit('Find the port.', 'researcher'); await settle();
+    expect(states(s)).toEqual(['deep']); expect(moons(s)).toEqual([runningMoon('researcher'), idle('builder')]);
+    await vi.advanceTimersByTimeAsync(3100);
+    expect(s.api.active()).toBeNull(); expect(states(s)).toEqual(['deep', 'success', 'idle']); expect(moons(s)).toEqual([idle('researcher'), idle('builder')]);
+  });
+  it('a failed run flashes error, then idle', async () => {
+    const s = await setup({ poll: () => ({ body: { ...running([]), status: 'failed', done: true, error: { code: 'invalid', message: 'agent rejected the prompt' } } }) });
+    await s.open(); await s.submit(); await settle();
+    expect(states(s)).toEqual(['deep', 'error', 'idle']); expect(moons(s)).toEqual([idle('researcher'), idle('builder')]);
+  });
+  it('a run that stops watching without a result (unknown run, lost contact, wall clock) returns the orb to idle without an error flash', async () => {
+    const unknown = await setup({ poll: () => ({ status: 404, body: { error: 'Echo ADK answered HTTP 404 (not_found): unknown run' } }) });
+    await unknown.open(); await unknown.submit(); await settle();
+    expect(states(unknown)).toEqual(['deep', 'idle']); expect(moons(unknown)).toEqual([idle('researcher'), idle('builder')]);
+    const lost = await setup({ poll: () => ({ status: 502, body: { error: 'Echo ADK unreachable at http://127.0.0.1:8378' } }) });
+    await lost.open(); await lost.submit(); await settle(); await vi.advanceTimersByTimeAsync(13000);
+    expect(lost.api.active()).toBeNull(); expect(states(lost)).toEqual(['deep', 'idle']);
+    const slow = await setup({ run: () => ({ runId: RUN, agent: 'researcher', status: 'queued', budget: { max_calls: 5, max_cost_usd: 0, max_wall_s: 30 } }) });
+    await slow.open(); await slow.submit(); await settle(); await vi.advanceTimersByTimeAsync(151000);
+    expect(slow.api.active()).toBeNull(); expect(states(slow)).toEqual(['deep', 'idle']); expect(moons(slow)).toEqual([idle('researcher'), idle('builder')]);
+  });
+  it('closing the view stops the run on the orb: idle and the moon stops running', async () => {
+    const s = await setup();
+    await s.open(); await s.submit(); await settle();
+    s.n['agents-dialog'].close();
+    expect(states(s)).toEqual(['deep', 'idle']); expect(moons(s)).toEqual([idle('researcher'), idle('builder')]);
+  });
+  it('an account change returns the orb to idle and clears every agent moon', async () => {
+    const s = await setup();
+    await s.open(); await s.submit(); await settle();
+    s.fire('echo-account-changed');
+    expect(states(s)).toEqual(['deep', 'idle']); expect(moons(s)).toEqual([]);
+  });
+  it('a reload never blanks the moons: Refresh, reopening and a moon click publish only what Echo ADK answered', async () => {
+    const opts: Opts = { workspace: workspaceStub(owner()) }; const s = await setup(opts);
+    const published = (from: number) => s.orbEvents.slice(from).filter(e => e.type === 'echo-orb-satellites').map(e => e.detail.satellites as Moon[]);
+    await s.open(); await settle(); expect(moons(s)).toEqual([idle('researcher'), idle('builder')]);
+    let from = s.orbEvents.length;
+    await s.api.refresh(); await settle();
+    s.n['agents-dialog'].close(); await s.open(); await settle();
+    s.fireDoc('echo-orb-open', { id: 'agent:builder', kind: 'agent' }); await settle();
+    expect(s.count('/api/prime/adk/agents')).toBe(4); expect(published(from)).toEqual(Array(3).fill([idle('researcher'), idle('builder')]));
+    // A reload that fails keeps the moons; one that answers with fewer definitions publishes exactly those.
+    opts.healthStatus = 503; opts.health = { error: 'Echo ADK unreachable' }; from = s.orbEvents.length;
+    await s.api.refresh(); await settle(); expect(s.n['agents-status'].textContent).toContain('unavailable'); expect(published(from)).toEqual([]);
+    await vi.advanceTimersByTimeAsync(5000); opts.healthStatus = 200; opts.health = HEALTH; opts.agents = [AGENTS[1]];
+    await s.api.refresh(); await settle(); expect(published(from)).toEqual([[idle('builder')]]);
+  });
+  it('the watched agent orbits even when it is listed past the 24th definition', async () => {
+    const s = await setup({ agents: Array.from({ length: 30 }, (_, i) => ({ ...AGENTS[0], name: 'agent-' + i })) });
+    await s.open(); await settle(); expect(moons(s)).toHaveLength(24); expect(moons(s)!.map(m => m.name)).not.toContain('agent-28');
+    await s.submit('Find the port.', 'agent-28'); await settle();
+    const now = moons(s)!; expect(now).toHaveLength(24); expect(now[0]).toEqual(runningMoon('agent-28')); expect(now.slice(1).every(m => !m.busy)).toBe(true);
+  });
+  it('a click on an agent moon opens the view, loads it and selects that agent; other moons and malformed details are ignored', async () => {
+    const s = await setup();
+    s.fireDoc('echo-orb-open', { id: 'bot:' + 'a'.repeat(32), kind: 'bot' }); s.fireDoc('echo-orb-open', { id: 'builder', kind: 'agent' }); s.fireDoc('echo-orb-open', null);
+    await settle(); expect(s.n['agents-dialog'].open).toBe(false); expect(s.calls).toHaveLength(0);
+    s.fireDoc('echo-orb-open', { id: 'agent:builder', kind: 'agent' }); await settle();
+    expect(s.n['agents-dialog'].open).toBe(true); expect(s.count('/api/prime/adk/agents')).toBe(1);
+    expect(s.n['agents-agent'].value).toBe('builder'); expect(JSON.parse(s.store.get('echo-prime-adk-v1')!).agent).toBe('builder');
+    // A moon whose agent is no longer listed opens the view but selects nothing that does not exist.
+    s.n['agents-dialog'].close(); s.fireDoc('echo-orb-open', { id: 'agent:ghost', kind: 'agent' }); await settle();
+    expect(s.n['agents-dialog'].open).toBe(true); expect(s.n['agents-agent'].children.map(o => o.value)).toEqual(['researcher', 'builder']); expect(s.n['agents-agent'].value).not.toBe('ghost');
   });
 });
