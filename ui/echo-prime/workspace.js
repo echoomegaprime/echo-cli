@@ -823,7 +823,7 @@
      nodes.push(element('p',{class:mail.state==='sent'?'members-sent':mail.state==='failed'?'members-error':'members-hint'},mailLine(mail,email)));
      if(mail.state!=='sent')nodes.push(element('p',{},mail.state==='failed'&&resend?'Nothing was sent; share the link and message yourself.':existing?'Share the same link and message yourself.':'The invite was created; share the link and message yourself.'));
     }
-    if(!resend||mail?.state!=='sent')nodes.push(
+    nodes.push(
      element('div',{class:'workspace-field'},element('span',{},'Invite link'),element('div',{class:'members-copy'},linkField,button('Copy link',()=>copy(link,linkField,'Invite link')))),
      element('div',{class:'workspace-field'},element('span',{},'Message to send'),text,element('div',{class:'members-copy'},button('Copy message',()=>copy(message,text,'Invite message')))));
    }

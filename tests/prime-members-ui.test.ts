@@ -471,6 +471,7 @@ describe('Invitation email',()=>{
   expect(h.calls('/auth/invite/resend').map(c=>c[1])).toEqual([{invite_id:'inv-1'}]);
   expect(h.text()).toContain('Invitation emailed to old@example.test');expect(h.text()).not.toContain('Revoke this invite?');
   expect(h.calls('/auth/invites')).toHaveLength(1);// a resend changes nothing in the list
+  expect(linkField(h)!.value).toBe('https://echoomegaprime.com/#invite');expect(messageField(h)!.value).toContain('old@example.test');// the copy-link fallback is there after a success too
  });
  it.each([
   ['a rate limit with a wait',()=>Promise.reject(refusal('Too many attempts.',{status:429,retryAfter:600})),'Too many invitations, try again in 10 min'],
