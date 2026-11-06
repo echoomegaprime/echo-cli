@@ -792,13 +792,13 @@
   if(ui)return;
   ui={speakButtons:new Map()};
   ui.voice=el('span',{class:'speech-voice','data-speech-voice':''});
-  ui.mute=control('Mute Echo',async()=>setMuted(!prefs.muted),{'data-speech-mute':'','aria-pressed':'false'});
+  ui.mute=control('🔇 Mute Echo',async()=>setMuted(!prefs.muted),{'data-speech-mute':'',role:'switch','aria-checked':'false'});// a switch keeps one name; aria-checked is "muted"
   ui.stop=control('⏹ Stop',async()=>{stop('user');},{'data-speech-stop':''});
   ui.count=el('span',{class:'speech-count','data-speech-count':'',role:'status'},'Spoken: 0');
-  ui.device=el('input',{type:'checkbox','data-speech-device':''});
-  ui.device.addEventListener('change',()=>{prefs.device=ui.device.checked===true;savePrefs();if(!prefs.device&&S.device)stop('device-off',{quiet:true});debug('device_voice_changed',{enabled:prefs.device});setStatus(prefs.device?"Device voice (not Echo's) will speak text Echo's voice cannot reach.":'Device voice off.');sync();});
+  ui.device=el('input',{type:'checkbox',role:'switch','aria-checked':'false','data-speech-device':''});
+  ui.device.addEventListener('change',()=>{prefs.device=ui.device.checked===true;ui.device.setAttribute('aria-checked',String(prefs.device));savePrefs();if(!prefs.device&&S.device)stop('device-off',{quiet:true});debug('device_voice_changed',{enabled:prefs.device});setStatus(prefs.device?"Device voice (not Echo's) will speak text Echo's voice cannot reach.":'Device voice off.');sync();});
   ui.deviceLabel=el('label',{class:'check speech-device'},ui.device,"Device voice (not Echo's)");
-  ui.conversation=control('◉ Conversation mode',async()=>{await conversationApi.toggle();},{'data-speech-conversation':'','aria-pressed':'false',title:'Continuous voice conversation: the microphone stays open, each pause sends your words, Echo speaks the reply, and speaking over Echo interrupts it.'});
+  ui.conversation=control('◉ Conversation mode',async()=>{await conversationApi.toggle();},{'data-speech-conversation':'',role:'switch','aria-checked':'false',title:'Continuous voice conversation: the microphone stays open, each pause sends your words, Echo speaks the reply, and speaking over Echo interrupts it.'});
   // A Prime-route reply (ECHO Code, Swarm, Agents, Steward) carries its own replay; a Workspace reply replays its saved message.
   const replay=item=>{if(!item)return;if(typeof item.replay==='function')void item.replay();else void speakMessage(item.message,item.chatId,{force:true});};
   ui.tap=control('Tap to hear Echo',async()=>{const blocked=S.blocked;S.blocked=null;await unlock();replay(blocked);},{class:'speech-chip','data-speech-tap':''});
@@ -809,7 +809,9 @@
    el('div',{class:'speech-row'},ui.deviceLabel,ui.conversation,ui.tap,ui.resume),
    ui.status);
   ui.root.hidden=true;ui.tap.hidden=true;ui.resume.hidden=true;
-  ($('#composer-extras')||$('.composer-caption'))?.after(ui.root);
+  // The rail's Voice card lists this dock first and the voice bar second, so the tab order reads top to bottom.
+  const railSlot=$('#rail-voice-slot'),railBar=railSlot?railSlot.querySelector('[data-voice-bar]'):null;
+  if(railBar&&typeof railBar.before==='function')railBar.before(ui.root);else if(railSlot)railSlot.append(ui.root);else ($('#composer-extras')||$('.composer-caption'))?.after(ui.root);
   for(const name of ['echo-workspace-context','echo-account-changed'])window.addEventListener(name,()=>{if(name==='echo-account-changed')onAccountChanged();applyDefault();sync();});
   window.addEventListener('echo-reply-saved',event=>onReplySaved(event?.detail));
   window.addEventListener('echo-reply-stream',event=>onReplyStream(event?.detail));
@@ -861,12 +863,14 @@
   const configured=echoVoiceConfigured(),speaking=!!S.current,deviceSpeaking=!!S.device;
   ui.voice.textContent=configured?"Echo's voice · "+(S.current?.voice||voiceLabel())+(providerName(voiceInfo()?.provider)?' · '+providerName(voiceInfo()?.provider):''):"Echo's voice unavailable · "+voiceReason();
   ui.voice.classList.toggle('unavailable',!configured);
+  ui.voice.dataset.state=configured?'ok':prefs.device?'device':'error';// green: Echo's voice; amber: only the device voice; red: nothing can speak
   const muted=prefs.muted||b.voiceOptions.spoken!==true;
-  for(const button of [ui.mute,ui.barMute].filter(Boolean)){button.textContent=muted?'🔊 Unmute Echo':'🔇 Mute Echo';button.setAttribute('aria-pressed',String(muted));}
+  ui.mute.textContent='🔇 Mute Echo';ui.mute.setAttribute('aria-checked',String(muted));// the dock switch is on exactly while Echo is muted; its name never flips
+  if(ui.barMute){ui.barMute.textContent=muted?'🔊 Unmute Echo':'🔇 Mute Echo';ui.barMute.setAttribute('aria-pressed',String(muted));}// the voice-bar button names the action
   ui.stop.hidden=!(speaking||deviceSpeaking);
   ui.count.textContent='Spoken: '+S.turns;
-  ui.device.checked=prefs.device;
-  ui.conversation.hidden=!configured;ui.conversation.textContent=conversation?.active?'◉ Conversation mode on':'◉ Conversation mode';ui.conversation.setAttribute('aria-pressed',String(!!conversation?.active));
+  ui.device.checked=prefs.device;ui.device.setAttribute('aria-checked',String(prefs.device===true));
+  ui.conversation.hidden=!configured;ui.conversation.textContent=conversation?.active?'◉ Conversation mode on':'◉ Conversation mode';ui.conversation.setAttribute('aria-checked',String(!!conversation?.active));
   ui.tap.hidden=!S.blocked;ui.resume.hidden=!S.deferred||document.hidden;
   const key=speakingKey();
   for(const [button,info] of ui.speakButtons){const active=key!==null&&info.key===key;button.textContent=active?'⏹ Stop':info.label;button.setAttribute('aria-pressed',String(active));}

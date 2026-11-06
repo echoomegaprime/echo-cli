@@ -23,6 +23,7 @@ Object.assign(assets,{'/nav.js':'nav.js','/nav.css':'nav.css','/privacy.html':'p
 Object.assign(assets,{'/autoagents.js':'autoagents.js','/autoagents.css':'autoagents.css'});
 Object.assign(assets,{'/activity.js':'activity.js','/activity.css':'activity.css'});
 assets['/systems.js']='systems.js';
+Object.assign(assets,{'/rail.js':'rail.js','/rail.css':'rail.css'});
 Object.assign(assets,{'/videoagent.js':'videoagent.js','/videoagent.css':'videoagent.css'});
 // The Echo orb mark answers the browser's default /favicon.ico probe as well as the linked /favicon.svg (both the same SVG).
 assets['/favicon.svg']='favicon.svg';assets['/favicon.ico']='favicon.svg';

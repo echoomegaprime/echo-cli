@@ -235,8 +235,8 @@ describe('model picker in an Echo conversation (models.js)',()=>{
   const ws={enabled:true,session:owner,ready:Promise.resolve(true),generalMode:options.generalMode!==false,ownerHeaders:async()=>({}),invalidate:vi.fn()};
   const h=harness('models.js',{fetch,storage:stored?{'echo-prime-model-v1':stored}:{},window:{EchoPrimeWorkspace:ws}});
   const api=h.window.EchoPrimeModels;await api.ready;
-  const select=descendants(h.get('.composer-toolbar')).find(n=>n.tagName==='SELECT'&&(n as any).id==='model-select')!;
-  const note=descendants(h.get('.composer-toolbar')).find(n=>n.tagName==='SMALL')!;
+  const select=descendants(h.get('#rail-model-slot')).find(n=>n.tagName==='SELECT'&&(n as any).id==='model-select')!;
+  const note=descendants(h.get('#rail-model-slot')).find(n=>n.tagName==='SMALL')!;
   return {...h,api,select,note,ws};
  }
  it('routes a vendor pick to the vendor, Qwen and Auto to the Workspace, and refuses the Swarm with a reason',async()=>{
@@ -277,7 +277,7 @@ describe('auto-personality hand-back (brain.js)',()=>{
   await h.window.EchoPrimeBrain.ready;
   await h.window.EchoPrimeBrain.beforeWorkspaceTurn({text:'hello',chatId:'c1',api:bridgeApi,messages:[]});
   expect(bridgeApi).toHaveBeenCalledWith('/action',{action:'personality_select',chat_id:'c1',profile:'echo'});
-  const toggle=descendants(h.get('.composer-toolbar')).find(n=>(n as any).id==='personality-toggle')!;
+  const toggle=descendants(h.get('#rail-personality-slot')).find(n=>(n as any).id==='personality-toggle')!;
   await toggle.fire('click');await flush();
   expect(bridgeApi).toHaveBeenLastCalledWith('/action',{action:'personality_select',chat_id:'c1',profile:'auto'});
  });
@@ -424,7 +424,7 @@ describe('the model report is re-read when it matters (models.js)',()=>{
   const fetch=vi.fn(async()=>{const next=answer();return {ok:next.status<400,status:next.status,json:async()=>next.body};});
   const ws={enabled:true,session:owner,ready:Promise.resolve(true),generalMode:true,ownerHeaders:async()=>({}),invalidate:vi.fn()};
   const h=harness('models.js',{fetch,storage:{'echo-prime-model-v1':'claude'},window:{EchoPrimeWorkspace:ws}});
-  const select=descendants(h.get('.composer-toolbar')).find(n=>n.tagName==='SELECT'&&(n as any).id==='model-select')!;
+  const select=descendants(h.get('#rail-model-slot')).find(n=>n.tagName==='SELECT'&&(n as any).id==='model-select')!;
   return {...h,fetch,api:h.window.EchoPrimeModels,claudeOption:()=>select.children.find(n=>n.value==='claude')!.textContent};
  }
  it('re-reads after a failed turn, so a provider that signed out reads unavailable without a reload',async()=>{

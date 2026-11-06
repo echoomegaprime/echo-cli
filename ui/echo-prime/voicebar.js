@@ -52,7 +52,7 @@
   const view=snapshot(b);ui.root.hidden=!view.visible;b.state.voiceBar=view.visible;
   if(!view.visible)return;
   ui.line.textContent=view.line;ui.footer.textContent=view.footer;
-  for(const [key,box] of Object.entries(ui.boxes))box.checked=view.toggles[key];
+  for(const [key,box] of Object.entries(ui.boxes)){box.checked=view.toggles[key];box.setAttribute('aria-checked',String(box.checked===true));}
   ui.note.textContent=view.limitReached?'Voice conversation paused. Use ◉ Voice to resume explicitly.':view.conversation?(view.capped?'Hands-free voice is on: a limited number of captured turns remain.':'Hands-free voice is on.'):'';
  }
  function control(label,run){
@@ -66,10 +66,10 @@
   return node;
  }
  function toggle(key,label){
-  const box=el('input',{type:'checkbox','data-voice-option':key});
+  const box=el('input',{type:'checkbox',role:'switch','aria-checked':'false','data-voice-option':key});
   box.addEventListener('change',()=>{
    const b=bridge();if(!b)return;
-   b.voiceOptions[key]=box.checked===true;
+   b.voiceOptions[key]=box.checked===true;box.setAttribute('aria-checked',String(box.checked===true));
    if(key==='spoken'&&!box.checked){b.endConversation();b.stopAudio();}
    sync();
   });
@@ -83,7 +83,8 @@
    el('div',{class:'voice-controls'},control('Interrupt & speak',now=>now.interrupt()),control('Stop voice',now=>now.stopVoice()),spoken.node,brief.node,auto.node),
    ui.line,ui.message,ui.note,ui.footer);
   ui.root.hidden=true;
-  ($('#composer-extras')||$('.composer-caption'))?.after(ui.root);
+  const railSlot=$('#rail-voice-slot');// the Voice card of the Echo controls rail; after the spoken-replies dock when that is already there
+  if(railSlot)railSlot.append(ui.root);else ($('#composer-extras')||$('.composer-caption'))?.after(ui.root);
   const b=bridge();
   for(const name of ['echo-workspace-context','echo-account-changed'])window.addEventListener(name,()=>{if(name==='echo-account-changed'){say('');known=null;}sync();});
   b.onStatus(text=>{say(text);sync();});

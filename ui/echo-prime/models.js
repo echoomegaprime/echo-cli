@@ -23,7 +23,7 @@
  variantLabel.className='sr-only';variantLabel.textContent='Gemini model';
  variantSelect.id='argon-model-select';variantSelect.setAttribute('aria-label','Gemini model for Argon');variantSelect.setAttribute('style','max-width:100%');variantSelect.hidden=true;
  variantLabel.append(variantSelect);wrap.append(label,variantLabel,note);
- const mount=document.querySelector('.composer-toolbar')||document.querySelector('#composer');
+ const mount=document.querySelector('#rail-model-slot')||document.querySelector('.composer-toolbar')||document.querySelector('#composer');
  if(mount)mount.append(wrap);
  function entries(){
   return ids.filter(id=>id!=='auto'||autoEnabled()).map(id=>{
@@ -65,7 +65,7 @@
   select.value=selected;
   const gemini=selected==='argon'?variants():[],shown=currentVariant();
   variantSelect.replaceChildren(...gemini.map(v=>{const option=document.createElement('option');option.value=v.id;option.textContent=typeof v.label==='string'&&v.label?v.label:v.id;return option;}));
-  variantSelect.hidden=!gemini.length;
+  variantSelect.hidden=!gemini.length;variantLabel.hidden=variantSelect.hidden;
   if(shown)variantSelect.value=shown;
   variantSelect.disabled=!!failed||!!gate||(!!report&&!report.routing);
   const row=list.find(e=>e.id===selected);

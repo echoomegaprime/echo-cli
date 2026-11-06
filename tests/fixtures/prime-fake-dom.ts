@@ -11,7 +11,7 @@ export class Node {
  tagName:string;_text='';className='';hidden=false;disabled=false;checked=false;open=false;value='';max=0;isConnected=true;inert=false;scrollTop=0;scrollHeight=0;
  dataset:Record<string,string>={};attributes:Record<string,string>={};children:Node[]=[];inserted:Node[]=[];parent:Node|null=null;
  events:Record<string,((event:any)=>unknown)[]>={};styles:Record<string,string>={};files:any[]=[];
- style={setProperty:(key:string,value:string)=>{this.styles[key]=value;},removeProperty:(key:string)=>{delete this.styles[key];}};
+ style={setProperty:(key:string,value:string)=>{this.styles[key]=value;},removeProperty:(key:string)=>{delete this.styles[key];},getPropertyValue:(key:string)=>this.styles[key]??''};
  constructor(tag='div'){this.tagName=tag.toUpperCase();}
  get textContent():string{return this._text+this.children.map(c=>c.textContent).join('');}
  set textContent(value:string){this._text=String(value);this.children=[];}

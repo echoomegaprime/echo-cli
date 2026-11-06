@@ -209,17 +209,17 @@ it('keeps anonymous and unapproved visitors silent with the dock hidden',async()
 it('persists mute in browser storage, restores it on load and survives a blocked storage',async()=>{
  const storage=new Map<string,string>();const first=await voiceWorld({},{storage});
  await first.w.attr('data-speech-mute')!.click();
- expect(first.bridge.voiceOptions.spoken).toBe(false);expect(first.w.attr('data-speech-mute')!.textContent).toBe('🔊 Unmute Echo');
+ expect(first.bridge.voiceOptions.spoken).toBe(false);expect(first.w.attr('data-speech-mute')!.textContent).toBe('🔇 Mute Echo');expect(first.w.attr('data-speech-mute')!.attributes['aria-checked']).toBe('true');// a switch keeps one name; its state is aria-checked
  expect(JSON.parse(storage.get('echo-prime-speech-v1')!)).toMatchObject({muted:true});
  first.w.emit('echo-reply-saved',{chatId:'c1',message:reply()});await tick();expect(first.bridge.api).not.toHaveBeenCalledWith('/voice/start',expect.anything());
- const second=await voiceWorld({},{storage});expect(second.bridge.voiceOptions.spoken).toBe(false);expect(second.w.attr('data-speech-mute')!.textContent).toBe('🔊 Unmute Echo');
+ const second=await voiceWorld({},{storage});expect(second.bridge.voiceOptions.spoken).toBe(false);expect(second.w.attr('data-speech-mute')!.textContent).toBe('🔇 Mute Echo');expect(second.w.attr('data-speech-mute')!.attributes['aria-checked']).toBe('true');
  await second.w.attr('data-speech-mute')!.click();expect(second.bridge.voiceOptions.spoken).toBe(true);expect(JSON.parse(storage.get('echo-prime-speech-v1')!)).toMatchObject({muted:false});
  const blocked=await voiceWorld({},{storageThrows:true});expect(blocked.bridge.voiceOptions.spoken).toBe(true);await blocked.w.attr('data-speech-mute')!.click();expect(blocked.bridge.voiceOptions.spoken).toBe(false);
 });
 it('adds a mute control to the voice bar when it is present',async()=>{
  const bridge=fakeBridge();const w=await world(['voicebar.js','speech.js'],bridge);
  expect(w.attr('data-speech-bar-mute')).toBeTruthy();expect(w.attr('data-speech-voice')!.textContent).toBe("Echo's voice · Test Voice · ElevenLabs");
- await w.attr('data-speech-bar-mute')!.click();expect(bridge.voiceOptions.spoken).toBe(false);expect(w.attr('data-speech-mute')!.textContent).toBe('🔊 Unmute Echo');
+ await w.attr('data-speech-bar-mute')!.click();expect(bridge.voiceOptions.spoken).toBe(false);expect(w.attr('data-speech-mute')!.textContent).toBe('🔇 Mute Echo');expect(w.attr('data-speech-mute')!.attributes['aria-checked']).toBe('true');
 });
 
 // ---------- Echo voice pipeline ----------
@@ -403,7 +403,7 @@ it('runs conversation mode off by default, opens the microphone on request and a
  const button=w.attr('data-speech-conversation')!;expect(button.hidden).toBe(false);expect(button.textContent).toBe('◉ Conversation mode');expect(w.speech.conversation.active()).toBe(false);
  await button.click();
  expect(w.media.getUserMedia).toHaveBeenCalledWith({audio:{channelCount:1,echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false});
- expect(w.speech.conversation.active()).toBe(true);expect(button.textContent).toBe('◉ Conversation mode on');expect(button.attributes['aria-pressed']).toBe('true');
+ expect(w.speech.conversation.active()).toBe(true);expect(button.textContent).toBe('◉ Conversation mode on');expect(button.attributes.role).toBe('switch');expect(button.attributes['aria-checked']).toBe('true');expect(button.attributes['aria-pressed']).toBeUndefined();
  expect(w.orb[w.orb.length-1]).toMatchObject({mode:'listening',source:'speech'});
  rms.value=0.1;expect([w.speech.conversation.pump(100),w.speech.conversation.pump(100)]).toContain('start');
  for(let i=0;i<4;i++)w.media.processor.onaudioprocess({inputBuffer:{getChannelData:()=>new Float32Array(4096).fill(0.1)}});
