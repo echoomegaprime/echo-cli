@@ -45,7 +45,9 @@ async function fakeAdk(options: { agents?: Agent[]; bots?: Bot[] } = {}): Promis
       else if (method === 'POST' && path === '/agents') {
         const def = body as Agent; if (fake.agents.some(a => a.name === def.name)) { reply(409, { error: 'invalid', message: 'agent exists' }); return; }
         const outside = (def.capabilities as string[]).filter(c => !REGISTRY.has(c)); if (outside.length) { reply(422, { error: 'invalid', message: 'capability not in registry: ' + outside.join(', ') }); return; }
-        const made = { ...def, source: 'agents/' + def.name + '.json' }; fake.agents.push(made); reply(201, made);
+        // Like echo-adk 0.1.0: the origin may carry by and prompt_sha256 only; the service stamps created_at itself.
+        const origin = (def.origin ?? {}) as Record<string, unknown>; if (Object.keys(origin).some(k => k !== 'by' && k !== 'prompt_sha256')) { reply(400, { error: 'invalid', message: 'origin accepts by and prompt_sha256 only; the service stamps created_at' }); return; }
+        const made = { ...def, origin: { by: 'owner', ...origin, created_at: NOW }, source: 'agents/' + def.name + '.json' }; fake.agents.push(made); reply(201, made);
       } else if (method === 'GET' && /^\/agents\/[^/]+$/.test(path)) { const a = agentOf(path); a ? reply(200, a) : reply(404, { error: 'not_found', message: 'no such agent' }); }
       else if (method === 'PUT' && /^\/agents\/[^/]+$/.test(path)) {
         const a = agentOf(path); if (!a) { reply(404, { error: 'not_found', message: 'no such agent' }); return; }
@@ -122,7 +124,8 @@ describe('AdkClient create / update / delete against the stand-in', () => {
     const made = await client.createAgent({ name: 'queue-scout', role: 'observer', capabilities: ['echo.knowledge.search'], origin: { by: 'echo', prompt_sha256: SHA, created_at: NOW } });
     expect(made).toMatchObject({ name: 'queue-scout', source: 'agents/queue-scout.json', origin: { by: 'echo', prompt_sha256: SHA } });
     expect(fake.seen[0]).toMatchObject({ method: 'POST', url: '/agents' });
-    expect(fake.seen[0].body).toEqual({ name: 'queue-scout', role: 'observer', skills: [], capabilities: ['echo.knowledge.search'], lane: { node: 'forge', model: 'qwen-local', budget: { max_calls: 40, max_cost_usd: 0, max_wall_s: 900 } }, max_steps: 12, origin: { by: 'echo', prompt_sha256: SHA, created_at: NOW } });
+    expect(fake.seen[0].body).toEqual({ name: 'queue-scout', role: 'observer', skills: [], capabilities: ['echo.knowledge.search'], lane: { node: 'forge', model: 'qwen-local', budget: { max_calls: 40, max_cost_usd: 0, max_wall_s: 900 } }, max_steps: 12, origin: { by: 'echo', prompt_sha256: SHA } });
+    expect(made.origin).toEqual({ by: 'echo', prompt_sha256: SHA, created_at: NOW });
     await expect(client.createAgent({ name: 'queue-scout', role: 'observer', capabilities: ['echo.knowledge.search'] })).rejects.toSatisfy((e: AdkError) => e.status === 400 && e.code === 'invalid' && e.detail.http === 409 && /agent exists/.test(e.message));
     await expect(client.createAgent({ name: 'Bad Name', role: 'observer', capabilities: ['echo.knowledge.search'] })).rejects.toMatchObject({ status: 400 });
     expect(fake.seen).toHaveLength(2);
@@ -244,7 +247,7 @@ describe('make_agent', () => {
     const built = await s.auto.makeAgent(makeAgentArgs, owner(PROMPT));
     const post = s.posts('POST', '/agents'); expect(post).toHaveLength(1);
     expect(post[0].body).toEqual({ name: 'queue-scout', role: 'observer', skills: ['echo-observer-power'], capabilities: ['echo.knowledge.search', 'echo.context.recall'], lane: { node: 'forge', model: 'qwen-local', budget: { max_calls: 40, max_cost_usd: 5, max_wall_s: 900 } }, max_steps: 24,
-      instruction: 'Purpose: Watch the FORGE build queue each morning\n\nReport stuck builds only.', origin: { by: 'echo', prompt_sha256: hash, created_at: NOW } });
+      instruction: 'Purpose: Watch the FORGE build queue each morning\n\nReport stuck builds only.', origin: { by: 'echo', prompt_sha256: hash } });
     expect(built).toMatchObject({ kind: 'autoagent', tool: 'make_agent', promptSha256: hash, agent: { name: 'queue-scout', role: 'observer', purpose: 'Watch the FORGE build queue each morning', capabilities: [{ id: 'echo.knowledge.search', tier: 0 }, { id: 'echo.context.recall', tier: 1 }], skills: ['echo-observer-power'], lane: { node: 'forge', model: 'qwen-local' }, maxSteps: 24, schedule: { every_s: 3600 }, origin: { by: 'echo', prompt_sha256: hash, created_at: NOW }, existing: false } });
     expect(built.bot).toBeUndefined();
     expect(built.summary).toMatch(/Created agent queue-scout \(role observer, lane qwen-local on forge, up to 24 steps, budget 40 calls \/ \$5\.00\) with capabilities echo\.knowledge\.search \(tier 0\), echo\.context\.recall \(tier 1\)/);
