@@ -259,6 +259,8 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     else if(path==='/api/steward/ask')send(200,await hub.stewardAsk(data));
     // Media auto-router (spends nothing) and Enhance prompt (rate-limited per Prime session: the cookie hash, never the cookie).
     else if(path==='/api/prime/media/route')send(200,await hub.mediaRoute(data,abort.signal));
+    // A Studio request's progress and result, by the request id its review ticket carried (no capability, job or URL).
+    else if(path==='/api/prime/media/job')send(200,hub.mediaJob(data));
     else if(path==='/api/prime/enhance')send(200,await hub.enhance(data,createHash('sha256').update(supplied).digest('hex'),abort.signal));
     // Members view (owner-only, below requireOwner): one account's upload count and bytes, from its metadata only.
     else if(path==='/api/prime/members/uploads'){

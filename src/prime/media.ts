@@ -3,6 +3,8 @@ import {redact} from '../code/workspace.js';
 import type {Capability, Json} from './hub.js';
 import type {AnswerInfo, ModelRouter} from '../code/model-factory.js';
 import {WorkspaceHttpError} from './workspace.js';
+import type {MediaOutcomes} from './media-outcomes.js';
+import {DEFAULT_GATE_CALL_KINDS} from './media-collect.js';
 /**
  * Auto media routing: the user types a prompt, Prime classifies it (image / video / music / sfx / voice / image-edit,
  * or chat when nothing creative is asked), asks the live SDK catalog (kind-scoped searches through the SDK broker) which
@@ -298,6 +300,8 @@ export interface Candidate {
  argumentShape:'modeled'|'unmodeled';rankingSource:string;note:string;
  /** A reason this candidate cannot be used right now; such candidates are listed under `excluded`, never picked. */
  unavailable?:string;
+ /** Set when a recent real run (or a billing refusal on its provider) lowered its score. */
+ demoted?:{category:string;reason:string};
 }
 function providerOf(id:string):string{
  if(/^echo\.media\./.test(id))return 'On-prem media router';
@@ -328,27 +332,91 @@ function costOf(c:Capability,ranking:Ranking|undefined):{cost:CostTier;note:stri
  return {cost:'paid-low',note:'provider charges apply'};
 }
 /** The SDK command for a capability. The `echo.llm.*` model caps share one uniform command, `call` (registry schemas:
- * `command` "Uniform SDK command (call)"; the LLM router accepts {command:"call",options:{...}}); their ids carry model
- * versions with dots ("…FLUX.2-max"), so the last id segment is not a verb there. Other families use the id's last segment. */
+ * `command` "Uniform SDK command (call)"); their ids carry model versions with dots ("…FLUX.2-max"), so the last id segment
+ * is not a verb there. Other families use the id's last segment. */
 function verbOf(id:string):string{return /^echo\.llm\./.test(id)?'call':id.split('.').at(-1)||'generate';}
-/** Builds the exact Studio request for a pick. Shapes follow the registry's own examples ({command:<verb>,options:{...}});
- * families whose extra fields are known get them, everything else is flagged `unmodeled` so the Studio review shows it. */
-export function buildArguments(id:string,kind:MediaKind,text:string,classification?:Pick<Classification,'styles'|'aspect'|'durationSeconds'>):{arguments:Json;shape:'modeled'|'unmodeled'}{
- const verb=verbOf(id),prompt=text.trim();
- const options:Json={};
+/** How the registry says a capability takes its arguments: the live record (`echo.caps.detail` through the SDK read)
+ * carries `handler_kind`, `args_mode` and the parameter list parsed from `input_schema_json` (envelope keys hidden). */
+export interface CapShape {handlerKind?:string;argsMode?:string;params:{name:string;required:boolean}[]}
+export function shapeOf(record:unknown):CapShape|undefined{
+ const c=obj(obj(record).capability);
+ const handlerKind=typeof c.handler_kind==='string'&&c.handler_kind?c.handler_kind.slice(0,40):undefined,argsMode=typeof c.args_mode==='string'&&c.args_mode?c.args_mode.slice(0,40):undefined;
+ const params=Array.isArray(c.params)?c.params.slice(0,64).flatMap(p=>{const r=obj(p);return typeof r.name==='string'&&/^[A-Za-z_][A-Za-z0-9_-]{0,63}$/.test(r.name)?[{name:r.name,required:r.required===true}]:[];}):[];
+ return handlerKind||params.length?{...(handlerKind?{handlerKind}:{}),...(argsMode?{argsMode}:{}),params}:undefined;
+}
+/** How a request expresses a length: seconds, milliseconds, seconds as a string (Together `seconds` "1".."10"), or the
+ * on-prem video router's frame count at a frame rate (`length` 5-129 frames, `fps` 8-30). */
+export interface DurationSpec {key:string;unit:'s'|'ms'|'s-string'|'frames';min:number;max:number}
+/** The request shape for one capability, so the Studio can rebuild the exact request when the brief or the length changes. */
+export interface ArgumentTemplate {
+ /** flat: the schema's fields at the top level (http json_body caps; the ElevenLabs op router forwards its body to
+  * ElevenLabs verbatim) · llm: `{command:'call',...fields}` (the LLM router reads top-level fields first) · dual: the
+  * fleet's documented `{command,...fields,options:{...fields}}` for a router the table does not know. */
+ envelope:'flat'|'llm'|'dual';verb:string;textKey:'prompt'|'text';fixed:Json;duration?:DurationSpec;modeled:boolean;
+ source:'registry'|'family'|'default';
+}
+/** handler_kind=http, args_mode=json_body in arcanum_sdk.sdk_capabilities (read 2026-11-06): the gate validates the
+ * top-level params against input_schema_json and strips `options` before the POST, so these take flat fields. */
+const HTTP_FLAT=/^echo\.(?:media\.(?:image|video)_generate|image\.generate|fal\.generate|elevenlabs\.tts|cartesia\.tts|voice\.(?:speak|cartesia\.tts|elevenlabs\.(?:tts|sfx|music))|aws\.polly_tts)$/;
+/** handler_kind=router, target /sdk/elevenlabs/op/<group>/<op>: elevenlabs_full.py sends the body it receives to ElevenLabs as is. */
+const ELEVENLABS_OP=/^echo\.elevenlabs\.[a-z_]+\.[a-z_]+$/;
+function envelopeFor(id:string,shape?:CapShape):Pick<ArgumentTemplate,'envelope'|'modeled'|'source'>{
+ if(/^echo\.llm\./.test(id))return {envelope:'llm',modeled:true,source:'family'};
+ const kind=shape?.handlerKind;
+ if(kind==='http')return {envelope:'flat',modeled:HTTP_FLAT.test(id)||shape!.params.length>0,source:'registry'};
+ if(ELEVENLABS_OP.test(id)&&(!kind||kind==='router'))return {envelope:'flat',modeled:true,source:'family'};
+ if(!kind&&HTTP_FLAT.test(id))return {envelope:'flat',modeled:true,source:'family'};
+ return {envelope:'dual',modeled:false,source:kind?'registry':'default'};
+}
+function textKeyFor(id:string,kind:MediaKind,shape?:CapShape):'prompt'|'text'{
+ const names=new Set(shape?.params.map(p=>p.name));
+ if(names.has('text')&&!names.has('prompt'))return 'text';
+ if(names.has('prompt')&&!names.has('text'))return 'prompt';
+ if(/sound_generation|(?:^|\.)tts$|\.speak$|polly|speech|\.sfx$/.test(id))return 'text';
+ return kind==='voice'||kind==='sfx'?'text':'prompt';
+}
+function durationFor(id:string,kind:MediaKind):DurationSpec|undefined{
+ if(id==='echo.media.video_generate')return {key:'length',unit:'frames',min:1,max:16};
+ // Together video: `seconds`, passed as a string "1".."10" (docs.together.ai/docs/inference/videos/parameters).
+ if(/^echo\.llm\.together\./.test(id)&&kind==='video')return {key:'seconds',unit:'s-string',min:1,max:10};
+ // ElevenLabs Music: music_length_ms 3000-600000 (elevenlabs.io/docs/api-reference/music/compose).
+ if(/music_generation\.(?:generate|compose_detailed|stream_compose)$|^echo\.voice\.elevenlabs\.music$/.test(id))return {key:'music_length_ms',unit:'ms',min:3,max:600};
+ // ElevenLabs sound effects: duration_seconds 0.5-30 (elevenlabs.io/docs/api-reference/text-to-sound-effects/convert).
+ if(/sound_generation\.sound_generation$|^echo\.voice\.elevenlabs\.sfx$/.test(id))return {key:'duration_seconds',unit:'s',min:0.5,max:30};
+ return undefined;
+}
+/** The request fields one length becomes, clamped to the tool's range. */
+export function durationFields(spec:DurationSpec,seconds:number):Json{
+ const s=Math.min(spec.max,Math.max(spec.min,seconds));
+ if(spec.unit==='ms')return {[spec.key]:Math.round(s*1000)};
+ if(spec.unit==='s-string')return {[spec.key]:String(Math.max(1,Math.round(s)))};
+ if(spec.unit==='frames'){const fps=Math.max(8,Math.min(24,Math.floor(128/s)));return {fps,length:Math.min(129,Math.round(s*fps)+1)};}
+ return {[spec.key]:Math.round(s*10)/10};
+}
+export function argumentTemplate(id:string,kind:MediaKind,classification?:Pick<Classification,'styles'|'aspect'>,shape?:CapShape):ArgumentTemplate{
+ const envelope=envelopeFor(id,shape),fixed:Json={};
  if(id==='echo.media.image_generate'){
-  options.prompt=prompt;options.wait=false;
-  if(classification?.styles.includes('anime'))options.style='anime';else if(classification?.styles.includes('photoreal'))options.style='photoreal';
-  if(classification?.aspect==='16:9'){options.width=1024;options.height=576;}else if(classification?.aspect==='9:16'){options.width=576;options.height=1024;}else if(classification?.aspect==='21:9'){options.width=1344;options.height=576;}
-  return {arguments:{command:verb,options},shape:'modeled'};
+  fixed.wait=false;
+  if(classification?.styles.includes('anime'))fixed.style='anime';else if(classification?.styles.includes('photoreal'))fixed.style='photoreal';
+  if(classification?.aspect==='16:9'){fixed.width=1024;fixed.height=576;}else if(classification?.aspect==='9:16'){fixed.width=576;fixed.height=1024;}else if(classification?.aspect==='21:9'){fixed.width=1344;fixed.height=576;}
  }
- if(id==='echo.media.video_generate')return {arguments:{command:verb,options:{prompt,wait:false}},shape:'modeled'};
- if(/^echo\.(?:image\.generate|image\.qwen\.generate|fal\.generate|deepai\.image)$/.test(id))return {arguments:{command:verb,options:{prompt}},shape:'modeled'};
- if(/^echo\.llm\.(?:together|openrouter|fireworks)\./.test(id)&&(kind==='image'||kind==='video'))return {arguments:{command:verb,options:{prompt}},shape:'modeled'};
- if(/music_generation\.(?:generate|compose_detailed)$/.test(id))return {arguments:{command:verb,options:{prompt,...(classification?.durationSeconds?{music_length_ms:classification.durationSeconds*1000}:{})}},shape:'modeled'};
- if(/sound_generation\.sound_generation$/.test(id))return {arguments:{command:verb,options:{text:prompt,...(classification?.durationSeconds?{duration_seconds:Math.min(30,classification.durationSeconds)}:{})}},shape:'modeled'};
- if(/^echo\.(?:voice\.speak|elevenlabs\.tts|cartesia\.tts|voice\.cartesia\.tts|voice\.elevenlabs\.tts|aws\.polly_tts|azure\.cognitive_speech_tts|voice\.elevenlabs\.sfx|voice\.elevenlabs\.music)$/.test(id))return {arguments:{command:verb,options:{text:prompt}},shape:'modeled'};
- return {arguments:{command:verb,options:kind==='voice'||kind==='sfx'?{text:prompt}:{prompt}},shape:'unmodeled'};
+ if(id==='echo.media.video_generate')fixed.wait=false;
+ const duration=durationFor(id,kind);
+ return {...envelope,verb:verbOf(id),textKey:textKeyFor(id,kind,shape),fixed,...(duration?{duration}:{})};
+}
+/** The exact request for a template, brief and optional length. The browser Studio rebuilds requests with the same rules. */
+export function materialize(template:ArgumentTemplate,text:string,seconds?:number):Json{
+ const fields:Json={[template.textKey]:text,...template.fixed};
+ if(template.duration&&typeof seconds==='number'&&Number.isFinite(seconds)&&seconds>0)Object.assign(fields,durationFields(template.duration,seconds));
+ if(template.envelope==='flat')return fields;
+ if(template.envelope==='llm')return {command:'call',...fields};
+ return {command:template.verb,...fields,options:{...fields}};
+}
+/** Builds the exact Studio request for a pick from the capability's registry shape (live record when the router read it,
+ * otherwise the verified family table above). A shape the table does not know is flagged `unmodeled` for review. */
+export function buildArguments(id:string,kind:MediaKind,text:string,classification?:Pick<Classification,'styles'|'aspect'|'durationSeconds'>,shape?:CapShape):{arguments:Json;shape:'modeled'|'unmodeled';template:ArgumentTemplate}{
+ const template=argumentTemplate(id,kind,classification,shape);
+ return {arguments:materialize(template,text.trim(),classification?.durationSeconds),shape:template.modeled?'modeled':'unmodeled',template};
 }
 /** Reads a capability record (snapshot or live) into a ranked candidate, or null when it is not a generator for any kind:
  * an id NOT_A_GENERATOR names, or an id neither RANKING nor KIND_HINT recognises. Every other generator becomes a
@@ -369,6 +437,9 @@ export function describeCandidate(c:Capability):Candidate|null{
  else if((HEALTH_WEIGHT[health]??0.6)===0)candidate.unavailable='health '+health+' (the Studio refuses it at review)';
  else if(c.id==='echo.media.video_generate')candidate.unavailable='owner-disabled on TEMPER (RAM budget); this client never force-enables video';
  else if(/-(?:i2v|r2v)\b|I2V|kontext|imagen_edit/i.test(c.id))candidate.unavailable='needs a source image the capability reads itself; Auto never prepares it from a text-only brief (attach a reference in the Studio and pick it yourself)';
+ // ElevenLabs answers /v1/music/detailed as multipart/mixed (JSON metadata + audio, elevenlabs.io api-reference/music/compose-detailed);
+ // the gate's ElevenLabs router (elevenlabs_full.py) passes on only audio/video/octet-stream bodies as files, so this answer arrives as text.
+ else if(/^echo\.elevenlabs\.music_generation\.compose_detailed(?:_stream)?$/.test(c.id))candidate.unavailable='answers multipart/mixed (metadata plus audio), which the gate\'s ElevenLabs router passes on as text, not an audio file; use music_generation.generate';
  return candidate;
 }
 export interface RankOptions {text:string;styles?:StyleCue[];aspect?:Aspect;durationSeconds?:number;
@@ -376,11 +447,47 @@ export interface RankOptions {text:string;styles?:StyleCue[];aspect?:Aspect;dura
  live?:ReadonlySet<string>;
  /** Of those, the ids whose live row carried a health value. A live row without one keeps the snapshot's health
   * (mergeCatalog) and is labelled as such; absent, every live-listed id counts as carrying live health. */
- liveHealth?:ReadonlySet<string>}
+ liveHealth?:ReadonlySet<string>;
+ /** Recent real executions: a tool whose last run failed for billing/auth ranks far lower, with the reason shown. */
+ outcomes?:MediaOutcomes;
+ /** `call_kind` values the SDK gate is known to execute. A media tool whose description names another kind ranks lower
+  * as untested (the reason is shown); it is excluded only by `denyCallKinds` or a learned "unsupported call_kind" answer. */
+ callKinds?:readonly string[];
+ /** Call kinds never offered (Prime config `media.denyCallKinds`). */
+ denyCallKinds?:readonly string[];
+ /** Live registry shapes read for these ids (argument envelope and field names). */
+ shapes?:ReadonlyMap<string,CapShape>}
 export interface RankResult {candidates:Candidate[];excluded:Candidate[]}
-/** Deterministic ranking: fit x health x cost x quality (x a light speed factor). Ties: health, cost, quality, id. */
+/** The `call_kind=` the registry description names (the LLM router dispatches on it). */
+export function callKindOf(c:{description?:string}):string|undefined{return /\bcall_kind=([a-z][a-z0-9_]{1,60})/.exec(c.description||'')?.[1];}
+/** LLM-router call kinds that return a media file (Together's images, videos and speech endpoints). Every other kind the
+ * router runs (openai_compat, dedicated_endpoint, anthropic_*, grok_cli, vertex_generate) is a chat completion: the gate's
+ * llm_router.py has no image, video or audio output path (no images/b64/modalities handling, read 2026-11-06). */
+const MEDIA_CALL_KIND=/_(?:image|video)_generation$|_audio_speech$/;
+/** Why the gate cannot run this tool now, or nothing: an `echo.llm.*` generator must name a media call kind (the chat kinds
+ * return text); a kind the operator denies (`media.denyCallKinds`) or the gate answered "unsupported" for recently is out.
+ * A kind that is merely untested here is not excluded: see untestedCallKind. */
+export function executability(c:{id:string;description?:string},callKinds:readonly string[],outcomes?:MediaOutcomes,mediaKind?:MediaKind,deny:readonly string[]=[]):string|undefined{
+ const kind=callKindOf(c);
+ if(/^echo\.llm\./.test(c.id)&&mediaKind&&mediaKind!=='chat'&&(!kind||!MEDIA_CALL_KIND.test(kind)))return 'it runs through the SDK gate\'s chat path ('+(kind??'openai_compat; no media call kind in the registry')+'), which returns text, not a media file';
+ if(!kind)return undefined;
+ if(deny.includes(kind))return 'its call kind '+kind+' is listed in media.denyCallKinds';
+ const learned=outcomes?.callKind(kind);
+ if(learned&&!learned.supported)return 'the SDK gate answered "unsupported call_kind \''+kind+'\'" for '+learned.cap.replace(/^echo\./,'')+' at '+new Date(learned.at).toISOString().slice(0,16).replace('T',' ')+' UTC; tools of that kind are not offered until the gate runs it';
+ return undefined;
+}
+/** Why a tool ranks lower because Prime has no evidence the gate runs its call kind: the kind is not in the gate's known
+ * list and no run of that kind has succeeded here. Once the gate supports it, the first successful run clears this. */
+export function untestedCallKind(c:{id:string;description?:string},callKinds:readonly string[],outcomes?:MediaOutcomes):string|undefined{
+ const kind=callKindOf(c);
+ if(!kind||callKinds.includes(kind)||outcomes?.callKind(kind)?.supported)return undefined;
+ return 'its call kind '+kind+' is untested on this SDK gate (not in media.gateCallKinds and no successful run yet); the gate may refuse it';
+}
+const UNTESTED_WEIGHT=0.4;
+/** Deterministic ranking: fit x health x cost x quality (x a light speed factor x a demotion for a recent failed run).
+ * Ties: health, cost, quality, id. */
 export function rankCandidates(kind:MediaKind,catalog:Capability[],options:RankOptions):RankResult{
- const styles=options.styles??[],candidates:Candidate[]=[],excluded:Candidate[]=[];
+ const styles=options.styles??[],candidates:Candidate[]=[],excluded:Candidate[]=[],callKinds=options.callKinds??DEFAULT_GATE_CALL_KINDS;
  for(const c of catalog){
   const cand=describeCandidate(c);if(!cand||!cand.kinds.includes(kind))continue;
   if(options.live?.has(cand.id)){
@@ -389,13 +496,18 @@ export function rankCandidates(kind:MediaKind,catalog:Capability[],options:RankO
   }
   const matched=cand.styles.filter(s=>styles.includes(s));
   cand.fit=1+Math.min(0.3,0.15*matched.length);
-  if(cand.id==='echo.cartesia.tts'&&options.text.length>400)cand.unavailable='text longer than the 400-character Cartesia bound';
+  if(!cand.unavailable&&cand.id==='echo.cartesia.tts'&&options.text.length>400)cand.unavailable='text longer than the 400-character Cartesia bound';
+  if(!cand.unavailable){const why=executability(c,callKinds,options.outcomes,kind,options.denyCallKinds);if(why)cand.unavailable=why;}
+  const demotion=options.outcomes?.demotion(cand.id,cand.provider),untested=untestedCallKind(c,callKinds,options.outcomes);
   const healthWeight=HEALTH_WEIGHT[cand.health]??0.6;
-  cand.score=Math.round(cand.fit*healthWeight*COST_WEIGHT[cand.cost]*(cand.quality/10)*(0.85+0.015*cand.speed)*1000)/1000;
+  cand.score=Math.round(cand.fit*healthWeight*COST_WEIGHT[cand.cost]*(cand.quality/10)*(0.85+0.015*cand.speed)*(demotion?.weight??1)*(untested?UNTESTED_WEIGHT:1)*1000)/1000;
   const healthNote=cand.healthSource==='probe'?' (probed now)':cand.healthSource==='catalog'?' (live catalog)':cand.healthSource==='snapshot'?(cand.catalogSource==='live'?' (snapshot; the live catalog row carries no health)':' (snapshot)'):' (not reported)';
   cand.reasons=[kind+(matched.length?' + '+matched.join(', '):''),'health '+cand.health+healthNote,cand.costNote,'quality '+cand.quality+'/10, speed '+cand.speed+'/10'];
-  if(cand.catalogSource==='snapshot')cand.reasons.push('listed only in the shipped snapshot');
-  const built=buildArguments(cand.id,kind,options.text,{styles,aspect:options.aspect,durationSeconds:options.durationSeconds});cand.argumentShape=built.shape;
+  if(demotion){cand.demoted={category:demotion.category,reason:demotion.reason};cand.reasons.push('ranked lower: '+demotion.reason);}
+  else{const last=options.outcomes?.last(cand.id);if(last?.category==='ok')cand.reasons.push('last run succeeded '+new Date(last.at).toISOString().slice(0,16).replace('T',' ')+' UTC');}
+  if(untested){cand.demoted??={category:'untested',reason:untested};cand.reasons.push('ranked lower: '+untested);}
+  if(cand.catalogSource==='snapshot')cand.reasons.push(SNAPSHOT_ONLY);
+  const built=buildArguments(cand.id,kind,options.text,{styles,aspect:options.aspect,durationSeconds:options.durationSeconds},options.shapes?.get(cand.id));cand.argumentShape=built.shape;
   if(cand.argumentShape==='unmodeled')cand.reasons.push('argument shape not modeled; review the request details');
   (cand.unavailable?excluded:candidates).push(cand);
  }
@@ -403,6 +515,9 @@ export function rankCandidates(kind:MediaKind,catalog:Capability[],options:RankO
  candidates.sort(order);excluded.sort(order);
  return {candidates,excluded};
 }
+/** Said of a tool the live searches for this kind did not return (route-level `catalog.source` can still be live). */
+export const SNAPSHOT_ONLY='not returned by the live catalog searches for this kind (shipped snapshot record)';
+const SNAPSHOT_READ='not returned by the live catalog searches for this kind; its registry record was read live';
 
 // ---- live catalog ----------------------------------------------------------------------------------------------------
 export type GenerationKind=Exclude<MediaKind,'chat'>;
@@ -457,7 +572,11 @@ const catalogRecord=(c:Capability):CatalogRecord=>({id:c.id,registered:c.registe
 // ---- router ----------------------------------------------------------------------------------------------------------
 export interface MediaPick {id:string;
  /** The SDK capability id (same as `id`; the contract name the UI and docs use). */
- cap:string;label:string;provider:string;reason:string;health:string;healthSource:Candidate['healthSource'];catalogSource:Candidate['catalogSource'];cost:CostTier;costNote:string;quality:number;speed:number;score:number;argumentShape:Candidate['argumentShape'];note:string;request:{target:'sdk';name:string;arguments:Json}}
+ cap:string;label:string;provider:string;reason:string;health:string;healthSource:Candidate['healthSource'];catalogSource:Candidate['catalogSource'];cost:CostTier;costNote:string;quality:number;speed:number;score:number;argumentShape:Candidate['argumentShape'];note:string;request:{target:'sdk';name:string;arguments:Json};
+ /** How to rebuild `request.arguments` for another brief or length (the Studio's duration control and brief edits). */
+ template:ArgumentTemplate;
+ /** Set when a recent real run of this tool (or a billing refusal on its provider) ranked it lower. */
+ demoted?:{category:string;reason:string}}
 export interface RouteResult {
  classification:Classification;picked:MediaPick|null;alternatives:MediaPick[];excluded:{id:string;label:string;reason:string}[];
  /** Why nothing was picked (chat, image-edit without a source, or no healthy generator for the kind). */
@@ -469,12 +588,19 @@ export interface RouteResult {
 }
 export interface MediaRouterOptions {
  catalog:()=>Capability[];
- /** The same read `PrimeHub.prepare` uses: the live record carries `health_status` and `registration_state`. */
+ /** The same read `PrimeHub.prepare` uses: the live record carries `health_status`, `registration_state` and the
+  * capability's handler kind, args mode and parameter list. */
  read?:(id:string)=>Promise<unknown>;
  /** The live SDK catalog search (the broker's `sdk.search`). Absent = no live catalog: the route says it ranked the snapshot. */
  search?:(query:string)=>Promise<unknown>;
  /** Told about live rows once a search answers (the hub keeps them in its catalog, like `/api/search`). */
  onDiscovered?:(rows:Capability[])=>void;
+ /** Recent real executions (the hub records every Studio execute here). */
+ outcomes?:MediaOutcomes;
+ /** `call_kind` values the SDK gate runs (Prime config `media.gateCallKinds`). */
+ callKinds?:readonly string[];
+ /** Call kinds never offered (Prime config `media.denyCallKinds`). */
+ denyCallKinds?:readonly string[];
  models?:ModelRouter;now?:()=>number;probeTimeoutMs?:number;probeCount?:number;classifierTimeoutMs?:number;searchTimeoutMs?:number;
 }
 const PROBE_CACHE_MS=60000;
@@ -489,7 +615,7 @@ async function within<T>(work:Promise<T>,ms:number,label:string,signal?:AbortSig
  }finally{clearTimeout(timer);if(onAbort)signal?.removeEventListener('abort',onAbort);}
 }
 export class MediaRouter {
- private probes=new Map<string,{at:number;health:string}>();
+ private probes=new Map<string,{at:number;health:string;shape?:CapShape}>();
  private discovered=new Map<GenerationKind,{at:number;rows:Capability[];failed:{query:string;reason:string}[]}>();
  private now:()=>number;
  constructor(private options:MediaRouterOptions){this.now=options.now??Date.now;}
@@ -521,40 +647,45 @@ export class MediaRouter {
   if(failed.length<queries.length){this.discovered.set(kind,{at:this.now(),rows,failed});this.options.onDiscovered?.(rows);}
   return {rows,report:this.report(queries,rows,failed,false)};
  }
- /** Live health for one capability: the hub's read (unwrapped by the caller), cached 60 s. Never throws: an unreadable record is `unknown`. */
- private async probe(id:string,signal?:AbortSignal):Promise<{health:string;source:'cached'|'live'}>{
+ /** Live health and argument shape for one capability: the hub's read (unwrapped by the caller), cached 60 s. Never
+  * throws: an unreadable record is `unknown` with no shape. */
+ private async probe(id:string,signal?:AbortSignal):Promise<{health:string;shape?:CapShape;source:'cached'|'live'}>{
   const cached=this.probes.get(id);
-  if(cached&&this.now()-cached.at<PROBE_CACHE_MS)return {health:cached.health,source:'cached'};
-  let health='unknown';
+  if(cached&&this.now()-cached.at<PROBE_CACHE_MS)return {health:cached.health,shape:cached.shape,source:'cached'};
+  let health='unknown',shape:CapShape|undefined;
   try{
    // within() clears its timer and removes its abort listener whichever way the read settles.
    const record=obj(await within(this.options.read!(id),this.options.probeTimeoutMs??5000,'Health probe',signal));
    const state=String(record.registration_state??''),status=String(record.health_status??'').toLowerCase();
    health=state&&state!=='registered'?'unregistered':status||'unknown';
+   shape=shapeOf(record);
   }catch(error){debug('%j',{event:'prime_media_probe_failed',id,reason:error instanceof Error?redact(error.message).slice(0,120):'failed'});}
-  this.probes.set(id,{at:this.now(),health});
-  return {health,source:'live'};
+  this.probes.set(id,{at:this.now(),health,shape});
+  return {health,shape,source:'live'};
  }
- private toPick(c:Candidate,kind:MediaKind,text:string,classification:Classification):MediaPick{
-  const built=buildArguments(c.id,kind,text,classification);
-  return {id:c.id,cap:c.id,label:c.label,provider:c.provider,reason:'Picked '+c.label+' because '+c.reasons.join(' · '),health:c.health,healthSource:c.healthSource,catalogSource:c.catalogSource,cost:c.cost,costNote:c.costNote,quality:c.quality,speed:c.speed,score:c.score,argumentShape:c.argumentShape,note:c.note,request:{target:'sdk',name:c.id,arguments:built.arguments}};
+ private toPick(c:Candidate,kind:MediaKind,text:string,classification:Classification,shape?:CapShape):MediaPick{
+  const built=buildArguments(c.id,kind,text,classification,shape);
+  return {id:c.id,cap:c.id,label:c.label,provider:c.provider,reason:'Picked '+c.label+' because '+c.reasons.join(' · '),health:c.health,healthSource:c.healthSource,catalogSource:c.catalogSource,cost:c.cost,costNote:c.costNote,quality:c.quality,speed:c.speed,score:c.score,argumentShape:built.shape,note:c.note,request:{target:'sdk',name:c.id,arguments:built.arguments},template:built.template,...(c.demoted?{demoted:c.demoted}:{})};
  }
- /** The one entry point. `mode` is a Studio/composer tab ('auto' or a kind); `fallback` says what an unclassifiable prompt means (Studio: image, composer: chat). */
+ /** The one entry point. `mode` is a Studio/composer tab ('auto' or a kind); `fallback` says what an unclassifiable prompt
+  * means (Studio: image, composer: chat); `durationSeconds` is the Studio's length control and wins over the brief's. */
  async route(input:unknown,signal?:AbortSignal):Promise<RouteResult>{
   const data=obj(input);
-  if(Object.keys(data).some(k=>!['text','mode','fallback','probe','classifier'].includes(k)))throw new MediaError(400,'Invalid media request');
+  if(Object.keys(data).some(k=>!['text','mode','fallback','probe','classifier','durationSeconds'].includes(k)))throw new MediaError(400,'Invalid media request');
   if(typeof data.text!=='string'||!data.text.trim())throw new MediaError(400,'Enter a prompt to route');
   if(data.text.length>MEDIA_MAX_TEXT)throw new MediaError(400,'Prompt exceeds '+MEDIA_MAX_TEXT+' characters');
   if(data.mode!==undefined&&data.mode!=='auto'&&!MEDIA_KINDS.includes(data.mode as MediaKind))throw new MediaError(400,'Invalid media mode');
   if(data.fallback!==undefined&&data.fallback!=='image'&&data.fallback!=='chat')throw new MediaError(400,'Invalid media fallback');
   if(data.probe!==undefined&&typeof data.probe!=='boolean')throw new MediaError(400,'Invalid media request');
   if(data.classifier!==undefined&&typeof data.classifier!=='boolean')throw new MediaError(400,'Invalid media request');
+  if(data.durationSeconds!==undefined&&(typeof data.durationSeconds!=='number'||!Number.isFinite(data.durationSeconds)||data.durationSeconds<0.5||data.durationSeconds>600))throw new MediaError(400,'Length must be 0.5 to 600 seconds');
   const text=data.text,started=this.now();
   let classification=classifyPrompt(text,{hint:(data.mode as MediaKind|'auto'|undefined)??'auto',fallback:(data.fallback as 'image'|'chat'|undefined)??'image'});
   // One short Qwen call sharpens a rules result that is not already near-certain; a chosen mode tab (source 'hint') is never second-guessed.
   if(this.options.models&&data.classifier!==false&&classification.source==='rules'&&classification.confidence<0.9){
    classification=await classifyWithModel(this.options.models,text,classification,{timeoutMs:this.options.classifierTimeoutMs,signal});
   }
+  if(typeof data.durationSeconds==='number')classification={...classification,durationSeconds:data.durationSeconds};
   const probe:RouteResult['probe']={probed:[],source:'none'};
   const kind=classification.kind;
   if(kind==='chat'){
@@ -565,22 +696,25 @@ export class MediaRouter {
   const discovery=await this.discover(kind,signal);
   const base=mergeCatalog(this.options.catalog(),discovery.rows),listed=new Set(discovery.rows.map(c=>c.id));
   const liveHealth=new Set(discovery.rows.filter(c=>c.health!=='unknown').map(c=>c.id));
-  const rankWith=(catalog:Capability[])=>rankCandidates(kind,catalog,{text,styles:classification.styles,aspect:classification.aspect,durationSeconds:classification.durationSeconds,live:listed,liveHealth});
+  const shapes=new Map<string,CapShape>();
+  const rankWith=(catalog:Capability[])=>rankCandidates(kind,catalog,{text,styles:classification.styles,aspect:classification.aspect,durationSeconds:classification.durationSeconds,live:listed,liveHealth,outcomes:this.options.outcomes,callKinds:this.options.callKinds,denyCallKinds:this.options.denyCallKinds,shapes});
   let ranked=rankWith(base);
   if(this.options.read&&data.probe!==false&&ranked.candidates.length){
-   const top=ranked.candidates.slice(0,this.options.probeCount??3),results=await Promise.all(top.map(c=>this.probe(c.id,signal)));
+   // The pick and the alternatives the Studio shows (seven) are read live: health, registration and argument shape.
+   const top=ranked.candidates.slice(0,this.options.probeCount??7),results=await Promise.all(top.map(c=>this.probe(c.id,signal)));
    const live=new Map(top.map((c,i)=>[c.id,results[i]] as const));
+   for(const [id,r] of live)if(r.shape)shapes.set(id,r.shape);
    probe.probed=top.map(c=>c.id);
    const sources=new Set(results.map(r=>r.source));probe.source=sources.size>1?'mixed':sources.has('live')?'live':'cached';
    ranked=rankWith(base.map(c=>{const r=live.get(c.id);return r?{...c,health:r.health}:c;}));
-   for(const c of [...ranked.candidates,...ranked.excluded])if(live.has(c.id)){c.healthSource='probe';c.reasons=c.reasons.map(r=>r.startsWith('health ')?'health '+c.health+' (probed now)':r);}
+   for(const c of [...ranked.candidates,...ranked.excluded])if(live.has(c.id)){c.healthSource='probe';c.reasons=c.reasons.map(r=>r.startsWith('health ')?'health '+c.health+' (probed now)':r===SNAPSHOT_ONLY&&c.health!=='unknown'?SNAPSHOT_READ:r);}
   }
-  const picks=ranked.candidates.map(c=>this.toPick(c,kind,text,classification));
+  const picks=ranked.candidates.map(c=>this.toPick(c,kind,text,classification,shapes.get(c.id)));
   // Every excluded generator is listed with its reason (no cap): nothing the catalog offers for this kind disappears.
   const excluded=ranked.excluded.map(c=>({id:c.id,label:c.label,reason:c.unavailable!}));
   let reason:string|undefined;
   if(kind==='image-edit')reason='This asks to edit an existing image. Auto does not prepare edits: attach the source image in the Studio (Library → Use in Studio) and pick one of the editing-capable tools listed below yourself. Nothing was prepared.';
-  else if(!picks.length)reason='No healthy '+kind+' generator is listed in the catalog right now; nothing was prepared and no other kind was substituted.';
+  else if(!picks.length)reason='No healthy, runnable '+kind+' generator is listed in the catalog right now (see "Not used for this brief" for why each one is out); nothing was prepared and no other kind was substituted.';
   const picked=kind==='image-edit'?null:picks[0]??null;
   const alternatives=(kind==='image-edit'?picks:picks.slice(1)).slice(0,6);
   const byId=new Map(base.map(c=>[c.id,c] as const));

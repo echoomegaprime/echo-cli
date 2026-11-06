@@ -54,7 +54,7 @@ async function harness(options:any={}){
  const calls:any[]=[];let enhanceResolver:any;
  const jsonResponse=(data:any,status=200)=>({ok:status>=200&&status<300,status,headers:{get:()=> 'application/json'},json:async()=>data});
  const models=options.models??{configured:true,routing:true,providers:[{id:'claude',available:true},{id:'gpt',available:true},{id:'grok',available:false,reason:'not logged in'},{id:'argon',available:true},{id:'qwen',available:true}]};
- const fetch=vi.fn(async(url:string,init:any={})=>{calls.push({url,init,body:init.body?JSON.parse(init.body):undefined});if(url==='/api/prime/models')return jsonResponse(models);if(url==='/api/prime/media/route')return jsonResponse(typeof options.route==='function'?options.route():options.route??mediaResult());if(url==='/api/prime/enhance'){if(options.pendingEnhance)return new Promise(resolve=>enhanceResolver=()=>resolve(jsonResponse(options.enhance??enhanced)));return jsonResponse(options.enhance??enhanced);}throw new Error(url);});
+ const fetch=vi.fn(async(url:string,init:any={})=>{calls.push({url,init,body:init.body?JSON.parse(init.body):undefined});if(url==='/api/prime/models')return jsonResponse(models);if(url==='/api/prime/media/route')return jsonResponse(typeof options.route==='function'?options.route():options.route??mediaResult(),options.routeStatus??200);if(url==='/api/prime/enhance'){if(options.pendingEnhance)return new Promise(resolve=>enhanceResolver=()=>resolve(jsonResponse(options.enhance??enhanced)));return jsonResponse(options.enhance??enhanced,options.enhanceStatus??200);}throw new Error(url);});
  const enhanced={mode:'image',text:'ENHANCED',added:['golden hour'],provider:'claude',providerLabel:'Claude',model:{id:'claude',label:'Claude',model:'claude-sonnet-5-5',reported:true,answered:true}};
  const context={window,document,fetch,location:{protocol:'https:'},AbortSignal,CustomEvent:class extends TestEvent{constructor(t:string,i:any){super(t,i);}},Event:TestEvent,console:{debug:vi.fn()},setTimeout,clearTimeout,Promise,JSON,Object,Array,String,Number,Math,Error,Set,Map,Boolean};
  runInNewContext(source,context);
@@ -133,3 +133,62 @@ it('integrations.js merge adds a live-only tool under its medium so apply can se
 });
 // The reset hides notes; the loading gate note clears itself once the models report answers (fixed after this test found it).
 it('account changes reset Auto and panels and re-fetch models',async()=>{const w=await harness();w.tabs.children[0].click();w.studio.open('auto','fox');await tick();const before=w.modelsCalls().length;w.window.dispatchEvent(new TestEvent('echo-account-changed'));await tick();expect(w.tabs.children[0].getAttribute('aria-selected')).toBe('false');expect(w.find('data-media-auto')!.hidden).toBe(true);expect(w.find('data-enhance-note','composer')!.hidden).toBe(true);expect(w.find('data-enhance-note','composer')!.textContent).toBe('');expect(w.modelsCalls().length).toBeGreaterThan(before);});
+
+const statusNode=(w:any)=>w.all().find((n:any)=>n.className==='media-status');
+it('a 403 from the router re-reads the session and shows the refusal; it never signs the owner out',async()=>{
+ const recheck=vi.fn(async()=>({authenticated:true}));
+ const w=await harness({routeStatus:403,route:{error:'Same-origin Prime session required'},workspace:{recheck}});
+ w.studio.open('image','a red fox');await tick();
+ expect(recheck).toHaveBeenCalledOnce();expect(w.workspace.invalidate).not.toHaveBeenCalled();
+ expect(statusNode(w).textContent).toBe('Same-origin Prime session required. Pick a tool from the list below instead.');
+});
+it('Enhance skips a provider whose last enhance failed sign-in when it picks the default, and says so',async()=>{
+ const w=await harness({models:{configured:true,providers:[{id:'claude',available:true},{id:'gpt',available:true}],enhance:{failures:{claude:{category:'auth',reason:'OAuth session expired',at:'2026-11-06T09:00:00Z'}}}}});
+ const select=w.find('data-enhance-provider','composer')!;expect(select.value).toBe('gpt');
+ expect((w.find('data-enhance','composer') as any).title).toContain('Skipped Claude: its last enhance could not sign in.');
+ w.prompt.value='fox';w.find('data-enhance','composer')!.click();await tick();
+ expect(w.calls.find(c=>c.url==='/api/prime/enhance').body.provider).toBe('gpt');
+});
+it('an Enhance sign-in failure keeps the prompt, punctuates the sentence and moves the next press to the next provider',async()=>{
+ const w=await harness({enhanceStatus:503,enhance:{error:'Claude (claude CLI) is unavailable: Failed to authenticate: OAuth session expired and could not be refreshed; no fallback was used'}});
+ w.prompt.value='fox';w.find('data-enhance','composer')!.click();await tick();
+ expect(w.prompt.value).toBe('fox');
+ expect(w.find('data-enhance-note','composer')!.textContent).toBe('Claude (claude CLI) is unavailable: Failed to authenticate: OAuth session expired and could not be refreshed; no fallback was used. Your prompt was not changed. GPT is selected for your next try; press Enhance again to use it.');
+ expect(w.find('data-enhance-provider','composer')!.value).toBe('gpt');
+});
+it('names the enhanced mode with the right article',async()=>{
+ const w=await harness();w.prompt.value='fox';w.find('data-enhance','composer')!.click();await tick();
+ expect(w.find('data-enhance-note','composer')!.textContent).toContain('as an image prompt');
+});
+it('shows the provider message on a failed pick, not the raw provider JSON',async()=>{
+ const w=await harness();w.studio.open('auto','fox');await tick();
+ w.window.dispatchEvent(new TestEvent('echo-studio-executed',{detail:{state:'blocked',name:defaultPick.id,detail:'HTTP 402: {"error":{"message":"Insufficient credits. This account never purchased credits.","code":402}}'}}));
+ const text=w.find('data-media-failure')!.textContent;
+ expect(text).toContain('did not complete (blocked): HTTP 402: Insufficient credits. This account never purchased credits. Nothing was retried.');
+ expect(text).not.toContain('{"error"');
+});
+it('an account change clears the router status line',async()=>{
+ const w=await harness();w.studio.open('auto','fox');await tick();expect(statusNode(w).textContent).not.toBe('');
+ w.window.dispatchEvent(new TestEvent('echo-account-changed'));await tick();expect(statusNode(w).textContent).toBe('');
+});
+it('badges a snapshot-only pick under a live catalog honestly and marks a demoted alternative',async()=>{
+ const w=await harness({route:()=>({...mediaResult(),picked:{...defaultPick,catalogSource:'snapshot'},alternatives:[{...alternative,demoted:{category:'billing',reason:'OpenRouter refused for billing'},reason:'Picked FLUX Max because image · ranked lower: OpenRouter refused for billing'}],catalog:{source:'live',queries:['flux'],listed:1,failed:[],cached:false}})});
+ w.studio.open('auto','fox');await tick();
+ const panel=w.find('data-media-auto')!.textContent;
+ expect(panel).toContain('live catalog searched · this tool from the snapshot');
+ expect(w.find('data-media-alternative',alternative.id)!.textContent).toContain('last run: billing');
+ expect(w.find('data-media-alternative',alternative.id)!.textContent).toContain('ranked lower: OpenRouter refused for billing');
+});
+it('labels a tool whose call kind the gate has not run as untested, never as a failed last run',async()=>{
+ const untested={category:'untested',reason:'its call kind together_image_generation is untested on this SDK gate'};
+ const w=await harness({route:()=>({...mediaResult(),picked:{...defaultPick,demoted:untested},alternatives:[{...alternative,demoted:untested}]})});
+ w.studio.open('auto','fox');await tick();
+ expect(w.find('data-media-auto')!.textContent).toContain('untested on this gate');expect(w.find('data-media-auto')!.textContent).not.toContain('last run: untested');
+ expect(w.find('data-media-alternative',alternative.id)!.textContent).toContain('untested on this gate');
+});
+it('applies the pick with its template and the length the route read from the brief',async()=>{
+ const template={envelope:'llm',verb:'call',textKey:'prompt',fixed:{},duration:{key:'seconds',unit:'s-string',min:1,max:10},modeled:true,source:'family'};
+ const w=await harness({route:()=>({...mediaResult(),classification:{kind:'video',confidence:1,styles:[],durationSeconds:5},picked:{...defaultPick,template}})});
+ w.studio.open('video','a boat, 5 seconds');await tick();
+ expect(w.studio.apply).toHaveBeenLastCalledWith({id:defaultPick.id,arguments:defaultPick.request.arguments,template,durationSeconds:5});
+});

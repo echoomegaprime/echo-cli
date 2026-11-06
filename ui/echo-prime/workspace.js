@@ -914,5 +914,5 @@
   async interrupt(){try{await haltSpeech();}catch{}await dictate();}});
  // `session` is the cached /api/session readback (null once cleared). Modules gate owner-only requests on it without
  // another request; `ownerHeaders()` is the path that re-reads the session.
- window.EchoPrimeWorkspace={ready,bridge,get enabled(){return state.enabled;},get session(){return transport.session;},get generalMode(){return state.enabled&&$('#workspace-chat-kind').value==='workspace';},send,newChat,open,ownerHeaders,invalidate(){transport.clear();},cancel(){state.turn?.abort();}};
+ window.EchoPrimeWorkspace={ready,bridge,get enabled(){return state.enabled;},get session(){return transport.session;},get generalMode(){return state.enabled&&$('#workspace-chat-kind').value==='workspace';},send,newChat,open,ownerHeaders,invalidate(){transport.clear();},recheck(){return transport.refresh();},cancel(){state.turn?.abort();}};
 })();

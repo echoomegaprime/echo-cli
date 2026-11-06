@@ -1219,7 +1219,60 @@ export class UploadStore {
    const finished=await writer.finish();
    await fh!.close();
    fh=undefined;
+   return await this.finishUpload({id,owner,tmpDir,blobPath,finalName,finalMime,tags,finished,started});
+  }catch(error){
+   if(fh)await fh.close().catch(()=>{});
+   await rm(tmpDir,{recursive:true,force:true}).catch(()=>{});
+   const status=error instanceof UploadError?error.status:400;
+   debug('%j',{schemaVersion:1,event:'prime_upload_refused',uploadId:id,status,durationMs:Date.now()-started});
+   if(error instanceof UploadError)throw error;
+   throw new UploadError(400,'Upload failed');
+  }
+ }
 
+ /** Stores bytes Prime fetched itself (a generated image, video or audio file) through the same checks as a browser
+  * upload: allowed type, size limit, magic signature, executable/archive refusal, JPEG GPS strip, PNG thumbnail, MP4 probe. */
+ async ingest(owner:string,input:{name:string;type:string;data:Buffer;tags?:string[]}):Promise<UploadMeta>{
+  const data=input.data;
+  return this.ingestStream(owner,{name:input.name,type:input.type,tags:input.tags,chunks:(async function*(){for(let off=0;off<data.length;off+=1048576)yield data.subarray(off,off+1048576);})()});
+ }
+
+ /** The same checks for bytes that arrive as chunks (a generated video read from its provider link), so the file is never
+  * held in memory whole. A failure of the source itself (over the media limit, a dropped link) is passed on unchanged, so
+  * the caller can say why; the partial blob is removed either way. */
+ async ingestStream(owner:string,input:{name:string;type:string;chunks:AsyncIterable<Buffer>;tags?:string[]}):Promise<UploadMeta>{
+  const id='upl_'+randomBytes(16).toString('hex');
+  const tmpDir=join(this.accountRoot(owner),`.tmp_${randomUUID()}`);
+  await mkdir(tmpDir,{recursive:true});
+  const blobPath=join(tmpDir,'blob'),started=Date.now();
+  let fh:FileHandle|undefined,sourceError:unknown;
+  const source=input.chunks[Symbol.asyncIterator]();
+  try{
+   const finalName=sanitizeUploadName(input.name);
+   const finalMime=resolveMime(input.type,finalName,this.config.types);
+   fh=await open(blobPath,'w',0o600);
+   const writer=new StreamingFileWriter(fh,finalMime,this.config.maxBytes);
+   for(;;){
+    let next:IteratorResult<Buffer>;
+    try{next=await source.next();}catch(error){sourceError=error;throw error;}
+    if(next.done)break;
+    await writer.write(next.value);
+   }
+   const finished=await writer.finish();
+   await fh.close();fh=undefined;
+   return await this.finishUpload({id,owner,tmpDir,blobPath,finalName,finalMime,tags:sanitizeTags(input.tags??[]),finished,started});
+  }catch(error){
+   if(sourceError===undefined)await source.return?.().catch(()=>undefined);
+   if(fh)await fh.close().catch(()=>{});
+   await rm(tmpDir,{recursive:true,force:true}).catch(()=>{});
+   debug('%j',{schemaVersion:1,event:'prime_upload_ingest_refused',uploadId:id,status:error instanceof UploadError?error.status:400,source:sourceError!==undefined,durationMs:Date.now()-started});
+   if(error instanceof UploadError||(sourceError!==undefined&&error===sourceError))throw error;
+   throw new UploadError(400,'Storing the generated file failed');
+  }
+ }
+
+ private async finishUpload(ctx:{id:string;owner:string;tmpDir:string;blobPath:string;finalName:string;finalMime:AllowedUploadMime;tags:string[];finished:{bytes:number;sha256:string;head:Buffer;width?:number;height?:number;pages?:number;exifStripped?:boolean};started:number}):Promise<UploadMeta>{
+   const {id,owner,tmpDir,blobPath,finalName,finalMime,tags,finished,started}=ctx;
    // Post-stream format checks that inspect bounded slices on disk
    let duration:number|undefined;
    let width=finished.width;
@@ -1287,14 +1340,6 @@ export class UploadStore {
    await rename(tmpDir,finalDir);
    debug('%j',{schemaVersion:1,event:'prime_upload_completed',uploadId:id,kind:meta.kind,type:meta.type,bytes:meta.bytes,durationMs:Date.now()-started});
    return meta;
-  }catch(error){
-   if(fh)await fh.close().catch(()=>{});
-   await rm(tmpDir,{recursive:true,force:true}).catch(()=>{});
-   const status=error instanceof UploadError?error.status:400;
-   debug('%j',{schemaVersion:1,event:'prime_upload_refused',uploadId:id,status,durationMs:Date.now()-started});
-   if(error instanceof UploadError)throw error;
-   throw new UploadError(400,'Upload failed');
-  }
  }
 
  private async readMeta(owner:string,id:string):Promise<UploadMeta>{

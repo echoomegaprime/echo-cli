@@ -311,7 +311,10 @@ function buildLibraryWorld(scripts = ['library.js'], opts: { uploads?: any[]; ar
    return jsonResp(200, { id: 'tkt_1', digest: 'dig_1', requestId: 'req_1', cost: 'Governed', scope: 'media.write', request: reqBody });
   }
   if (p === '/api/execute' && method === 'POST') {
-   return jsonResp(200, { ok: true, run_id: 'studio_run_7', model: 'flux-pro', url: '/generated/out.png' });
+   // Prime stores the generated file and registers its artifact server-side (media-jobs.ts); the Studio renders it.
+   return jsonResp(200, { state: 'returned', requestId: 'req_1', capability: 'echo.media.image_generate', kind: 'image', untrusted: true, result: { ok: true, job_id: 'j7', status: 'done', model: 'flux-pro' },
+    job: { phase: 'done', label: 'On-prem media router', elapsedMs: 4200, followable: true, polls: 1 },
+    media: { uploadId: 'upl_' + 'f'.repeat(32), artifactId: 'art_' + 'f'.repeat(32), url: '/api/prime/uploads/upl_' + 'f'.repeat(32) + '/file', type: 'image/png', kind: 'image', bytes: 2048, name: 'media.image_generate-req_1.png' } });
   }
   return jsonResp(404, { error: 'Unhandled ' + p });
  });
@@ -569,9 +572,17 @@ describe('Unified Library fake-DOM interactions', () => {
   await attachBtn.click();
   await tick();
   expect(w.all().some(n => n.tagName === 'INPUT' && n.attributes['data-file'] === UPL_PDF)).toBe(true);
+
+  // Removing the chip also removes the "Attached hero.png to your next message." notice it caused.
+  expect(w.get('#draft-notice').textContent).toBe('Attached hero.png to your next message.');
+  await w.all().find(n => n.tagName === 'BUTTON' && n.className === 'chip')!.click();
+  await tick();
+  expect([...w.bridge.state.attachments]).toEqual([]);
+  expect(w.get('#draft-notice').textContent).toBe('');
+  expect(w.get('#draft-notice').hidden).toBe(true);
  });
 
- it('sends uploads to Studio via Use in Studio, supports role selection, passes inputs:[{upload_id,role}], and registers Studio output artifact', async () => {
+ it('sends uploads to Studio via Use in Studio, supports role selection, passes inputs:[{upload_id,role}], and shows the stored Studio output', async () => {
   const w = buildLibraryWorld(['library.js', 'integrations.js']);
   await w.window.EchoPrimeLibrary.open('library');
   await tick();
@@ -598,18 +609,18 @@ describe('Unified Library fake-DOM interactions', () => {
   await tick();
   expect(w.get('#review-dialog').open).toBe(true);
 
+  const prepareBody = JSON.parse(w.fetchMock.mock.calls.find((c: any[]) => c[0] === '/api/prepare')![1].body);
+  expect(prepareBody.arguments).toMatchObject({ prompt: 'Transform into crystal fortress', wait: false, inputs: [{ upload_id: UPL_IMG, role: 'init' }] });
+  expect(prepareBody.arguments.options).toBeUndefined();
+
   await w.get('#execute-request').click();
   await tick();
-  const artifactPost = w.fetchMock.mock.calls.find((c: any[]) => c[0] === '/api/prime/artifacts' && c[1]?.method === 'POST');
-  expect(artifactPost).toBeTruthy();
-  const registeredBody = JSON.parse(artifactPost![1].body);
-  expect(registeredBody.provenance).toMatchObject({
-   source: 'studio',
-   capability: 'echo.media.image_generate',
-   prompt: 'Transform into crystal fortress',
-   model: 'flux-pro',
-   inputs: [{ upload_id: UPL_IMG, role: 'init' }],
-  });
+  // The media artifact (with the stored file) is Prime's to register; the Studio does not post a JSON copy.
+  expect(w.fetchMock.mock.calls.find((c: any[]) => c[0] === '/api/prime/artifacts' && c[1]?.method === 'POST')).toBeUndefined();
+  const shown = walk(w.get('#creative-result')).find(n => n.tagName === 'IMG');
+  expect(shown?.attributes.src).toBe('/api/prime/uploads/upl_' + 'f'.repeat(32) + '/file');
+  expect(shown?.attributes.alt).toBe('Transform into crystal fortress');
+  expect(w.get('#creative-result').textContent).toContain('Saved to Library as media.image_generate-req_1.png');
  });
 
  it('delegates EchoPrimeViews.open("library") to unified EchoPrimeLibrary when loaded', async () => {
@@ -619,6 +630,27 @@ describe('Unified Library fake-DOM interactions', () => {
   await tick();
   expect(w.dialog().open).toBe(true);
   expect(w.dialog().textContent).toContain('Library & Artifact Center');
+ });
+});
+
+describe('Library first paint', () => {
+ it('says the uploads are loading until the list answers, never that uploads are off', async () => {
+  const w = buildLibraryWorld();
+  let release: () => void = () => {};
+  const original = w.fetchMock.getMockImplementation()!;
+  w.fetchMock.mockImplementation(async (url: string, init: any) => {
+   if (String(url).startsWith('/api/prime/uploads/list')) await new Promise<void>(r => { release = r; });
+   return original(url, init);
+  });
+  const opening = w.window.EchoPrimeLibrary.open('library');
+  await tick();
+  expect(w.dialog().textContent).toContain('Loading your uploads…');
+  expect(w.dialog().textContent).not.toContain('uploads are off');
+  release();
+  await opening;
+  await tick();
+  expect(w.dialog().textContent).not.toContain('Loading your uploads…');
+  expect(w.dialog().textContent).toContain('Upload pictures, video, audio & documents');
  });
 });
 

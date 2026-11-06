@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 import { debuglog } from 'node:util';
 import { redact } from '../code/workspace.js';
 import type {SharedChat,SubmitContext} from './chat.js';
@@ -9,7 +10,10 @@ import {SwarmError,type SwarmClient} from './swarm.js';
 import {VoiceError,type VoiceClient} from './voice.js';
 import {ADK_MAX_STEPS_CEILING,AdkError,type AdkClient} from './agents.js';
 import {VideoAgentError,discoverVideoCatalog,offlineCatalog,parseVideoRequest,parseVideoRun,planVideo,resolveVideoInputs,videoAgentDefinition,videoRunPrompt,type VideoCatalog} from './videoagent.js';
-import {MediaRouter} from './media.js';
+import {MediaRouter,callKindOf,describeCandidate} from './media.js';
+import {MediaCollector,defaultMediaConfig,mediaSaveDir,type InvokeKind,type MediaConfig} from './media-collect.js';
+import {MediaJobs,type JobDescribe} from './media-jobs.js';
+import {MediaOutcomes} from './media-outcomes.js';
 import {PromptEnhancer} from './enhance.js';
 import {WorkspaceHttpError} from './workspace.js';
 import {BotsError,type BotsClient} from './bots.js';
@@ -25,12 +29,13 @@ import {type AutonomyEvents,envelope} from '../code/tools/autonomy.js';
 const debugOwnerResponse=debuglog('echo-prime');
 export type Json=Record<string,unknown>;
 export interface Tool {name:string;description?:string;inputSchema:Json}
-export interface McpConnection {listTools():Promise<Tool[]>;call(name:string,args:Json):Promise<unknown>}
+export interface McpConnection {listTools():Promise<Tool[]>;call(name:string,args:Json,options?:{timeoutMs?:number}):Promise<unknown>}
 export interface Capability {id:string;registered:boolean;health:string;scope?:string;tier?:number;category:string;description:string}
 export interface SdkBroker {
  search(query:string):Promise<Capability[]>;
  read(capability:string):Promise<unknown>;
- invoke(request:{capability:string;params:Json;reason:string;idempotency_key:string}):Promise<unknown>;
+ /** `timeoutMs` is how long this one call may take end to end (Prime's MCP wait and the bridge's gate wait). */
+ invoke(request:{capability:string;params:Json;reason:string;idempotency_key:string},options?:{timeoutMs?:number}):Promise<unknown>;
 }
 export interface PrimeRequest {target:'sdk'|'esh';name:string;arguments:Json}
 export interface PrimeOptions {
@@ -49,6 +54,12 @@ export interface PrimeOptions {
  autoagents?:AutoAgents;
  uploads?:UploadStore;
  uploadsOwner?:string;
+ /** The reviewed `media` section (call kinds the gate runs, time limits, where generated files may be read from). */
+ mediaConfig?:MediaConfig;
+ /** Recent real executions, used by the media router to stop offering tools that cannot run. */
+ outcomes?:MediaOutcomes;
+ /** Seams for tests: the HTTP client media files are fetched with, and the clock/sleep job polling uses. */
+ mediaFetch?:typeof fetch;mediaClock?:{now:()=>number;sleep:(ms:number)=>Promise<void>};
  /** Always-on live tools for model turns (web, Wolfram, Echo knowledge/memory, skills, MCP); owner toggles per family. */
  tools?:ToolKit;
  build?:BuildRunner;
@@ -108,6 +119,25 @@ export function unwrap(value:unknown):unknown {
  }
  throw new Refused('Response nesting exceeds owner contract');
 }
+/** The owner's decoded answer inside an MCP/SDK envelope, with no success checks: what a refusal said (the media router
+ * answers a failed job as {ok:false,status:'failed',error}). Bounded like unwrap; undefined when no object is found. */
+export function ownerBody(value:unknown):Json|undefined{
+ let v=object(value);
+ for(let i=0;i<8;i++){
+  if(v.structuredContent&&typeof v.structuredContent==='object'){v=object(v.structuredContent);continue;}
+  if(Array.isArray(v.content)){const first=v.content.find(b=>object(b).type==='text');try{v=object(JSON.parse(String(object(first).text)));continue;}catch{return undefined;}}
+  if(v.sdk_result&&typeof v.sdk_result==='object'){v=object(v.sdk_result);continue;}
+  return Object.keys(v).length?v:undefined;
+ }
+ return undefined;
+}
+/** ElevenLabs op-router generators that answer binary audio (elevenlabs_ops.json `response: binary`, read 2026-11-06).
+ * The router returns it base64 unless `_save_to` names a FORGE path, and base64 through the SDK bridge is capped at 1 MiB,
+ * so Prime has the router save the file where Prime reads it. */
+const ELEVENLABS_SAVES=/^echo\.elevenlabs\.(?:music_generation\.(?:generate|stream_compose)|sound_generation\.sound_generation)$/;
+/** Longest ElevenLabs music Prime can receive inline: `output_format` auto is mp3_48000_192 for music v2 (24 KB/s, docs
+ * elevenlabs.io api-reference/music/compose), 25 s is about 800 KB of base64, under the bridge's 1 MiB bound. */
+const INLINE_MUSIC_MAX_MS=25000;
 async function bounded<T>(work:()=>Promise<T>,ms=20000):Promise<T>{
  let timer:ReturnType<typeof setTimeout>|undefined;
  try{return await Promise.race([work(),new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error('Owner timed out; outcome unknown')),ms);})]);}
@@ -143,8 +173,10 @@ export class PrimeHub {
  async models(){
   const router=this.options.models;
   const buildInfo=this.options.build?{buildProviders:await this.options.build.models()}:{};
-  if(!router)return {configured:false,routing:false,default:null,contextTokens:null,providers:[],...buildInfo};
-  return {configured:true,routing:this.options.chat?.status().routing===true,...await bounded(()=>router.report(),30000),...buildInfo};
+  // The last Enhance failure per provider (an expired CLI sign-in, an unavailable provider): the Enhance chip skips them.
+  const enhance={failures:(this.enhancer??this.options.enhancer)?.failures?.()??{}};
+  if(!router)return {configured:false,routing:false,default:null,contextTokens:null,providers:[],enhance,...buildInfo};
+  return {configured:true,routing:this.options.chat?.status().routing===true,...await bounded(()=>router.report(),30000),enhance,...buildInfo};
  }
  buildHealth(){return this.options.build?.health()??{configured:false,available:false,reason:'Echo Build is off: add a reviewed build section with root and engines to the Prime config'};}
  private buildRunner(){if(!this.options.build)throw new BuildError(503,'Echo Build is off: add a build section to the Prime config');return this.options.build;}
@@ -367,7 +399,7 @@ export class PrimeHub {
   this.media??=this.options.media??new MediaRouter({catalog:()=>this.capabilities(),read:sdk?id=>bounded(()=>sdk.read(id),8000).then(unwrap):undefined,
    search:sdk?query=>sdk.search(query):undefined,
    onDiscovered:rows=>{for(const c of rows){if(!/^echo\.[A-Za-z0-9_.-]+$/.test(c.id))continue;const old=this.catalog.get(c.id);this.catalog.set(c.id,old?{...old,registered:c.registered,health:c.health==='unknown'&&old.health?old.health:c.health}:{...c});}},
-   models:this.options.models});
+   outcomes:this.outcomes(),callKinds:this.mediaConfig().gateCallKinds,denyCallKinds:this.mediaConfig().denyCallKinds,models:this.options.models});
   return this.media.route(input,signal);
  }
  /** Enhance prompt on exactly the chosen provider through the reviewed model router. No router = the feature is off (503). */
@@ -376,6 +408,48 @@ export class PrimeHub {
   this.enhancer??=this.options.enhancer??new PromptEnhancer(this.options.models!);
   return this.enhancer.enhance(input,sessionKey,signal);
  }
+ private mediaConfig(){return this.options.mediaConfig??defaultMediaConfig();}
+ private outcomeStore?:MediaOutcomes;
+ /** Real execution outcomes (the configured store, or an in-memory one for this process). */
+ outcomes(){return this.outcomeStore??=this.options.outcomes??new MediaOutcomes();}
+ private jobs?:MediaJobs;
+ /** Kind, provider, label and call kind of a capability, from this hub's catalog (live rows included). */
+ private describeCapability(id:string):JobDescribe{
+  const c=this.catalog.get(id)??{id,registered:true,health:'unknown',category:'tools',description:''};
+  const cand=describeCandidate(c),kind=cand?.kinds[0];
+  const invokeKind:InvokeKind=kind&&kind!=='chat'?kind:'other';
+  return {kind:invokeKind,provider:cand?.provider??(id.split('.')[1]||'unknown'),label:cand?.label??id.replace(/^echo\./,''),...(callKindOf(c)?{callKind:callKindOf(c)}:{})};
+ }
+ private mediaJobs(){
+  const sdk=this.options.sdk!,config=this.mediaConfig();
+  return this.jobs??=new MediaJobs({config,outcomes:this.outcomes(),uploads:this.options.uploads,owner:this.options.uploadsOwner??'local',
+   collector:new MediaCollector({config,fetch:this.options.mediaFetch,maxBytes:this.options.uploads?.config.maxBytes}),
+   describe:id=>this.describeCapability(id),now:this.options.mediaClock?.now,sleep:this.options.mediaClock?.sleep,
+   invoke:async(capability,params,key,reason,timeoutMs)=>{
+    let raw:unknown;
+    try{
+     raw=await bounded(()=>sdk.invoke({capability,params,reason,idempotency_key:key},{timeoutMs}),timeoutMs+10000);
+     const result=unwrap(raw);limited(result,1048576);
+     return {ok:true,body:object(result)};
+    }catch(e){
+     const detail=e instanceof Error?redact(e.message).slice(0,600):'Owner call failed';
+     // Prime's own MCP request budget was full: the call never left Prime, so it is neither a refusal nor an unknown outcome.
+     if(/request limit reached/i.test(detail))return {ok:false,refused:true,notSent:true,detail:'Prime did not send '+capability+': '+detail+'. Nothing reached the gate or the provider; review and submit it again once a running request finishes.'};
+     const body=raw===undefined?undefined:ownerBody(raw);
+     // The bridge reports its own gate timeout as a failure text; that is an unknown outcome, not a refusal.
+     return {ok:false,refused:e instanceof Refused&&!/outcome unknown|timed out/i.test(detail),detail,...(body?{body}:{})};
+    }
+   }});
+ }
+ /** State of a Studio request this Prime executed (by the request id from its review ticket). */
+ mediaJob(input:unknown){
+  const requestId=object(input).requestId;
+  const view=this.jobs&&typeof requestId==='string'?this.jobs.status(requestId):undefined;
+  if(!view)throw new WorkspaceHttpError(404,'No Studio request with that ID is known to this Prime (it may have restarted). Check the gate execution log before submitting again.');
+  return view;
+ }
+ /** Test hook: resolves when a background Studio request has finished. */
+ mediaJobSettled(requestId:string){return this.jobs?.settled(requestId)??Promise.resolve();}
  async refresh(query:string){
   if(!this.options.sdk)throw new Refused('SDK host not connected');
   if(typeof query!=='string'||!query.trim()||query.length>150)throw new Refused('Enter a bounded search');
@@ -397,11 +471,28 @@ export class PrimeHub {
   }catch(e){this.tools=[];esh.state=e instanceof Refused?'blocked':'unavailable';esh.detail=e instanceof Refused?e.message:'ESH read failed; availability unknown';}}
   return {observedAt:new Date().toISOString(),esh,chat:this.options.chat?.status()??{state:'disconnected',detail:'Shared chat host not connected; owner admission is required'},sdk:{state:this.options.sdk?'attached':'disconnected',detail:this.options.sdk?'Authenticated host attached; owner authorization still applies':'Authenticated SDK host not connected'},capabilities:this.capabilities()};
  }
+ /** For an ElevenLabs binary generator, has the router save the audio under Prime's first media root (keyed by the request
+  * id, so the reviewed request shows the exact path and the digest covers it) with a wait just under Prime's own, and
+  * refuses at review a track Prime could only receive inline when it would exceed the bridge's 1 MiB bound. */
+ private elevenLabsFile(name:string,args:Json,requestId:string){
+  if(!ELEVENLABS_SAVES.test(name))return;
+  const config=this.mediaConfig(),dir=mediaSaveDir(config),kind=this.describeCapability(name).kind;
+  if(dir){
+   const format=typeof args.output_format==='string'?args.output_format:'';
+   args._save_to=join(dir,requestId+'.'+(/^wav/i.test(format)?'wav':'mp3'));
+   args._timeout=Math.max(30,Math.round(config.invokeTimeoutsMs[kind]/1000)-20);
+   return;
+  }
+  if(!/music_generation\./.test(name))return;
+  const ms=Number(args.music_length_ms);
+  if(!Number.isFinite(ms)||ms>INLINE_MUSIC_MAX_MS)throw new Refused('This Prime has no media.localRoots directory for ElevenLabs to save the track into, so the audio would come back inline, and a track '+(Number.isFinite(ms)?'of '+Math.round(ms/1000)+' s':'whose length the model picks')+' can exceed the 1 MiB SDK bridge bound (only '+INLINE_MUSIC_MAX_MS/1000+' s fit). Set a length of '+INLINE_MUSIC_MAX_MS/1000+' s or less, or add media.localRoots to the Prime config.');
+ }
  async prepare(input:PrimeRequest){return this.prepareTicket(input,false);}
  private async prepareTicket(input:PrimeRequest,autonomyReview:boolean){
-  limited(input);const request=JSON.parse(JSON.stringify(input)) as PrimeRequest;
+  limited(input);const request=JSON.parse(JSON.stringify(input)) as PrimeRequest,requestId=randomUUID();
   if(!['sdk','esh'].includes(request.target)||typeof request.name!=='string'||!request.arguments||Array.isArray(request.arguments)||typeof request.arguments!=='object')throw new Refused('Invalid integration request');
-  if(/"(?:force_video|grant|api_key|access_token|authorization|confirm|bypass_reason)"\s*:/i.test(JSON.stringify(request.arguments)))throw new Refused('Owner controls and credentials cannot be overridden by this client');
+  // _save_to/_timeout steer where the ElevenLabs router writes a file on FORGE and how long it waits: Prime sets them itself.
+  if(/"(?:force_video|grant|api_key|access_token|authorization|confirm|bypass_reason|_save_to|_timeout)"\s*:/i.test(JSON.stringify(request.arguments)))throw new Refused('Owner controls and credentials cannot be overridden by this client');
   let scope:string|undefined;
   if(request.target==='sdk'){
    if(!this.options.sdk)throw new Refused('SDK host not connected');
@@ -423,6 +514,7 @@ export class PrimeHub {
    if(c.id!==request.name)throw new Refused('SDK capability identity mismatch');
    if(record.registration_state!=='registered'||['red','orphaned','unregistered'].includes(String(record.health_status)))throw new Refused('Capability unavailable or unregistered');
    scope=typeof c.required_scope==='string'?c.required_scope:this.catalog.get(request.name)?.scope;
+   this.elevenLabsFile(request.name,request.arguments,requestId);
   }else{
    if(!this.options.esh)throw new Refused('ESH host not connected');
    const status=await this.status();
@@ -438,7 +530,7 @@ export class PrimeHub {
   }
   for(const [id,t] of this.tickets)if(t.expiresAt<Date.now())this.tickets.delete(id);
   if(this.tickets.size>=100)throw new Refused('Too many pending requests');
-  const ticket:Ticket={id:randomUUID(),requestId:randomUUID(),digest:digest(request),request,expiresAt:Date.now()+300000,submitted:false,scope,cost:request.target==='sdk'?'Provider charges or quota may apply. No automatic fallback.':'Governed by ESH owner policy.'};
+  const ticket:Ticket={id:randomUUID(),requestId,digest:digest(request),request,expiresAt:Date.now()+300000,submitted:false,scope,cost:request.target==='sdk'?'Provider charges or quota may apply. No automatic fallback.':'Governed by ESH owner policy.'};
   this.tickets.set(ticket.id,ticket);return {...ticket,request:JSON.parse(JSON.stringify(request)) as PrimeRequest};
  }
  async execute(id:string,hash:string){
@@ -446,11 +538,14 @@ export class PrimeHub {
   if(!ticket||ticket.expiresAt<Date.now()||ticket.digest!==hash)throw new Refused('Review the current exact request before execution');
   if(ticket.submitted)throw new Refused('Request already submitted; inspect the original receipt before any retry');
   ticket.submitted=true;
+  // SDK requests run as server-side jobs: long generations keep going after this response, async provider jobs are
+  // followed, and a finished media file is stored and registered (media-jobs.ts). ESH keeps its bounded receipt path.
+  if(ticket.request.target==='sdk')return this.mediaJobs().execute(ticket.requestId,ticket.request.name,ticket.request.arguments) as Promise<{state:string;requestId:string;detail?:string;result?:unknown;untrusted?:boolean}>;
   try{
    const r=ticket.request;
-   const raw=await bounded(()=>r.target==='sdk'?this.options.sdk!.invoke({capability:r.name,params:r.arguments,reason:'Explicitly reviewed ECHO Prime request',idempotency_key:ticket.requestId}):this.options.esh!.call(r.name,{...r.arguments,...(!eshReads.has(r.name)?{idempotency_key:ticket.requestId}:{})}));
-   const result=r.target==='esh'?envelope(raw):unwrap(raw);limited(result,1048576);const body=object(result);
-   if(r.target==='esh'&&(body.ok===false||body.isError===true||['denied','gated','blocked'].includes(String(body.verdict))))return {state:'blocked',requestId:ticket.requestId,result,untrusted:true,detail:String(body.reason??'ESH owner refused the request')};
+   const raw=await bounded(()=>this.options.esh!.call(r.name,{...r.arguments,...(!eshReads.has(r.name)?{idempotency_key:ticket.requestId}:{})}));
+   const result=envelope(raw);limited(result,1048576);const body=object(result);
+   if(body.ok===false||body.isError===true||['denied','gated','blocked'].includes(String(body.verdict)))return {state:'blocked',requestId:ticket.requestId,result,untrusted:true,detail:String(body.reason??'ESH owner refused the request')};
    return {state:body.job_id&&!['completed','succeeded','done'].includes(String(body.status))?'submitted':'returned',requestId:ticket.requestId,result:JSON.parse(redact(JSON.stringify(result))),untrusted:true};
   }catch(e){return {state:e instanceof Refused?'blocked':'uncertain',requestId:ticket.requestId,detail:e instanceof Refused?e.message:'Connection interrupted or timed out; outcome unknown. Inspect the owner using this request ID before retrying.'};}
  }

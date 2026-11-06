@@ -41,11 +41,22 @@
   const value=await response.json();
   if(current!==generation)throw new Error('Account session changed.');
   if(!response.ok){
-   if((response.status===401||response.status===403)&&admission()==='owner'&&window.EchoPrimeWorkspace&&typeof window.EchoPrimeWorkspace.invalidate==='function')window.EchoPrimeWorkspace.invalidate();
-   throw new Error(value&&value.error||'Request failed');
+   // One refused request is not a sign-out: the session read decides (it signs the page out only when it says so).
+   if((response.status===401||response.status===403)&&window.EchoPrimeWorkspace&&typeof window.EchoPrimeWorkspace.recheck==='function')await window.EchoPrimeWorkspace.recheck().catch(()=>{});
+   throw new Error(sentence(value&&value.error||'Request failed'));
   }
   return value;
  }
+ function sentence(text){const t=String(text||'').trim();return !t||/[.!?…)]$/.test(t)?t:t+'.';}
+ // Provider failure bodies arrive as JSON text; the owner reads the message, cut to a sentence or two, not the raw body.
+ function failureText(detail){
+  let text=String(detail||'').trim();
+  const start=text.indexOf('{');
+  if(start>=0){try{const v=JSON.parse(text.slice(start)),inner=v&&typeof v==='object'?(v.error&&typeof v.error==='object'?v.error.message||v.error.code:v.message||v.error||v.detail):null;if(typeof inner==='string'&&inner.trim())text=(text.slice(0,start).trim()+' '+inner.trim()).trim();}catch{}}
+  text=text.replace(/\s+/g,' ');
+  return sentence(text.length>240?text.slice(0,239).trimEnd()+'…':text)||'No detail was reported.';
+ }
+ const ARTICLE={chat:'a chat',image:'an image',video:'a video',music:'a music',sfx:'a sound-effect',voice:'a voice'};
  const describe=model=>{
   if(!model||typeof model!=='object')return 'model not reported';
   if(typeof model.model==='string'&&model.model)return model.model;
@@ -66,15 +77,22 @@
    if(!response.ok||!data||!Array.isArray(data.providers))throw new Error('status');
    report=data;reportState='ready';
    const available=providers().filter(p=>p.available);
-   if(!provider||!available.some(p=>p.id===provider))provider=(PREFERENCE.map(id=>available.find(p=>p.id===id)).find(Boolean)||available[0]||{id:null}).id;
+   if(!provider||!available.some(p=>p.id===provider)||blocked(provider))provider=pickDefault();
    debug('enhance','models_loaded',{configured:data.configured===true,available:available.map(p=>p.id),provider});
   }catch{if(current!==generation)return;report=null;reportState='failed';}
   renderEnhance();
  }
  function providers(){
   if(!report||report.configured!==true)return [];
-  return report.providers.filter(p=>p&&typeof p.id==='string'&&LABELS[p.id]).map(p=>({id:p.id,label:LABELS[p.id],available:p.available!==false,reason:typeof p.reason==='string'?p.reason:''}));
+  const failures=report.enhance&&typeof report.enhance.failures==='object'&&report.enhance.failures||{};
+  return report.providers.filter(p=>p&&typeof p.id==='string'&&LABELS[p.id]).map(p=>({id:p.id,label:LABELS[p.id],available:p.available!==false,reason:typeof p.reason==='string'?p.reason:'',failure:sessionFailures[p.id]||(failures[p.id]&&typeof failures[p.id].category==='string'?failures[p.id]:null)}));
  }
+ // A provider whose last Enhance failed sign-in (or said it is unavailable) is skipped when the default is chosen; it can
+ // still be picked by hand. The page remembers its own failures until the models report is read again.
+ const sessionFailures={};
+ const blocked=id=>{const p=providers().find(x=>x.id===id);return !!(p&&p.failure&&(p.failure.category==='auth'||p.failure.category==='unavailable'));};
+ function pickDefault(){const available=providers().filter(p=>p.available);return (PREFERENCE.map(id=>available.find(p=>p.id===id&&!blocked(id))).find(Boolean)||available.find(p=>!blocked(p.id))||{id:null}).id;}
+ function skippedNote(){const skipped=providers().filter(p=>p.available&&blocked(p.id)&&p.id!==provider);return skipped.length?' Skipped '+skipped.map(p=>p.label).join(', ')+': '+(skipped[0].failure.category==='auth'?'its last enhance could not sign in':'its last enhance said it is unavailable')+'.':'';}
  function enhanceGate(){
   if(reportState==='signin')return 'Sign in to enhance prompts.';
   if(reportState==='member')return 'Prompt enhancement is available to the primary owner only.';
@@ -114,7 +132,7 @@
    if(provider)s.select.value=provider;
    s.select.hidden=!list.length;s.select.disabled=!!gate||busy;
    s.button.disabled=!!gate||busy;
-   s.button.title=gate||'Improve this prompt with '+(LABELS[provider]||'the selected model')+'. The text is replaced; nothing is sent.';
+   s.button.title=gate||'Improve this prompt with '+(LABELS[provider]||'the selected model')+'. The text is replaced; nothing is sent.'+skippedNote();
    s.label.textContent=busy&&s.busy?'Enhancing…':'Enhance';
    if(gate&&!s.previous){s.note.hidden=false;s.note.textContent=gate;s.gated=true;}
    else if(!gate&&s.gated){s.gated=false;s.note.hidden=true;s.note.textContent='';}
@@ -127,7 +145,7 @@
   if(!text){state.note.hidden=false;state.note.textContent='Type a prompt first.';return;}
   if(text.length>4000){state.note.hidden=false;state.note.textContent='Enhance takes up to 4,000 characters; shorten the prompt first.';return;}
   const mode=state.options.mode(),chosen=provider,current=generation;
-  busy=true;state.busy=true;renderEnhance();state.note.hidden=false;state.note.textContent='Asking '+(LABELS[chosen]||chosen)+' to enhance this '+(mode==='auto'?'prompt':mode+' prompt')+'…';
+  busy=true;state.busy=true;renderEnhance();state.note.hidden=false;state.note.textContent='Asking '+(LABELS[chosen]||chosen)+' to enhance this '+(mode==='auto'?'prompt':(ARTICLE[mode]||'a').replace(/^an? /,'')+' prompt')+'…';
   try{
    const result=await api('prime/enhance',{mode,text,provider:chosen},125000);
    if(current!==generation)return;
@@ -138,12 +156,20 @@
    state.undo.hidden=false;
    const list=Array.isArray(result.added)?result.added.filter(a=>typeof a==='string'&&a.trim()).slice(0,20):[];
    state.added.replaceChildren(...list.map(a=>el('li',{},a)));state.added.hidden=!list.length;
-   state.note.textContent='Enhanced by '+(result.providerLabel||LABELS[result.provider]||result.provider)+' · '+describe(result.model)+(result.mode?' · as a '+result.mode+' prompt':'')+(list.length?' · added '+list.length+(list.length===1?' thing':' things')+' (listed below)':' · no additions reported')+'. Nothing was sent; review and press Send yourself.';
+   delete sessionFailures[chosen];
+   state.note.textContent='Enhanced by '+(result.providerLabel||LABELS[result.provider]||result.provider)+' · '+describe(result.model)+(result.mode?' · as '+(ARTICLE[result.mode]||'a '+result.mode)+' prompt':'')+(list.length?' · added '+list.length+(list.length===1?' thing':' things')+' (listed below)':' · no additions reported')+'. Nothing was sent; review and press Send yourself.';
    debug('enhance','prime_enhance_applied',{surface:state.options.name,mode:result.mode,provider:result.provider,model:result.model&&result.model.model,added:list.length});
   }catch(error){
    if(current!==generation)return;
-   state.note.textContent=(error instanceof Error?error.message:'Enhance failed')+' Your prompt was not changed.';
-   debug('enhance','prime_enhance_failed',{surface:state.options.name,mode});
+   const message=error instanceof Error?error.message:'Enhance failed';
+   let next='';
+   // A sign-in failure moves the default to the next available provider for the next press, and says so.
+   if(/failed to authenticate|oauth|not signed in|not logged in|sign-?in|unauthori[sz]ed|\b401\b|session expired|credential|unavailable/i.test(message)){
+    sessionFailures[chosen]={category:/unavailable/i.test(message)&&!/authenticat|oauth|sign/i.test(message)?'unavailable':'auth',reason:message.slice(0,200)};
+    const fallback=pickDefault();if(fallback&&fallback!==chosen){provider=fallback;next=' '+(LABELS[fallback]||fallback)+' is selected for your next try; press Enhance again to use it.';}
+   }
+   state.note.textContent=failureText(message)+' Your prompt was not changed.'+next;
+   debug('enhance','prime_enhance_failed',{surface:state.options.name,mode,provider:chosen,next:provider});
   }finally{if(current===generation){busy=false;state.busy=false;renderEnhance();}}
  }
 
@@ -212,16 +238,21 @@
  alternativesTitle.hidden=true;
  repick.addEventListener('click',()=>{void routeInStudio(brief?brief.value.trim():'',null,HINT_OF_CATEGORY[category?category.value:'auto']);});
  const badge=(text,cls)=>el('span',{class:'media-badge'+(cls?' '+cls:'')},text);
+ // A recent failed run says so; a call kind the gate has never run here is only untested, not a failure.
+ const demotedLabel=d=>d.category==='untested'?'untested on this gate':'last run: '+d.category;
  function applyPick(pick,how){
   if(!studio||typeof studio.apply!=='function')return false;
-  const ok=studio.apply({id:pick.id,arguments:pick.request&&pick.request.arguments});
+  const seconds=lastRoute&&lastRoute.classification&&typeof lastRoute.classification.durationSeconds==='number'?lastRoute.classification.durationSeconds:undefined;
+  const ok=studio.apply({id:pick.id,arguments:pick.request&&pick.request.arguments,...(pick.template?{template:pick.template}:{}),...(seconds!==undefined?{durationSeconds:seconds}:{})});
   if(ok){lastRoute.applied=pick;debug('media','media_pick_applied',{id:pick.id,how});}
   return ok;
  }
  // Which catalog the server ranked: the live SDK catalog, part of it, or only the shipped snapshot. Never left implicit.
- function catalogBadge(report){
+ function catalogBadge(report,pick){
   if(!report||typeof report!=='object')return null;
   const failed=Array.isArray(report.failed)?report.failed.length:0,total=Array.isArray(report.queries)?report.queries.length:0;
+  // The route searched the live catalog; a tool those searches did not return is said to come from the snapshot.
+  if(report.source==='live'&&pick&&pick.catalogSource==='snapshot')return badge('live catalog searched · this tool from the snapshot','catalog-partial');
   if(report.source==='live')return badge('live catalog'+(report.cached?' (checked within the last minute)':''),'catalog-live');
   if(report.source==='partial')return badge('live catalog · '+failed+' of '+total+' searches failed','catalog-partial');
   if(report.source==='snapshot')return badge('shipped snapshot · not live','catalog-snapshot');
@@ -239,7 +270,7 @@
    const p=r.picked;
    pickBox.hidden=false;
    pickBox.append(el('strong',{},p.label+' · '+p.provider),el('p',{class:'media-reason'},p.reason),
-    el('div',{class:'media-badges'},badge(kind+' · '+sure+'% sure'+(c.styles&&c.styles.length?' · '+c.styles.join(', '):'')),badge('health '+p.health+(p.healthSource==='probe'?' (probed)':p.healthSource==='catalog'?' (live catalog)':p.healthSource==='snapshot'?' (snapshot)':''),'health-'+p.health),badge(p.costNote),badge('quality '+p.quality+'/10 · speed '+p.speed+'/10'),catalogBadge(r.catalog),...(p.argumentShape==='unmodeled'?[badge('review request details','health-unknown')]:[])));
+    el('div',{class:'media-badges'},badge(kind+' · '+sure+'% sure'+(c.styles&&c.styles.length?' · '+c.styles.join(', '):'')),badge('health '+p.health+(p.healthSource==='probe'?' (probed)':p.healthSource==='catalog'?' (live catalog)':p.healthSource==='snapshot'?' (snapshot)':''),'health-'+p.health),badge(p.costNote),badge('quality '+p.quality+'/10 · speed '+p.speed+'/10'),catalogBadge(r.catalog,p),...(p.demoted?[badge(demotedLabel(p.demoted),'health-amber')]:[]),...(p.argumentShape==='unmodeled'?[badge('review request details','health-unknown')]:[])));
    status.textContent='Echo picked a tool for this '+kind+' brief. Review the request below, then submit it yourself; nothing runs until you do.'+catalogNote;
    if(!applyPick(p,'auto'))status.textContent+=' (The tool is not in this catalog view; search the live registry.)';
   }else{
@@ -249,7 +280,7 @@
   alternatives.hidden=!alts.length;alternativesTitle.hidden=!alts.length;
   alternativesTitle.textContent=r.picked?'Or use one of these instead (one tap):':'Tools for this ('+alts.length+'):';
   for(const a of alts){
-   const b=el('button',{type:'button',class:'media-alternative',role:'listitem','data-media-alternative':a.id},el('strong',{},a.label+' · '+a.provider),el('span',{},'health '+a.health+' · '+a.costNote+' · '+a.quality+'/10'),el('small',{},a.reason));
+   const b=el('button',{type:'button',class:'media-alternative'+(a.demoted?' media-demoted':''),role:'listitem','data-media-alternative':a.id},el('strong',{},a.label+' · '+a.provider),el('span',{},'health '+a.health+' · '+a.costNote+' · '+a.quality+'/10'+(a.demoted?' · '+demotedLabel(a.demoted):'')),el('small',{},a.reason));
    b.addEventListener('click',()=>{if(applyPick(a,'override')){status.textContent='You chose '+a.label+'. Review the request below, then submit it yourself.';lastRoute.picked=a;}});
    alternatives.append(b);
   }
@@ -299,25 +330,15 @@
   const current=generation;
   autoTimer=setTimeout(()=>{autoTimer=null;const text=brief.value.trim();if(current!==generation||category.value!=='auto'||text.length<3||(lastRoute&&lastRoute.picked))return;void routeInStudio(text,null);},1200);
  });
- // Editing the brief (typing or Enhance) makes integrations.js rebuild the request from the brief alone. For the tool the
- // router applied, keep the router's exact request shape (style, size, duration) and only swap in the new brief text.
- if(brief)brief.addEventListener('input',()=>{
-  const applied=lastRoute&&lastRoute.applied,sel=studio&&typeof studio.selected==='function'?studio.selected():null,area=$('#creative-arguments');
-  if(!applied||!sel||sel.id!==applied.id||!area||!applied.request||!applied.request.arguments)return;
-  let current;try{current=JSON.parse(area.value);}catch{return;}
-  const next=JSON.parse(JSON.stringify(applied.request.arguments)),text=brief.value.trim(),options=next.options&&typeof next.options==='object'?next.options:null;
-  if(!options)return;
-  for(const key of ['prompt','text'])if(typeof options[key]==='string')options[key]=text;
-  if(current&&Array.isArray(current.inputs))next.inputs=current.inputs;
-  area.value=JSON.stringify(next,null,2);
- });
+ // Editing the brief (typing or Enhance) or the length: integrations.js rebuilds the request from the pick's template, so
+ // the router's exact shape (style, size, length field) is kept and only the brief and length change.
  // A failed or uncertain submission of the auto pick: show it and offer the next best as an explicit choice. No automatic switch.
  window.addEventListener('echo-studio-executed',event=>{
   const d=event&&event.detail||{};
   if(!lastRoute||!lastRoute.picked||d.name!==lastRoute.picked.id||!['blocked','uncertain','refused','failed'].includes(d.state))return;
   lastRoute.failed=[...(lastRoute.failed||[]),d.name];
   const next=(lastRoute.alternatives||[]).find(a=>a.id!==lastRoute.picked.id&&!lastRoute.failed.includes(a.id));
-  failure.hidden=false;failure.replaceChildren(el('p',{},lastRoute.picked.label+' did not complete ('+d.state+'): '+(d.detail||'no detail')+'. Nothing was retried.'));
+  failure.hidden=false;failure.replaceChildren(el('p',{},lastRoute.picked.label+' did not complete ('+d.state+'): '+failureText(d.detail)+' Nothing was retried.'));
   if(d.state==='uncertain')failure.append(el('p',{class:'media-uncertain'},'The outcome is unknown: check the original request (ID '+(d.requestId||'not reported')+') before spending on another tool.'));
   if(next){
    const use=el('button',{type:'button',class:'quiet-button','data-media-next':next.id},'Use '+next.label+' instead');
@@ -334,7 +355,7 @@
   mountEnhance({name:'studio',textarea:()=>$('#creative-prompt'),mode:()=>{const cat=category?category.value:'auto';if(cat==='auto'||cat==='all'){const k=lastRoute&&lastRoute.classification&&lastRoute.classification.kind;return k&&k!=='chat'&&k!=='image-edit'?k:k==='image-edit'?'image':'auto';}return CATEGORY_MODE[cat]||'auto';},
    mount(wrap,note,added){const row=$('.creative-actions');if(row)row.append(wrap);else brief.after(wrap);(row||brief).after(note,added);}});
  }
- window.addEventListener('echo-account-changed',()=>{generation++;if(autoTimer){clearTimeout(autoTimer);autoTimer=null;}busy=false;routing=false;lastRoute=null;setAuto(false);notice('');panel.hidden=true;pickBox.replaceChildren();alternatives.replaceChildren();excludedBox.replaceChildren();failure.replaceChildren();for(const s of enhancers){s.previous=null;s.undo.hidden=true;s.added.replaceChildren();s.added.hidden=true;s.note.hidden=true;s.busy=false;}report=null;reportState='loading';renderEnhance();void loadModels();});
+ window.addEventListener('echo-account-changed',()=>{generation++;if(autoTimer){clearTimeout(autoTimer);autoTimer=null;}busy=false;routing=false;lastRoute=null;setAuto(false);notice('');panel.hidden=true;status.textContent='';pickBox.replaceChildren();alternatives.replaceChildren();excludedBox.replaceChildren();failure.replaceChildren();for(const k of Object.keys(sessionFailures))delete sessionFailures[k];for(const s of enhancers){s.previous=null;s.undo.hidden=true;s.added.replaceChildren();s.added.hidden=true;s.note.hidden=true;s.busy=false;}report=null;reportState='loading';renderEnhance();void loadModels();});
  renderEnhance();
  const ready=loadModels();
  // Another surface (composer.js) mounts an Enhance control that shares this provider chip, owner gate and account reset.

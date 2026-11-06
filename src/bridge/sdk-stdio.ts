@@ -28,6 +28,8 @@ type Json = Record<string, unknown>;
 
 const MAX_BYTES = 1024 * 1024; // 1 MiB
 const GATE_TIMEOUT_MS = 30_000;
+/** Ceiling for a caller-chosen invoke wait (`timeout_ms`): long generations (music, video submits, on-prem images). */
+const MAX_INVOKE_TIMEOUT_MS = Math.min(900_000, Math.max(GATE_TIMEOUT_MS, Number(process.env.ECHO_PRIME_SDK_MAX_TIMEOUT_MS) || 600_000));
 const PROTOCOL_VERSION = '2024-11-05';
 const CAP_ID_RE = /^echo\.[A-Za-z0-9_.-]{1,180}$/;
 
@@ -84,11 +86,11 @@ function detailOf(obj: Json): string {
 }
 
 /** Forward one envelope to the loopback gate and peel its result, failing closed. */
-async function callGate(capability: string, params: Json, context: Json): Promise<GateResult> {
+async function callGate(capability: string, params: Json, context: Json, timeoutMs = GATE_TIMEOUT_MS): Promise<GateResult> {
   const payload = JSON.stringify({ envelope_version: 1, capability, params, context });
   if (Buffer.byteLength(payload) > MAX_BYTES) return { ok: false, error: 'SDK request exceeds bounded limit' };
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), GATE_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   const started = Date.now();
   let response: Response;
   try {
@@ -224,13 +226,16 @@ async function handleInvoke(args: Json): Promise<Json> {
   // arguments (anything beyond the known fields) to the gate as context rather
   // than dropping them.
   for (const [key, value] of Object.entries(args)) {
-    if (key === 'capability' || key === 'params' || key === 'reason' || key === 'idempotency_key') continue;
+    if (key === 'capability' || key === 'params' || key === 'reason' || key === 'idempotency_key' || key === 'timeout_ms') continue;
     context[key] = value;
   }
+  // The caller's wait for this one call (Prime sends it for long generations); bounded, and never forwarded to the gate.
+  const requested = Number(args.timeout_ms);
+  const timeoutMs = Number.isFinite(requested) && requested > 0 ? Math.min(MAX_INVOKE_TIMEOUT_MS, Math.max(1000, Math.round(requested))) : GATE_TIMEOUT_MS;
   if (reason) context.reason = reason.slice(0, 600);
   if (idempotency) context.idempotency_key = idempotency.slice(0, 200);
   if (reason.length >= 50) context.bypass_reason = reason.slice(0, 600);
-  const gate = await callGate(capability, params, context);
+  const gate = await callGate(capability, params, context, timeoutMs);
   if (!gate.ok) return { ok: false, error: gate.error, ...(gate.required ? { required: gate.required } : {}) };
   return gate.body;
 }
@@ -250,7 +255,7 @@ function toolDefinitions(): Json[] {
     {
       name: TOOL_INVOKE,
       description: 'Invoke an Echo SDK capability through the authenticated loopback gate.',
-      inputSchema: { type: 'object', additionalProperties: true, required: ['capability'], properties: { capability: { type: 'string' }, params: { type: 'object' }, reason: { type: 'string' }, idempotency_key: { type: 'string' } } },
+      inputSchema: { type: 'object', additionalProperties: true, required: ['capability'], properties: { capability: { type: 'string' }, params: { type: 'object' }, reason: { type: 'string' }, idempotency_key: { type: 'string' }, timeout_ms: { type: 'integer' } } },
     },
   ];
 }

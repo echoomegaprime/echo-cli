@@ -3,7 +3,10 @@ import { type Json, type Tool, object, type McpConnection } from './hub.js';
 export interface StdioConfig {command:string;args:string[];cwd?:string;env?:Record<string,string>}
 export class StdioMcp implements McpConnection {
  private next=0;private buffer='';private closed=false;
- private pending=new Map<number,{resolve:(v:unknown)=>void;reject:(e:Error)=>void;timer:ReturnType<typeof setTimeout>}>();
+ private pending=new Map<number,{resolve:(v:unknown)=>void;reject:(e:Error)=>void;timer:ReturnType<typeof setTimeout>;long:boolean}>();
+ /** Calls that carry their own longer wait (a generation that runs for minutes, a job status read) hold a slot for that
+  * long, so they get their own budget and can never starve the short catalog reads, reviews and chat tools (16). */
+ private static readonly SHORT_LIMIT=16;private static readonly LONG_LIMIT=8;
  private constructor(private child:ChildProcessWithoutNullStreams,private timeout:number){
   child.stdout.setEncoding('utf8');child.stdout.on('data',(chunk:string)=>{
    this.buffer+=chunk;if(Buffer.byteLength(this.buffer)>2097152){this.close(new Error('MCP output exceeds limit'));return;}
@@ -34,14 +37,18 @@ export class StdioMcp implements McpConnection {
    child.stdin.write(JSON.stringify({jsonrpc:'2.0',method:'notifications/initialized'})+'\n');return client;
   }catch(e){client.close();throw e;}
  }
- private rpc(method:string,params:Json):Promise<unknown>{
+ /** `timeoutMs` overrides the connection default for one call (a long generation), bounded to 15 minutes. A call refused
+  * here for a full budget was never written to the owner, and its error says so ("not sent"). */
+ private rpc(method:string,params:Json,timeoutMs?:number):Promise<unknown>{
   if(this.closed)return Promise.reject(new Error('MCP connection closed'));
-  if(this.pending.size>=16)return Promise.reject(new Error('MCP request limit reached'));
+  const limit=typeof timeoutMs==='number'&&Number.isFinite(timeoutMs)?Math.min(900000,Math.max(100,timeoutMs)):this.timeout,long=limit>this.timeout;
+  let inLane=0;for(const p of this.pending.values())if(p.long===long)inLane++;
+  if(inLane>=(long?StdioMcp.LONG_LIMIT:StdioMcp.SHORT_LIMIT))return Promise.reject(new Error(long?'MCP long-request limit reached; the request was not sent':'MCP request limit reached; the request was not sent'));
   const id=++this.next,line=JSON.stringify({jsonrpc:'2.0',id,method,params});
   if(Buffer.byteLength(line)>131072)return Promise.reject(new Error('MCP request too large'));
   return new Promise((resolve,reject)=>{
-   const timer=setTimeout(()=>{this.pending.delete(id);reject(new Error('MCP request timed out; outcome unknown'));},this.timeout);
-   this.pending.set(id,{resolve,reject,timer});this.child.stdin.write(line+'\n');
+   const timer=setTimeout(()=>{this.pending.delete(id);reject(new Error('MCP request timed out; outcome unknown'));},limit);
+   this.pending.set(id,{resolve,reject,timer,long});this.child.stdin.write(line+'\n');
   });
  }
  async listTools():Promise<Tool[]>{
@@ -55,7 +62,7 @@ export class StdioMcp implements McpConnection {
    if(cursor){if(seen.has(cursor))throw new Error('Repeated MCP cursor');seen.add(cursor);}
   }while(cursor);return tools;
  }
- call(name:string,args:Json){return this.rpc('tools/call',{name,arguments:args});}
+ call(name:string,args:Json,options?:{timeoutMs?:number}){return this.rpc('tools/call',{name,arguments:args},options?.timeoutMs);}
  close(reason=new Error('MCP connection closed')){
   if(this.closed)return;this.closed=true;
   for(const p of this.pending.values()){clearTimeout(p.timer);p.reject(reason);}this.pending.clear();

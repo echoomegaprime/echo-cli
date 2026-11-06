@@ -49,3 +49,22 @@
 #enhance-composer-notice{width:min(100%,760px);margin:8px auto 0}
 .mode-tabs button[data-mode="Auto"].selected{color:#dffff0;background:#1f4d3c;box-shadow:inset 0 1px 0 #cdffdd0a,0 0 14px #5fe8b322}
 @media(max-width:800px){.enhance-provider{max-width:120px}.media-alternative{grid-template-columns:1fr}.media-alternative span{white-space:normal}}
+/* Studio results: the stored file itself (image, video or audio) under the status line, then the provider answer as data. */
+.creative-output{display:grid;gap:10px;margin-top:10px}
+.creative-output:empty{display:none}
+.creative-media{display:block;max-width:100%;max-height:60dvh;border-radius:12px;border:1px solid #29433a;background:#07120f}
+.creative-audio{width:100%}
+.creative-output-actions{display:flex;flex-wrap:wrap;gap:10px}
+.creative-progress{width:100%;height:6px;accent-color:#61c7a1}
+.creative-media-error{font-size:12px;color:#f0cf9d;line-height:1.55;margin:0}
+.creative-answer summary{font-size:12px;color:#aac8b9;cursor:pointer}
+/* Requests still running after the owner moved on to another tool: followed quietly, reported here. */
+.creative-background{font-size:12px;color:#aac8b9;line-height:1.55;margin:8px 0 0}
+.creative-background[hidden]{display:none}
+/* The Studio length control (video, music, sound effects); hidden for tools that take no length. */
+.creative-duration{max-width:260px}
+.creative-duration[hidden]{display:none}
+.creative-duration input{width:100%;box-sizing:border-box;background:#0b1916;color:#dfefea;border:1px solid #29433a;border-radius:10px;padding:10px;font:inherit}
+.creative-duration-hint{font-size:11px;color:#91a99e;line-height:1.5}
+/* An alternative whose last run (or its provider's) failed is still offered, visibly marked. */
+.media-alternative.media-demoted{opacity:.78;border-style:dashed}

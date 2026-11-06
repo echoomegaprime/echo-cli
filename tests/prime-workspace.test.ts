@@ -27,6 +27,20 @@ async function transportFixture(stream:()=>Response,session=()=>Response.json({
 }
 const doneEvent=JSON.stringify({type:'done',chat:{id:'chat-owner',messages:[]}});
 describe('browser transport adversarial streams and admission',()=>{
+ it('re-reads the session after one refused request without the memo, and signs out only on a signed-out readback',async()=>{
+  let signedIn=true,fail=false,reads=0;const changes:unknown[]=[];
+  const window:Record<string,unknown>={};
+  runInNewContext(await readFile(new URL('../ui/echo-prime/workspace-client.js',import.meta.url),'utf8'),{window,TextDecoder,TextEncoder,Uint8Array});
+  const Transport=window.EchoPrimeWorkspaceTransport as TransportClass;Transport.now=()=>1_000_000;
+  const client=new Transport({fetch:async path=>{expect(path).toBe('/api/session');reads++;if(fail)throw new Error('issuer offline');return Response.json(signedIn?{workspaceConfigured:true,authenticated:true,user:{uid:'owner',status:'approved'},csrf:'csrf-owner',ownerAccess:true}:{workspaceConfigured:true,authenticated:false,user:null,csrf:null,ownerAccess:false});},onIdentityChange:s=>changes.push(s)}) as BrowserClient&{refresh:()=>Promise<unknown>};
+  await client.loadSession();expect(changes).toHaveLength(1);
+  // Same account: a fresh read (the 10 s memo is bypassed) and no identity change.
+  await client.refresh();expect(reads).toBe(2);expect(changes).toHaveLength(1);
+  // A failed read changes nothing: the page stays signed in.
+  fail=true;await expect(client.refresh()).rejects.toThrow('issuer offline');expect(changes).toHaveLength(1);expect(client.headers()['x-echo-csrf']).toBe('csrf-owner');
+  // Signed out on the server: the readback says so and only then the page changes.
+  fail=false;signedIn=false;await client.refresh();expect(changes).toHaveLength(2);expect(changes[1]).toMatchObject({authenticated:false});
+ });
  it('uses the newly issued login cleanup proof after an account switch and issuer outage',async()=>{
   let unavailable=false;
   const window:Record<string,unknown>={};

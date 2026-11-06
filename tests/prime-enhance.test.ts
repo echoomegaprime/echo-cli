@@ -235,6 +235,16 @@ describe('PromptEnhancer redaction and provider failures', () => {
     expect(s.fake.chats).toHaveLength(0);
   });
 
+  it('remembers the last failure per provider for the Enhance chip and forgets it when that provider answers', async () => {
+    const s = await setup(answer, 'grok');
+    await expect(s.enhancer.enhance({...request, provider: 'grok'}, 'session-a')).rejects.toBeInstanceOf(EnhanceError);
+    expect(s.enhancer.failures()).toMatchObject({grok: {category: 'unavailable', reason: expect.stringContaining('Grok')}});
+    const hub = new PrimeHub({capabilities: [], models: s.router, enhancer: s.enhancer});
+    expect((await hub.models()).enhance).toEqual({failures: {grok: expect.objectContaining({category: 'unavailable'})}});
+    await s.enhancer.enhance(request, 'session-a');
+    expect(Object.keys(s.enhancer.failures())).toEqual(['grok']);
+  });
+
   it('rejects a tool action instead of executing or retrying it', async () => {
     const s = await setup(JSON.stringify({action: 'read', path: 'x'}));
     await expectEnhanceError(s.enhancer.enhance(request, 'session-a'), 502, /returned a tool action/i);
