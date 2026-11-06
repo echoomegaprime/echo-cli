@@ -124,13 +124,14 @@ describe('Members view (primary owner)',()=>{
   expect(init.headers).toMatchObject({'x-prime-request':'1','x-echo-csrf':'csrf-owner','content-type':'application/json'});expect(init.credentials).toBe('same-origin');
   const body=h.text();
   for(const expected of ['approved@example.test','Approved','Role member','Active sessions 2','Sign-ins 5','Invited Yes','Chats 3','Messages sent 12','Replies 11','Characters sent 480','Projects 1','Library items 2','Top tools esh 4 · web 1','Model tokens (approx.) 900','Storage 2.0 KB','Uploads 2 files · 3.0 KB','Not available for members: voice, media, swarm, agents, bots, build, SDK, web search, ESH'])expect(body,expected).toContain(expected);
-  for(const label of ['Kick','Ban'])expect(h.find(label),label).toBeDefined();
-  for(const label of ['Approve','Deny','Unban'])expect(h.find(label),label).toBeUndefined();
+  for(const label of ['Deny','Kick','Ban'])expect(h.find(label),label).toBeDefined();// an approved member can lose access here (Deny), since Account lists only pending requests
+  for(const label of ['Approve','Unban'])expect(h.find(label),label).toBeUndefined();
   expect(JSON.stringify(h.request.mock.calls)).not.toContain('m-pending');// never one request per member
   await h.choose('m-pending');await vi.waitFor(()=>expect(h.calls('/auth/usage')).toHaveLength(2));
   expect(h.calls('/auth/usage')[1][1]).toEqual({uid:'m-pending'});
   for(const label of ['Approve','Deny','Kick','Ban'])expect(h.find(label),label).toBeDefined();expect(h.find('Unban')).toBeUndefined();
   await h.choose('m-banned');expect(h.find('Unban')).toBeDefined();for(const label of ['Approve','Kick','Ban'])expect(h.find(label),label).toBeUndefined();
+  await h.choose('m-denied');expect(h.find('Approve'),'a mistaken Deny is undone in Members').toBeDefined();for(const label of ['Deny','Unban'])expect(h.find(label),label).toBeUndefined();
   expect(h.calls('/auth/accounts')).toHaveLength(1);
  });
  it('renders a member who never opened the Workspace (exists:false) without inventing counts',async()=>{
@@ -152,7 +153,7 @@ describe('Members view (primary owner)',()=>{
   ['ban','m-approved','Ban','Signs them out and blocks this account and email from signing in.','Banned approved@example.test. Signed out 2 sessions.'],
   ['unban','m-banned','Unban','Restores access as an approved member.','Unbanned banned@example.test.'],
   ['approve','m-pending','Approve','Approves the account.','Account decision returned: approved.'],
-  ['deny','m-pending','Deny','Refuses the application.','Account decision returned: denied.'],
+  ['deny','m-pending','Deny','Blocks their private Workspace.','Account decision returned: denied.'],
  ])('%s: a confirm card names the email and consequence, nothing is sent before Confirm, the body is exact and the member stays selected',async(decision,uid,label,consequence,result)=>{
   const h=membersHarness();await h.open();await h.choose(uid);await flush();
   const email=uid.slice(2)+'@example.test';
@@ -290,18 +291,19 @@ describe('Account view',()=>{
   await h.open('account');await h.find('Manage members')!.fire('click');await flush();
   expect(h.get('#workspace-panel-title').textContent).toBe('Members');expect(h.picker()).toBeDefined();
  });
- it('keeps Approve and Deny on every account that is not banned, so a mistaken Deny is undone here with the exact body',async()=>{
+ it('lists only pending requests: approved, denied and banned accounts are managed in Members (the owner saw an approved member still offered for approval)',async()=>{
   const h=membersHarness();await h.open('account');
   const sectionFor=(email:string)=>h.content.children.find(n=>n.tagName==='ARTICLE'&&n.children[0]?.tagName==='H3'&&text(n.children[0])===email);
-  for(const email of ['pending@example.test','approved@example.test','denied@example.test'])expect(sectionFor(email),email).toBeDefined();
-  expect(sectionFor('banned@example.test')).toBeUndefined();
-  const decide=async(email:string,label:string)=>{
-   const node=descendants(sectionFor(email)!).find(n=>n.tagName==='BUTTON'&&text(n)===label);expect(node,`${label} for ${email}`).toBeDefined();
-   await node!.fire('click');await h.find('Confirm this account decision')!.fire('click');await flush();
-  };
-  await decide('denied@example.test','Approve account');
-  await decide('approved@example.test','Deny account');
-  expect(h.calls('/auth/decide').map(c=>c[1])).toEqual([{uid:'m-denied',decision:'approve'},{uid:'m-approved',decision:'deny'}]);
+  expect(sectionFor('pending@example.test')).toBeDefined();
+  for(const email of ['approved@example.test','denied@example.test','banned@example.test'])expect(sectionFor(email),email).toBeUndefined();
+  const node=descendants(sectionFor('pending@example.test')!).find(n=>n.tagName==='BUTTON'&&text(n)==='Deny account');expect(node).toBeDefined();
+  await node!.fire('click');await h.find('Confirm this account decision')!.fire('click');await flush();
+  expect(h.calls('/auth/decide').map(c=>c[1])).toEqual([{uid:'m-pending',decision:'deny'}]);
+ });
+ it('says so when nothing is waiting for approval',async()=>{
+  const none={accounts:[row('m-approved','approved')],counts:{pending:0,approved:1,denied:0,banned:0},truncated:false};
+  const h=membersHarness({request:path=>path==='/auth/accounts'?none:undefined});await h.open('account');
+  expect(h.text()).toContain('No pending account requests.');expect(h.find('Approve account')).toBeUndefined();expect(h.text()).not.toContain('approved@example.test');
  });
  it('drops banned accounts before the 200-account limit, so an older pending account is still offered',async()=>{
   const many={accounts:[...Array.from({length:200},(_,i)=>row(`m-banned${i}`,'banned')),row('m-pending','pending')],counts:{pending:1,approved:0,denied:0,banned:200},truncated:false};

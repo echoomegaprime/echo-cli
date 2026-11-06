@@ -605,7 +605,7 @@
  function memberOption(value,label){const node=element('option',{},label);node.setAttribute('value',value);return node;}
  const memberActions={
   approve:['Approve','Approve this account?','Approves the account. Their private Workspace opens on their next request.'],
-  deny:['Deny','Deny this application?','Refuses the application. They can still sign in but cannot open a Workspace.'],
+  deny:['Deny','Deny this account?','Blocks their private Workspace. They can still sign in, and Approve restores access.'],
   kick:['Kick','Kick this member?','Signs them out everywhere now. They can sign in again.'],
   ban:['Ban','Ban this member?','Signs them out and blocks this account and email from signing in.'],
   unban:['Unban','Unban this member?','Restores access as an approved member.'],
@@ -657,7 +657,7 @@
    if(!row){membersUsage++;detail.replaceChildren(element('p',{class:'members-hint'},view.rows.length?'Choose a member above to see their details, usage and actions.':'No member accounts yet. Invite someone below.'));return;}
    const facts=[['Role',row.role||'member'],['Joined',memberWhen(row.created)],['Last sign-in',memberWhen(row.last_login)],['Last active',memberWhen(row.last_seen)],['Active sessions',memberNumber(row.active_sessions)],['Sign-ins',memberNumber(row.login_count)],['Invited',row.via_invite===true?'Yes':'No']];
    if(row.status==='banned')facts.push(['Banned',memberWhen(row.banned_at)]);
-   const decisions=row.status==='banned'?['unban']:[...(row.status==='pending'?['approve','deny']:[]),'kick','ban'];
+   const decisions=row.status==='banned'?['unban']:[...(row.status==='pending'?['approve','deny']:row.status==='denied'?['approve']:['deny']),'kick','ban'];// denied accounts can be re-approved and approved ones denied here, because Account lists only pending requests
    const usage=element('article',{class:'workspace-card-content members-usage','aria-live':'polite'},element('h3',{},'Usage'),element('p',{class:'members-hint'},'Reading usage…'));
    detail.replaceChildren(element('article',{class:'workspace-card-content members-detail'},element('h3',{},element('span',{class:'members-email'},row.email||row.uid),element('span',{class:'members-badge','data-status':row.status},memberStatus(row.status))),element('dl',{class:'members-facts'},...facts.map(([label,value])=>memberFact(label,value))),element('div',{class:'members-actions'},...decisions.map(name=>button(memberActions[name][0],()=>confirmMember(view,row,name),name==='ban'?'quiet-button members-danger':'quiet-button')))),usage);
    if(view.usage?.uid===row.uid)renderUsage(usage,row,view.usage.usage,view.usage.uploads);else void loadUsage(view,row,usage);
@@ -802,7 +802,7 @@
    // Owner: Members manages every account (select, usage, kick, ban, invites); this view keeps the approvals exactly as
    // before: Approve and Deny on every account, so a mistaken Deny is undone here. Only a banned account is left out
    // (it must be unbanned in Members first); it is dropped before the 200 limit so it never hides an older account.
-   if(session.ownerAccess){section('Members',element('p',{},'Select a member to see their usage, sign them out, ban or unban them, and invite new members.'),button('Manage members',()=>open('members')));const value=await api('/auth/accounts');for(const member of (value.accounts||[]).filter(member=>member&&member.role!=='owner'&&member.status!=='banned').slice(0,200)){section(member.email||'Member account',element('p',{},'Status: '+member.status),button('Approve account',()=>decision(member,'approve')),button('Deny account',()=>decision(member,'deny')));}}
+   if(session.ownerAccess){section('Members',element('p',{},'Select a member to see their usage, sign them out, ban or unban them, and invite new members.'),button('Manage members',()=>open('members')));const value=await api('/auth/accounts');const waiting=(value.accounts||[]).filter(member=>member&&member.role!=='owner'&&member.status==='pending').slice(0,200);if(!waiting.length)section('Pending approvals',element('p',{},'No pending account requests.'));for(const member of waiting){section(member.email||'Member account',element('p',{},'Status: '+member.status),button('Approve account',()=>decision(member,'approve')),button('Deny account',()=>decision(member,'deny')));}}
    return;
   }
   // Anonymous: one centred card. Google Identity Services renders its own button (an iframe) into `slot`; Prime only
