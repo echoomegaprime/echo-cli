@@ -75,9 +75,16 @@ export function parseEnhancement(content:string,original:string):{text:string;ad
  if(addedSource==='derived')added=derivedAdditions(original,text);
  return {text,added,addedSource};
 }
+/** A provider failure that means its sign-in or key does not work (claude CLI "OAuth session expired", codex "not signed in"). */
+const AUTH_FAILURE=/failed to authenticate|oauth|not signed in|not logged in|log ?in (?:required|again)|sign-?in|unauthori[sz]ed|\b401\b|\b403\b|invalid (?:api )?key|credential|token (?:expired|revoked)|session expired/i;
+export interface EnhanceFailure {category:'auth'|'unavailable'|'timeout'|'error';reason:string;at:string}
 export class PromptEnhancer {
  private hits=new Map<string,number[]>();
  private limit:number;private windowMs:number;private timeoutMs:number;private now:()=>number;
+ /** The last failure per provider until that provider answers again: the Enhance chip skips an `auth` or `unavailable`
+  * provider when it picks the default, so an expired CLI sign-in is not every owner's first click. */
+ private failed=new Map<ModelId,EnhanceFailure>();
+ failures():Partial<Record<ModelId,EnhanceFailure>>{return Object.fromEntries(this.failed) as Partial<Record<ModelId,EnhanceFailure>>;}
  constructor(private router:ModelRouter,options:EnhancerOptions={}){
   this.limit=options.limit??10;this.windowMs=options.windowMs??60000;this.timeoutMs=options.timeoutMs??120000;this.now=options.now??Date.now;
  }
@@ -111,11 +118,12 @@ export class PromptEnhancer {
    const reason=error instanceof Error?redact(error.message).slice(0,300):'provider failed';
    debug('%j',{event:'prime_enhance_refused',mode,provider,reason,durationMs:this.now()-started});
    if(signal?.aborted)throw new EnhanceError(499,'Interrupted');
+   this.failed.set(provider,{category:AUTH_FAILURE.test(reason)?'auth':error instanceof ProviderUnavailableError?'unavailable':timeout.aborted?'timeout':'error',reason:reason.slice(0,200),at:new Date(this.now()).toISOString()});
    if(error instanceof ProviderUnavailableError)throw new EnhanceError(503,reason);
    if(timeout.aborted)throw new EnhanceError(504,label+' did not answer within '+Math.round(this.timeoutMs/1000)+' s; no other provider was used');
    throw new EnhanceError(502,label+' failed: '+reason+'; no other provider was used');
   }
-  turn.answered();
+  turn.answered();this.failed.delete(provider);
   if(action.action!=='final'){
    debug('%j',{event:'prime_enhance_refused',mode,provider,reason:'non_final_action',durationMs:this.now()-started});
    throw new EnhanceError(502,label+' returned a tool action instead of an enhanced prompt; no retry and no other provider was used');

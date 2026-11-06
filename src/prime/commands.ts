@@ -30,7 +30,9 @@ import {EcfTools} from '../code/tools/ecf.js';
 import {ContinuityClient} from '../code/continuity.js';
 import {PrimeAutonomyHooks} from './autonomy-hooks.js';
 import {FleetRoles,parseRolesConfig} from './roles.js';
-interface PrimeConfig {esh?:StdioConfig;sdk?:StdioConfig&{tools:SdkTools;fixedArguments?:Json};steward?:StdioConfig&{tools:StewardTools};workspace?:WorkspaceConfig;publicOrigin?:string;models?:unknown;swarm?:unknown;voice?:unknown;adk?:unknown;bots?:unknown;browser?:unknown;uploads?:unknown;tools?:unknown;build?:unknown;autonomy?:unknown;roles?:unknown}
+import {parseMediaConfig} from './media-collect.js';
+import {MediaOutcomes,prepareOutcomesFile} from './media-outcomes.js';
+interface PrimeConfig {esh?:StdioConfig;sdk?:StdioConfig&{tools:SdkTools;fixedArguments?:Json};steward?:StdioConfig&{tools:StewardTools};workspace?:WorkspaceConfig;publicOrigin?:string;models?:unknown;swarm?:unknown;voice?:unknown;adk?:unknown;bots?:unknown;browser?:unknown;uploads?:unknown;tools?:unknown;build?:unknown;autonomy?:unknown;roles?:unknown;media?:unknown}
 export function registerPrimeCommands(code:Command){
  code.command('prime').description('Open the local ECHO Prime interface with explicitly configured owner connections')
  .option('--config <file>','Reviewed local MCP connection configuration; never imported automatically')
@@ -40,6 +42,11 @@ export function registerPrimeCommands(code:Command){
  .action(async(opts:{config?:string;port:string;codeWorkspace:string;codeStateDir:string})=>{
   const config:PrimeConfig=opts.config?JSON.parse(await readFile(opts.config,'utf8')):{};
   const autonomy=parseAutonomyConfig(config.autonomy),rolesConfig=parseRolesConfig(config.roles);
+  // Media: call kinds the gate runs, time limits and where generated files may be read from. Outcomes of real Studio runs
+  // persist beside the code sessions unless the section names another file.
+  const mediaConfig=parseMediaConfig(config.media);
+  const outcomesFile=mediaConfig.outcomesFile??join(opts.codeStateDir,'prime-media-outcomes.json');prepareOutcomesFile(outcomesFile);
+  const outcomes=new MediaOutcomes({file:outcomesFile});
   const connections:StdioMcp[]=[];
   let builds:BuildRunner|undefined;
   try{
@@ -73,7 +80,7 @@ export function registerPrimeCommands(code:Command){
    const adk=config.adk!==undefined?new AdkClient(parseAdkConfig(config.adk)):undefined,bots=config.bots!==undefined?new BotsClient(parseBotsConfig(config.bots)):undefined;
    // Autonomous agent/bot creation from chat needs all three: the ADK service, echoBots and the live catalog (to verify capability ids).
    const autoagents=adk&&bots&&broker?new AutoAgents({adk,bots,caps:brokerCapabilityLookup(broker)}):undefined;
-   const hub=new PrimeHub({capabilities:snapshot.capabilities,esh,steward,models:router,chat,tools,build:builds,autonomy,ecf,swarm:config.swarm!==undefined?new SwarmClient(parseSwarmConfig(config.swarm)):undefined,voice:config.voice!==undefined?new VoiceClient(parseVoiceConfig(config.voice)):undefined,adk,bots,uploads,uploadsOwner:config.workspace?.ownerUid??'local',browser:config.browser!==undefined?new BrowserClient(parseBrowserConfig(config.browser)):undefined,sdk:broker,autoagents});
+   const hub=new PrimeHub({capabilities:snapshot.capabilities,esh,steward,models:router,chat,tools,build:builds,autonomy,ecf,swarm:config.swarm!==undefined?new SwarmClient(parseSwarmConfig(config.swarm)):undefined,voice:config.voice!==undefined?new VoiceClient(parseVoiceConfig(config.voice)):undefined,adk,bots,uploads,uploadsOwner:config.workspace?.ownerUid??'local',browser:config.browser!==undefined?new BrowserClient(parseBrowserConfig(config.browser)):undefined,sdk:broker,autoagents,mediaConfig,outcomes});
    const server=await startPrimeServer(hub,ui,Number(opts.port),{workspace:config.workspace,publicOrigin:config.publicOrigin,uploads});
    process.stdout.write(JSON.stringify({url:server.url,publicOrigin:config.publicOrigin??null,esh:!!esh,sdk:!!sdk,steward:!!steward,scope:'loopback host; public ingress requires configured TLS proxy and release evidence'})+'\n');
    const close=async()=>{await server.close();await builds?.close();connections.forEach(c=>c.close());};

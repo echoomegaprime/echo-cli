@@ -34,13 +34,15 @@ export class StdioMcp implements McpConnection {
    child.stdin.write(JSON.stringify({jsonrpc:'2.0',method:'notifications/initialized'})+'\n');return client;
   }catch(e){client.close();throw e;}
  }
- private rpc(method:string,params:Json):Promise<unknown>{
+ /** `timeoutMs` overrides the connection default for one call (a long generation), bounded to 15 minutes. */
+ private rpc(method:string,params:Json,timeoutMs?:number):Promise<unknown>{
   if(this.closed)return Promise.reject(new Error('MCP connection closed'));
   if(this.pending.size>=16)return Promise.reject(new Error('MCP request limit reached'));
   const id=++this.next,line=JSON.stringify({jsonrpc:'2.0',id,method,params});
   if(Buffer.byteLength(line)>131072)return Promise.reject(new Error('MCP request too large'));
   return new Promise((resolve,reject)=>{
-   const timer=setTimeout(()=>{this.pending.delete(id);reject(new Error('MCP request timed out; outcome unknown'));},this.timeout);
+   const limit=typeof timeoutMs==='number'&&Number.isFinite(timeoutMs)?Math.min(900000,Math.max(100,timeoutMs)):this.timeout;
+   const timer=setTimeout(()=>{this.pending.delete(id);reject(new Error('MCP request timed out; outcome unknown'));},limit);
    this.pending.set(id,{resolve,reject,timer});this.child.stdin.write(line+'\n');
   });
  }
@@ -55,7 +57,7 @@ export class StdioMcp implements McpConnection {
    if(cursor){if(seen.has(cursor))throw new Error('Repeated MCP cursor');seen.add(cursor);}
   }while(cursor);return tools;
  }
- call(name:string,args:Json){return this.rpc('tools/call',{name,arguments:args});}
+ call(name:string,args:Json,options?:{timeoutMs?:number}){return this.rpc('tools/call',{name,arguments:args},options?.timeoutMs);}
  close(reason=new Error('MCP connection closed')){
   if(this.closed)return;this.closed=true;
   for(const p of this.pending.values()){clearTimeout(p.timer);p.reject(reason);}this.pending.clear();

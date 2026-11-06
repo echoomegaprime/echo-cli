@@ -130,6 +130,8 @@
  let controller=new AbortController();
  let uploadMap=new Map();
  let uploadsMeta={configured:false,maxBytes:200*1024*1024,types:[],reason:''};
+ // False until the first uploads list answers: the first paint says "loading", not "uploads are off".
+ let uploadsLoaded=false,uploadsFailed='';
  let artifactList=[];
  let artifactsMeta={configured:false,reason:''};
  let activeTab='library';
@@ -170,7 +172,8 @@
   const value=await response.json();
   if(turn!==generation)throw new Error('Account session changed.');
   if(!response.ok){
-   if(response.status===401){window.EchoPrimeWorkspace?.invalidate?.();}
+   // A refused request re-reads the session; only a signed-out readback signs the page out.
+  if(response.status===401||response.status===403){await window.EchoPrimeWorkspace?.recheck?.().catch(()=>{});}
    throw new Error(value?.error||'Request failed');
   }
   return value;
@@ -180,8 +183,11 @@
  async function refreshUploads(){
   if(!isApprovedSession())return [];
   const turn=generation;
-  const res=await primeJson('uploads/list');
+  let res;
+  try{res=await primeJson('uploads/list');}catch(error){if(turn===generation){uploadsFailed=errText(error);if(dialog?.open)paint();}throw error;}
   if(turn!==generation)return [];
+  uploadsFailed='';
+  uploadsLoaded=true;
   uploadsMeta={
    configured:res.configured===true,
    maxBytes:Number(res.maxBytes)||200*1024*1024,
@@ -705,7 +711,9 @@
   };
   uploadBtn.addEventListener('click',runUpload);
 
-  const uploadSection=uploadsMeta.configured
+  const uploadSection=!uploadsLoaded
+   ?el('p',{class:uploadsFailed?'views-callout':'views-muted','data-uploads-loading':''},uploadsFailed?'Uploads could not be listed: '+uploadsFailed:'Loading your uploads…')
+   :uploadsMeta.configured
    ?el('section',{class:'library-upload-card'},
      el('h3',{},`Upload pictures, video, audio & documents · up to ${formatBytes(uploadsMeta.maxBytes)}`),
      el('p',{class:'views-muted'},'Images (PNG, JPEG with automatic EXIF GPS strip, WebP, GIF), video (MP4, WebM, MOV), audio (MP3, WAV), PDF, Office (DOCX/XLSX/PPTX) and text/CSV/JSON. Executables and archives are refused.'),
@@ -918,7 +926,7 @@
   generation++;
   controller.abort();
   controller=new AbortController();
-  uploadMap=new Map();
+  uploadMap=new Map();uploadsLoaded=false;uploadsFailed='';
   artifactList=[];
   standaloneAttachments.clear();
   searchQuery='';

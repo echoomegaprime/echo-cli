@@ -148,7 +148,7 @@ a registry row; `tests/prime-sdk-bridge.test.ts` checks it), and a row without h
 the field, and an explicit `registered: false` is shown under `excluded`. A live row whose health is `unknown`
 does **not** erase a known snapshot health: `mergeCatalog` (and the hub's own catalog update) keep the snapshot's
 value, and the reason says so ("health amber (snapshot; the live catalog row carries no health)",
-`healthSource: 'snapshot'`). The top-3 probe below then reads the exact record, whose `health_status` comes from
+`healthSource: 'snapshot'`). The probe of the first seven candidates below then reads the exact record, whose `health_status` comes from
 `echo.caps.detail`. `tests/prime-media.test.ts` ("live catalog through the real sdkBroker") runs this chain with
 the real `sdkBroker` over a connection that returns the bridge's exact row shape.
 
@@ -347,55 +347,44 @@ Request:
 says what an unclassifiable prompt means (`"image"` for the Studio, `"chat"` for the composer). `probe` and
 `classifier` default to `true` and let tests or callers skip the live health probe / model classification turn.
 
-Response — a real run of the router over the shipped `ui/echo-prime/catalog.json` snapshot with no SDK connected
-(`classifier: false`, `probe: false`), so `catalog.source` is `snapshot` and says why; three of the six
-alternatives are shown, and each alternative carries the same fields as `picked`:
+Response — a real run of the router (2026-11-06, this build) over the shipped `ui/echo-prime/catalog.json` snapshot
+with no SDK connected (`classifier: false`, `probe: false`), trimmed to the pick, three alternatives and two of the 37
+excluded tools; each alternative carries the same fields as `picked`:
 
 ```json
 {
-  "classification": {
-    "kind": "image",
-    "confidence": 0.93,
-    "signals": ["image-noun", "photo-craft", "scene-phrase"],
-    "source": "rules",
-    "styles": ["photoreal", "portrait"],
-    "aspect": "16:9"
-  },
+  "classification": {"kind": "image", "confidence": 0.93, "signals": ["image-noun", "photo-craft", "scene-phrase"], "source": "rules", "styles": ["photoreal", "portrait"], "aspect": "16:9"},
   "picked": {
-    "id": "echo.llm.together.ByteDance-Seed-Seedream-4.0",
-    "cap": "echo.llm.together.ByteDance-Seed-Seedream-4.0",
-    "label": "Seedream 4.0 (Together)",
-    "provider": "Together AI",
-    "reason": "Picked Seedream 4.0 (Together) because image + photoreal · health green (snapshot) · provider charges apply · quality 8.5/10, speed 7/10 · listed only in the shipped snapshot",
-    "health": "green",
-    "healthSource": "snapshot",
-    "catalogSource": "snapshot",
-    "cost": "paid-low",
-    "costNote": "provider charges apply",
-    "quality": 8.5,
-    "speed": 7,
-    "score": 0.747,
-    "argumentShape": "modeled",
-    "note": "ByteDance current image tier",
-    "request": {"target": "sdk", "name": "echo.llm.together.ByteDance-Seed-Seedream-4.0", "arguments": {"command": "call", "options": {"prompt": "a photoreal portrait of a fox at golden hour, 16:9"}}}
+    "id": "echo.media.image_generate",
+    "label": "On-prem media router (TEMPER ComfyUI / FORGE diffusers)",
+    "provider": "On-prem media router",
+    "reason": "Picked On-prem media router (TEMPER ComfyUI / FORGE diffusers) because image + photoreal · health amber (snapshot) · $0 on-prem · quality 6.5/10, speed 6/10 · not returned by the live catalog searches for this kind (shipped snapshot record)",
+    "health": "amber", "score": 0.562, "argumentShape": "modeled",
+    "request": {"target": "sdk", "name": "echo.media.image_generate", "arguments": {"prompt": "a photoreal portrait of a fox at golden hour, 16:9", "wait": false, "style": "photoreal", "width": 1024, "height": 576}},
+    "template": {"envelope": "flat", "modeled": true, "source": "family", "verb": "image_generate", "textKey": "prompt", "fixed": {"wait": false, "style": "photoreal", "width": 1024, "height": 576}}
   },
   "alternatives": [
-    {"id": "echo.llm.together.Rundiffusion-Juggernaut-Lightning-Flux", "label": "Juggernaut Lightning Flux (Together)", "health": "green", "score": 0.717, "...": "same fields as picked"},
-    {"id": "echo.llm.openrouter.google-gemini-2.5-flash-image", "label": "Gemini 2.5 Flash Image (Nano Banana)", "health": "green", "score": 0.714, "...": "same fields as picked"},
-    {"id": "echo.llm.openrouter.google-gemini-3.1-flash-image", "label": "Gemini 3.1 Flash Image (Nano Banana 2)", "health": "amber", "score": 0.607, "...": "same fields as picked"}
+    {"id": "echo.image.qwen.generate", "label": "Qwen Image on TEMPER", "health": "amber", "score": 0.518, "...": "same fields as picked"},
+    {"id": "echo.image.generate", "label": "FORGE diffusers (SDXL-class)", "health": "amber", "score": 0.476, "...": "same fields as picked"},
+    {"id": "echo.fal.generate", "label": "fal.ai (FLUX schnell default)", "health": "amber", "score": 0.378, "...": "same fields as picked"}
   ],
-  "excluded": [{"id": "echo.google.vertex.imagen_generate", "label": "Vertex Imagen 3", "reason": "health orphaned (the Studio refuses it at review)"}],
+  "excluded": [
+    {"id": "echo.llm.together.ByteDance-Seed-Seedream-4.0", "label": "Seedream 4.0 (Together)", "reason": "its call kind together_image_generation is not one the SDK gate runs (openai_compat, dedicated_endpoint, together_audio_transcription, anthropic_api, vertex_generate, anthropic_cli, grok_cli); add it to media.gateCallKinds once the gate supports it"},
+    {"id": "echo.llm.openrouter.google-gemini-2.5-flash-image", "label": "Gemini 2.5 Flash Image (Nano Banana)", "reason": "it runs through the SDK gate's chat path (openai_compat; no media call kind in the registry), which returns text, not a media file"}
+  ],
   "probe": {"probed": [], "source": "none"},
-  "catalog": {"source": "snapshot", "queries": [], "listed": 0, "failed": [], "cached": false, "reason": "The live capability catalog is not connected (the Prime config has no `sdk` section); ranked from the shipped catalog snapshot, whose health may be stale."},
-  "records": [{"id": "echo.llm.together.ByteDance-Seed-Seedream-4.0", "registered": true, "health": "green", "category": "image", "description": "Call Together ByteDance Seedream 4.0 (ByteDance-Seed/Seedream-4.0); type=image; provider endpoint=https://api.together.xyz/v1/images/generations; call_kind=together_image_generation.", "scope": "llm.invoke", "tier": 1}]
+  "catalog": {"source": "snapshot", "queries": [], "listed": 0, "failed": [], "cached": false, "reason": "The live capability catalog is not connected (the Prime config has no `sdk` section); ranked from the shipped catalog snapshot, whose health may be stale."}
 }
 ```
 
-On the same snapshot, "anime girl with a katana under cherry blossoms" ranks `echo.media.image_generate` (amber in
-the snapshot, anime style match) third at 0.562 behind Seedream 4.0 (0.649); once the live catalog or the probe
-reports it green it scores 0.703 and is the pick (the `$0` on-prem route), as `tests/prime-media.test.ts` checks.
-With a live SDK, `catalog.source` is `live`, `probe.probed` lists the top three ids and their `healthSource` is
-`probe`.
+Before 2026-11-06 the same brief picked Seedream 4.0 (Together) with `{command:'call',options:{prompt}}`; the live
+end-to-end test then showed the gate cannot run it (`unsupported call_kind 'together_image_generation'`), and the
+OpenRouter image tools it offered next were refused with HTTP 402. Section 11 (at the end) is how the router now avoids both.
+With a live SDK, `catalog.source` is `live`, `probe.probed` lists the first seven ids (pick plus the six
+alternatives) and their `healthSource` is `probe`.
+
+`durationSeconds` (number, 0.5–600) may be sent with the route request: it is the Studio's length control and wins
+over a length read from the brief.
 
 `reason` (top-level) is only present when nothing was picked — chat, `image-edit` without a source, or no
 healthy generator for the kind. Error statuses: **400** for an invalid request shape, an empty or
@@ -530,14 +519,23 @@ existing "Review request" → "Run this exact request" buttons are still the onl
   benchmarks; treat the numbers as relative, not absolute.
 - Argument shapes for capability families `buildArguments` does not model are flagged `argumentShape:
   'unmodeled'` and surfaced in the UI as "review request details" rather than guessed at silently.
-- The optional Qwen classification turn (15 s timeout) and the live health probes (5 s timeout each, up to 3
+- The optional Qwen classification turn (15 s timeout) and the live health probes (5 s timeout each, up to 7, in parallel
   per route) both add latency to a route call; `probe: false` / `classifier: false` exist for callers that
   need to skip them.
-- The ranking is static: nothing here learns from which picks actually succeeded or failed over time.
+- Outcome learning (section 11) only knows what this Prime executed: a tool nobody has run yet ranks on registry
+  health alone, and a fixed provider account is noticed after its next successful run or after 24 hours.
+- No runnable Vertex/Gemini image capability exists in the registry on 2026-11-06: `echo.google.vertex.imagen_generate`
+  and `gemini_*` are archived/orphaned, the only `vertex_generate` LLM row is a text model (`google.gemini-4-argon`),
+  and the Gemini image caps through Together are `together_image_generation`. The Commander's Vertex credit can only
+  be used once a Vertex image row or capability is registered on the gate.
+- Results larger than the SDK bridge's 1 MiB response bound (for example ElevenLabs music longer than about 45 s,
+  returned as `audio_base64`) cannot come back through the gate; the job ends with that reason.
+- Media jobs live in Prime's memory: after a Prime restart a running request is unknown to `/api/prime/media/job`
+  (the 404 says to check the gate execution log). Its outcome is still recorded by the gate.
 - The live catalog discovery (`MEDIA_SEARCHES`) is tested with stand-in brokers and with the real `sdkBroker`
   over a connection that returns the SDK bridge's exact row shape; it has not been run against the production
   gate. Whether the gate's `echo.caps.search` rows carry health is not verified; when they do not, the ranking
-  uses the snapshot's health (labelled as such) until the top-3 probe reads the exact record. The search tokens
+  uses the snapshot's health (labelled as such) until the probe of the first seven candidates reads the exact record. The search tokens
   were chosen from the known capability ids, not from measured live result counts, so a token the live catalog
   answers with more than 100 rows shows up as a named failure in `catalog.failed` (and `partial`/`snapshot` in
   the UI) until it is narrowed.
@@ -550,10 +548,112 @@ vanish, the owner-disabled video and retired voice tools land in `excluded`, the
 prompt once live health is green — the real `sdkBroker` with bridge-shaped rows, owner-only routes),
 `tests/prime-enhance.test.ts` (modes, providers, rate limit, redaction, failures, route),
 `tests/prime-media-ui.test.ts` (Auto tab, Studio panel, one-tap overrides, excluded list, failure offers, catalog
-badges, Studio `merge`, the composer Enhance mounted by `composer.js`, Enhance controls, Undo, gates).
+badges, Studio `merge`, the composer Enhance mounted by `composer.js`, Enhance controls, Undo, gates, 403 handling,
+Enhance default skipping a failed sign-in, copy, demoted badges, template + length on apply),
+`tests/prime-media-pipeline.test.ts` (outcome classification and persistence, call-kind exclusion and learning,
+billing demotion, live shapes, media collection allowlists, server-side jobs: sync file, polled on-prem image,
+inline window, unfollowable provider job, wall limit, refusals, `/api/prime/media/job`, `UploadStore.ingest`),
+`tests/prime-studio-results-ui.test.ts` (Studio `<img>`/`<video>`/`<audio>` results, polling, length control,
+cleared results, 403, tool artifacts, client/server request parity).
 
 ## 10. Logging
 
 `debuglog('echo-prime')` (`NODE_DEBUG=echo-prime`) events: `prime_media_routed`, `prime_media_catalog`, `prime_media_classifier_failed`,
-`prime_media_probe_failed`, `prime_enhance_started`, `prime_enhance_finished`, `prime_enhance_refused`. None of
+`prime_media_probe_failed`, `prime_media_outcome`, `prime_media_job_finished`, `prime_media_outcomes_write_failed`,
+`prime_upload_ingest_refused`, `prime_enhance_started`, `prime_enhance_finished`, `prime_enhance_refused`. None of
 these log the prompt text itself.
+
+## 11. Runnable picks, request shapes and results (2026-11-06)
+
+The live end-to-end test on 2026-11-06 found image, video, music, sound effects and voice producing nothing usable.
+This section is what changed and why.
+
+**Request shapes come from the registry.** `buildArguments` builds an `ArgumentTemplate` per capability and
+`materialize(template, brief, seconds)` turns it into the exact request. `arcanum_sdk.sdk_capabilities` (read
+2026-11-06) says how each family takes arguments, and the gate (`routers/sdk_invoke.py`) validates the *top-level*
+params against `input_schema_json` and strips `options` before an `http` POST:
+
+| Family | Registry | Envelope |
+|---|---|---|
+| `echo.voice.speak`, `echo.elevenlabs.tts`, `echo.cartesia.tts`, `echo.voice.*`, `echo.aws.polly_tts`, `echo.media.*_generate`, `echo.image.generate`, `echo.fal.generate` | `handler_kind=http`, `args_mode=json_body`, `required:["text"]` / `["prompt"]` | flat: `{"text": "…"}` |
+| `echo.elevenlabs.<group>.<op>` (music, sound effects) | `handler_kind=router` → `/sdk/elevenlabs/op/<group>/<op>`; `elevenlabs_full.py` forwards the body to ElevenLabs verbatim | flat: `{"prompt": "…", "music_length_ms": 20000}` |
+| `echo.llm.*` | `handler_kind=router` → `/sdk/llm/dispatch`; `llm_router.py` reads top-level fields first, then `options` | `{"command": "call", "prompt": "…", "seconds": "5"}` |
+| anything else | the live record (`echo.caps.detail`: `handler_kind`, `params`) when the router read it | `http` → flat; `router` → the fleet's dual `{command, …fields, options:{…fields}}`, flagged `unmodeled` |
+
+The router reads the live record of the seven tools it shows (pick + six alternatives) and uses its
+`handler_kind` and parameter names. `ui/echo-prime/integrations.js` has the same rules (`templateFor`,
+`materialize`) for a tool picked by hand; `tests/prime-studio-results-ui.test.ts` checks both build identical
+requests. Lengths: Together video `seconds` as a string `"1"`–`"10"` (docs.together.ai video parameters),
+ElevenLabs `music_length_ms` 3,000–600,000 (ElevenLabs compose music) and `duration_seconds` 0.5–30 (ElevenLabs
+sound effects), the on-prem video router's `length` frames at an `fps` (5–129 frames). The Studio shows a
+"Length in seconds" control for those tools; the router fills it from the brief ("5 seconds") or the route's
+`durationSeconds`.
+
+**Only tools the gate can run are offered.** `executability()`:
+- An `echo.llm.*` generator must name a *media* call kind (`*_image_generation`, `*_video_generation`,
+  `*_audio_speech`). Every chat kind returns text: `llm_router.py` has no image, video or audio output path, so the
+  OpenRouter image models (`openai_compat`) and the Together `dedicated_endpoint` video/voice rows cannot return a
+  file and are listed under `excluded` with that reason.
+- That call kind must be one the gate runs: the Prime config `media.gateCallKinds` (default: the seven kinds
+  `llm_router.py:_call_once` dispatches on 2026-11-06), or a kind a real run succeeded with. A gate answer
+  `unsupported call_kind 'X'` excludes kind X for 12 hours, then it is tried again. So when the gate gains a
+  Together image handler, adding `together_image_generation` to `media.gateCallKinds` (or one successful hand-picked
+  run in the Studio tool list) brings those tools back; nothing else changes.
+
+**Recent outcomes rank tools lower** (`src/prime/media-outcomes.ts`). Every Studio execution is recorded per
+capability (bounded: 300 capabilities, 50 call kinds; persisted to `media.outcomesFile`, default
+`<code-state-dir>/prime-media-outcomes.json`; category, a redacted reason of at most 200 characters, time and counts,
+never a prompt). A billing (402, "never purchased credits") or auth failure (401/403, expired sign-in, missing
+scope) multiplies the score by 0.2 for 24 hours unless the tool succeeds again; a billing refusal counts for every
+tool of the same provider (one account pays for them all). Other failures weigh 0.5–0.85. The reason is in the
+pick's and each alternative's `reason` ("ranked lower: …") and in `demoted`; the Studio badges it ("last run:
+billing").
+
+**Executions are server-side jobs** (`src/prime/media-jobs.ts`). `/api/execute` answers within `media.inlineMs`
+(20 s; the public proxy cuts a request at 100 s). A call still running continues in Prime, bounded per kind by
+`media.invokeTimeoutsMs` (image 180 s, video 300 s, music 300 s, sfx 120 s, voice 90 s, other 20 s; Prime passes the
+limit to the SDK bridge as `timeout_ms` and to its MCP wait). An answer with a `job_id` and a pending status is
+polled through the gate with backoff (2 s × 1.6 to 20 s) up to `media.jobWallMs` (15 min): `echo.media.*_generate`
+through `echo.media.job_status` (invoked directly: the registry marks it orphaned because its prober posts `{}` and
+gets 404). A provider job with no status capability (Together video today) ends `submitted` with `howToCheck`: the
+provider job id, the request id and where to look, never "Outcome unknown". The browser follows a running request
+with `POST /api/prime/media/job {"requestId": "<id from the review ticket>"}` (owner-only; 404 for an unknown id),
+backing off 2 s to 10 s.
+
+**Results are files, not JSON** (`src/prime/media-collect.ts`). A finished answer's media is found in nested bodies
+(`audio_base64`, `b64_json`, data URLs, `path`, `audio_url`, `video_url`, `outputs.video_url`, `image_urls[]`, …) and
+read server-side under a strict allowlist: inline bytes; a local path under `media.localRoots`; a relative URL
+resolved against the loopback/LAN origin `media.origins` maps to the capability prefix (and only that origin); an
+absolute URL on a configured origin, or HTTPS on a host in `media.fetchHosts` (default Together's
+`api.together.ai`, `api.together.xyz`). Redirects are followed by hand (at most 3), each hop checked again; the
+response type must be an image, video or audio type; the bytes must sniff as the same medium; the size is capped at
+`min(media.maxBytes, uploads.maxBytes)`. The bytes are stored through `UploadStore.ingest` (the same checks as a
+browser upload) and registered as an Artifact Center record with `upload_id`, titled and provenanced with the actual
+brief. The Studio renders `<img>`, `<video controls>` or `<audio controls>` from `/api/prime/uploads/<id>/file` (the
+page's `img-src/media-src 'self'` policy allows nothing else), plus the provider answer (long base64 replaced by its
+length) as untrusted data.
+
+**A refused request is not a sign-out.** `integrations.js`, `media-router.js` and `library.js` no longer call
+`EchoPrimeWorkspace.invalidate()` on a 401/403. They call `EchoPrimeWorkspace.recheck()`, a fresh `/api/session`
+read past the 10 s memo; the page changes only when that readback says signed out or another account, and a failed
+read changes nothing. The refusal text is shown.
+
+**Enhance** skips, when it picks the default provider, any provider whose last Enhance failed sign-in or said it is
+unavailable (`/api/prime/models` → `enhance.failures`, kept by `PromptEnhancer` until that provider answers again,
+plus failures seen on this page), says which it skipped, and after a sign-in failure selects the next available
+provider for the next press. The success note names the provider and model used.
+
+`media` config section (all optional; unknown keys refused):
+
+```json
+"media": {
+  "gateCallKinds": ["openai_compat", "dedicated_endpoint", "together_audio_transcription", "anthropic_api", "vertex_generate", "anthropic_cli", "grok_cli"],
+  "outcomesFile": "/home/forge/prime-prod/media-outcomes.json",
+  "inlineMs": 20000, "jobWallMs": 900000,
+  "invokeTimeoutsMs": {"image": 180000, "video": 300000, "music": 300000, "sfx": 120000, "voice": 90000, "other": 20000},
+  "localRoots": ["/home/forge/echo-media/out"],
+  "origins": [{"prefix": "echo.cartesia.", "origin": "http://127.0.0.1:8302"}, {"prefix": "echo.elevenlabs.tts", "origin": "http://127.0.0.1:8282"}],
+  "fetchHosts": ["api.together.ai", "api.together.xyz"],
+  "maxBytes": 209715200, "fetchTimeoutMs": 60000
+}
+```

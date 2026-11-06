@@ -9,7 +9,10 @@ import {SwarmError,type SwarmClient} from './swarm.js';
 import {VoiceError,type VoiceClient} from './voice.js';
 import {ADK_MAX_STEPS_CEILING,AdkError,type AdkClient} from './agents.js';
 import {VideoAgentError,discoverVideoCatalog,offlineCatalog,parseVideoRequest,parseVideoRun,planVideo,resolveVideoInputs,videoAgentDefinition,videoRunPrompt,type VideoCatalog} from './videoagent.js';
-import {MediaRouter} from './media.js';
+import {MediaRouter,callKindOf,describeCandidate} from './media.js';
+import {MediaCollector,defaultMediaConfig,type InvokeKind,type MediaConfig} from './media-collect.js';
+import {MediaJobs,type JobDescribe} from './media-jobs.js';
+import {MediaOutcomes} from './media-outcomes.js';
 import {PromptEnhancer} from './enhance.js';
 import {WorkspaceHttpError} from './workspace.js';
 import {BotsError,type BotsClient} from './bots.js';
@@ -25,12 +28,13 @@ import {type AutonomyEvents,envelope} from '../code/tools/autonomy.js';
 const debugOwnerResponse=debuglog('echo-prime');
 export type Json=Record<string,unknown>;
 export interface Tool {name:string;description?:string;inputSchema:Json}
-export interface McpConnection {listTools():Promise<Tool[]>;call(name:string,args:Json):Promise<unknown>}
+export interface McpConnection {listTools():Promise<Tool[]>;call(name:string,args:Json,options?:{timeoutMs?:number}):Promise<unknown>}
 export interface Capability {id:string;registered:boolean;health:string;scope?:string;tier?:number;category:string;description:string}
 export interface SdkBroker {
  search(query:string):Promise<Capability[]>;
  read(capability:string):Promise<unknown>;
- invoke(request:{capability:string;params:Json;reason:string;idempotency_key:string}):Promise<unknown>;
+ /** `timeoutMs` is how long this one call may take end to end (Prime's MCP wait and the bridge's gate wait). */
+ invoke(request:{capability:string;params:Json;reason:string;idempotency_key:string},options?:{timeoutMs?:number}):Promise<unknown>;
 }
 export interface PrimeRequest {target:'sdk'|'esh';name:string;arguments:Json}
 export interface PrimeOptions {
@@ -49,6 +53,12 @@ export interface PrimeOptions {
  autoagents?:AutoAgents;
  uploads?:UploadStore;
  uploadsOwner?:string;
+ /** The reviewed `media` section (call kinds the gate runs, time limits, where generated files may be read from). */
+ mediaConfig?:MediaConfig;
+ /** Recent real executions, used by the media router to stop offering tools that cannot run. */
+ outcomes?:MediaOutcomes;
+ /** Seams for tests: the HTTP client media files are fetched with, and the clock/sleep job polling uses. */
+ mediaFetch?:typeof fetch;mediaClock?:{now:()=>number;sleep:(ms:number)=>Promise<void>};
  /** Always-on live tools for model turns (web, Wolfram, Echo knowledge/memory, skills, MCP); owner toggles per family. */
  tools?:ToolKit;
  build?:BuildRunner;
@@ -143,8 +153,10 @@ export class PrimeHub {
  async models(){
   const router=this.options.models;
   const buildInfo=this.options.build?{buildProviders:await this.options.build.models()}:{};
-  if(!router)return {configured:false,routing:false,default:null,contextTokens:null,providers:[],...buildInfo};
-  return {configured:true,routing:this.options.chat?.status().routing===true,...await bounded(()=>router.report(),30000),...buildInfo};
+  // The last Enhance failure per provider (an expired CLI sign-in, an unavailable provider): the Enhance chip skips them.
+  const enhance={failures:(this.enhancer??this.options.enhancer)?.failures?.()??{}};
+  if(!router)return {configured:false,routing:false,default:null,contextTokens:null,providers:[],enhance,...buildInfo};
+  return {configured:true,routing:this.options.chat?.status().routing===true,...await bounded(()=>router.report(),30000),enhance,...buildInfo};
  }
  buildHealth(){return this.options.build?.health()??{configured:false,available:false,reason:'Echo Build is off: add a reviewed build section with root and engines to the Prime config'};}
  private buildRunner(){if(!this.options.build)throw new BuildError(503,'Echo Build is off: add a build section to the Prime config');return this.options.build;}
@@ -367,7 +379,7 @@ export class PrimeHub {
   this.media??=this.options.media??new MediaRouter({catalog:()=>this.capabilities(),read:sdk?id=>bounded(()=>sdk.read(id),8000).then(unwrap):undefined,
    search:sdk?query=>sdk.search(query):undefined,
    onDiscovered:rows=>{for(const c of rows){if(!/^echo\.[A-Za-z0-9_.-]+$/.test(c.id))continue;const old=this.catalog.get(c.id);this.catalog.set(c.id,old?{...old,registered:c.registered,health:c.health==='unknown'&&old.health?old.health:c.health}:{...c});}},
-   models:this.options.models});
+   outcomes:this.outcomes(),callKinds:this.mediaConfig().gateCallKinds,models:this.options.models});
   return this.media.route(input,signal);
  }
  /** Enhance prompt on exactly the chosen provider through the reviewed model router. No router = the feature is off (503). */
@@ -376,6 +388,44 @@ export class PrimeHub {
   this.enhancer??=this.options.enhancer??new PromptEnhancer(this.options.models!);
   return this.enhancer.enhance(input,sessionKey,signal);
  }
+ private mediaConfig(){return this.options.mediaConfig??defaultMediaConfig();}
+ private outcomeStore?:MediaOutcomes;
+ /** Real execution outcomes (the configured store, or an in-memory one for this process). */
+ outcomes(){return this.outcomeStore??=this.options.outcomes??new MediaOutcomes();}
+ private jobs?:MediaJobs;
+ /** Kind, provider, label and call kind of a capability, from this hub's catalog (live rows included). */
+ private describeCapability(id:string):JobDescribe{
+  const c=this.catalog.get(id)??{id,registered:true,health:'unknown',category:'tools',description:''};
+  const cand=describeCandidate(c),kind=cand?.kinds[0];
+  const invokeKind:InvokeKind=kind&&kind!=='chat'?kind:'other';
+  return {kind:invokeKind,provider:cand?.provider??(id.split('.')[1]||'unknown'),label:cand?.label??id.replace(/^echo\./,''),...(callKindOf(c)?{callKind:callKindOf(c)}:{})};
+ }
+ private mediaJobs(){
+  const sdk=this.options.sdk!,config=this.mediaConfig();
+  return this.jobs??=new MediaJobs({config,outcomes:this.outcomes(),uploads:this.options.uploads,owner:this.options.uploadsOwner??'local',
+   collector:new MediaCollector({config,fetch:this.options.mediaFetch,maxBytes:this.options.uploads?.config.maxBytes}),
+   describe:id=>this.describeCapability(id),now:this.options.mediaClock?.now,sleep:this.options.mediaClock?.sleep,
+   invoke:async(capability,params,key,reason,timeoutMs)=>{
+    try{
+     const raw=await bounded(()=>sdk.invoke({capability,params,reason,idempotency_key:key},{timeoutMs}),timeoutMs+10000);
+     const result=unwrap(raw);limited(result,1048576);
+     return {ok:true,body:object(result)};
+    }catch(e){
+     const detail=e instanceof Error?redact(e.message).slice(0,600):'Owner call failed';
+     // The bridge reports its own gate timeout as a failure text; that is an unknown outcome, not a refusal.
+     return {ok:false,refused:e instanceof Refused&&!/outcome unknown|timed out/i.test(detail),detail};
+    }
+   }});
+ }
+ /** State of a Studio request this Prime executed (by the request id from its review ticket). */
+ mediaJob(input:unknown){
+  const requestId=object(input).requestId;
+  const view=this.jobs&&typeof requestId==='string'?this.jobs.status(requestId):undefined;
+  if(!view)throw new WorkspaceHttpError(404,'No Studio request with that ID is known to this Prime (it may have restarted). Check the gate execution log before submitting again.');
+  return view;
+ }
+ /** Test hook: resolves when a background Studio request has finished. */
+ mediaJobSettled(requestId:string){return this.jobs?.settled(requestId)??Promise.resolve();}
  async refresh(query:string){
   if(!this.options.sdk)throw new Refused('SDK host not connected');
   if(typeof query!=='string'||!query.trim()||query.length>150)throw new Refused('Enter a bounded search');
@@ -446,11 +496,14 @@ export class PrimeHub {
   if(!ticket||ticket.expiresAt<Date.now()||ticket.digest!==hash)throw new Refused('Review the current exact request before execution');
   if(ticket.submitted)throw new Refused('Request already submitted; inspect the original receipt before any retry');
   ticket.submitted=true;
+  // SDK requests run as server-side jobs: long generations keep going after this response, async provider jobs are
+  // followed, and a finished media file is stored and registered (media-jobs.ts). ESH keeps its bounded receipt path.
+  if(ticket.request.target==='sdk')return this.mediaJobs().execute(ticket.requestId,ticket.request.name,ticket.request.arguments) as Promise<{state:string;requestId:string;detail?:string;result?:unknown;untrusted?:boolean}>;
   try{
    const r=ticket.request;
-   const raw=await bounded(()=>r.target==='sdk'?this.options.sdk!.invoke({capability:r.name,params:r.arguments,reason:'Explicitly reviewed ECHO Prime request',idempotency_key:ticket.requestId}):this.options.esh!.call(r.name,{...r.arguments,...(!eshReads.has(r.name)?{idempotency_key:ticket.requestId}:{})}));
-   const result=r.target==='esh'?envelope(raw):unwrap(raw);limited(result,1048576);const body=object(result);
-   if(r.target==='esh'&&(body.ok===false||body.isError===true||['denied','gated','blocked'].includes(String(body.verdict))))return {state:'blocked',requestId:ticket.requestId,result,untrusted:true,detail:String(body.reason??'ESH owner refused the request')};
+   const raw=await bounded(()=>this.options.esh!.call(r.name,{...r.arguments,...(!eshReads.has(r.name)?{idempotency_key:ticket.requestId}:{})}));
+   const result=envelope(raw);limited(result,1048576);const body=object(result);
+   if(body.ok===false||body.isError===true||['denied','gated','blocked'].includes(String(body.verdict)))return {state:'blocked',requestId:ticket.requestId,result,untrusted:true,detail:String(body.reason??'ESH owner refused the request')};
    return {state:body.job_id&&!['completed','succeeded','done'].includes(String(body.status))?'submitted':'returned',requestId:ticket.requestId,result:JSON.parse(redact(JSON.stringify(result))),untrusted:true};
   }catch(e){return {state:e instanceof Refused?'blocked':'uncertain',requestId:ticket.requestId,detail:e instanceof Refused?e.message:'Connection interrupted or timed out; outcome unknown. Inspect the owner using this request ID before retrying.'};}
  }

@@ -50,11 +50,17 @@
    if(epoch!==this.sessionEpoch)return this.session;
    // An interrupted caller learns nothing about the account, so the identity it already holds stays as it is.
    if(signal?.aborted)throw new Error('Session read interrupted.');
+   return this.#accept(value);
+   }catch(error){if(epoch===this.sessionEpoch&&!signal?.aborted&&!(signal?.recovering&&error?.transport===true)){const proof=this.#logoutProof||this.session?.csrf;this.clear();this.#logoutProof=proof;}throw error;}
+  }
+  #accept(value){
    const changed=(this.session?.user?.uid??null)!==(value.user?.uid??null)||!!this.session?.authenticated!==!!value.authenticated||this.session?.user?.status!==value.user?.status||!!this.session?.ownerAccess!==!!value.ownerAccess;
    this.session=value;this.#logoutProof=value.authenticated?value.csrf:null;if(changed){this.generation++;this.onIdentityChange(value);}
    return value;
-   }catch(error){if(epoch===this.sessionEpoch&&!signal?.aborted&&!(signal?.recovering&&error?.transport===true)){const proof=this.#logoutProof||this.session?.csrf;this.clear();this.#logoutProof=proof;}throw error;}
   }
+  // A fresh /api/session read after one refused request (a 401/403 from a Prime route). It changes the page only when the
+  // readback differs (signed out, another account); a failed read changes nothing, so one refusal never signs anyone out.
+  async refresh(){forget();const epoch=++this.sessionEpoch,value=await readSession(this.fetch);return epoch===this.sessionEpoch?this.#accept(value):this.session;}
   async _response(path,body,signal,auth=false){
    if(typeof path!=='string'||path.length>1200||!/^\/[a-z0-9_/?=&%.+-]+$/i.test(path)||path.includes('..'))throw new Error('Invalid Workspace route.');
    const logout=path==='/auth/logout'&&body!==undefined;

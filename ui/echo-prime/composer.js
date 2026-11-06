@@ -121,7 +121,9 @@
    const file=(b.state.data?.library||[]).find(item=>item.id===id);
    const upload=!file?window.EchoPrimeLibrary?.uploadById?.(id):null;
    const labelName=file?.name||upload?.name||'File';
-   const chip=action(labelName+' ×',now=>{now.state.attachments.delete(id);now.updateContext();},'chip');
+   const chip=action(labelName+' ×',now=>{now.state.attachments.delete(id);now.updateContext();
+    // The "Attached <file> to your next message." notice goes with the file it names.
+    const notice=$('#draft-notice');if(notice&&notice.textContent==='Attached '+labelName+' to your next message.'){notice.textContent='';notice.hidden=true;}},'chip');
    if(upload?.kind==='image'){
     const img=el('img',{class:'chip-thumb',src:`/api/prime/uploads/${encodeURIComponent(upload.id)}/file?thumb=1`,alt:''});
     if(typeof chip.prepend==='function')chip.prepend(img);else{img.parent=chip;chip.children.unshift(img);}

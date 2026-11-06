@@ -49,6 +49,7 @@ function gateHandler(req: IncomingMessage, res: ServerResponse): void {
       return;
     }
     if (capability === 'echo.test.ok') { send(200, okEnvelope({ ok: true, answer: 42 })); return; }
+    if (capability === 'echo.test.slow') { setTimeout(() => send(200, okEnvelope({ ok: true, slow: true })), 1500); return; }
     if (capability === 'echo.test.denied') { send(200, okEnvelope({ ok: false, error: 'scope forbidden', required: 'tier:2' }, 403)); return; }
     if (capability === 'echo.test.failbody') { send(200, okEnvelope({ ok: false, error: 'domain said no' }, 200)); return; }
     if (capability === 'echo.test.statusfail') { send(200, JSON.stringify({ run_id: 'r1', status: 'failed', warnings: ['the run failed'] })); return; }
@@ -158,6 +159,19 @@ describe('prime sdk bridge', () => {
     expect(lastRequest?.capability).toBe('echo.test.ok');
     expect(lastRequest?.params).toEqual({ command: 'go', options: { x: 1 } });
     expect(lastRequest?.context).toMatchObject({ reason: 'because', idempotency_key: 'k1', link_id: 'fixture-account' });
+  }, 20000);
+
+  it('invoke applies the caller timeout_ms to the gate call and never forwards it to the gate', async () => {
+    await broker.invoke({ capability: 'echo.test.ok', params: {}, reason: 'r', idempotency_key: 'k9' }, { timeoutMs: 120000 });
+    expect(lastRequest?.context.timeout_ms).toBeUndefined();
+    expect(lastRequest?.context).toMatchObject({ idempotency_key: 'k9' });
+    const raw = await broker.invoke({ capability: 'echo.test.slow', params: {}, reason: 'r', idempotency_key: 'k10' }, { timeoutMs: 1000 });
+    expect(() => unwrap(raw)).toThrow(/timed out; outcome unknown/);
+  }, 20000);
+
+  it('invoke returns a slow call that finishes within the caller wait', async () => {
+    const raw = await broker.invoke({ capability: 'echo.test.slow', params: {}, reason: 'r', idempotency_key: 'k11' }, { timeoutMs: 5000 });
+    expect(unwrap(raw)).toEqual({ ok: true, slow: true });
   }, 20000);
 
   it('invoke sets bypass_reason when the reason is long enough for a tiered cap', async () => {
