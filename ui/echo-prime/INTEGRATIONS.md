@@ -2,7 +2,7 @@
 
 ECHO Prime now has a local interface host, an ESH stdio connection, and a host-injected authenticated SDK broker. The creative catalog contains 183 registry capabilities across image, video, music, sound, voice and production tools. This is registry coverage, not 183 verified generation services.
 
-The source snapshot includes NSFW-capable model metadata for Illustrious XL, NoobAI XL, Juggernaut and Wan2.2 TI2V-5B. Model listings are visible by default. No generation, provider purchase, policy change or NSFW content generation was performed during integration.
+The source snapshot includes NSFW-capable model metadata for Illustrious XL, NoobAI XL, Juggernaut and Wan2.2 TI2V-5B. Model listings are visible by default (a listing filter only; it does not switch anything on). Adult generation is a separate, off-by-default Studio switch ("Adult mode") that runs only on the on-prem media router; see docs/echo-code/PRIME_MEDIA_ROUTER.md section 12. No generation, provider purchase, policy change or NSFW content generation was performed during integration.
 
 ## Start
 
