@@ -219,8 +219,10 @@
  /** Follows a running request by its id until it ends (returned, blocked, uncertain or submitted-but-unfollowable),
   *  backing off from 2 s to 10 s, never past Prime's own deadline. */
  async function follow(first,epoch,prompt){
-  let r=first,wait=2000,misses=0;const until=(Date.parse(first.job?.deadline||'')||Date.now()+900000)+60000;
+  // The deadline moves when the call becomes a followed provider job (invoke limit -> job wall), so each answer resets it.
+  let r=first,wait=2000,misses=0,until=(Date.parse(first.job?.deadline||'')||Date.now()+900000)+60000;
   while(epoch===generation&&r.state==='running'){
+   const deadline=Date.parse(r.job?.deadline||'');if(Number.isFinite(deadline))until=deadline+60000;
    if(Date.now()>until){r={...r,state:'uncertain',detail:'Prime did not report a result by its own deadline. Check request ID '+first.requestId+' in Library or the gate execution log before submitting again.'};break;}
    await new Promise(resolve=>setTimeout(resolve,wait));wait=Math.min(10000,Math.round(wait*1.5));
    if(epoch!==generation)return null;

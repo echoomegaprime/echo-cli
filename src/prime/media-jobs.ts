@@ -90,6 +90,8 @@ export class MediaJobs {
  }
  private finish(job:Job,state:JobState,detail?:string){
   job.state=state;job.phase='done';job.updatedAt=this.now();if(detail)job.detail=detail;
+  // The file (if any) is stored by now: keep only the compact answer, so 200 remembered jobs never hold base64 bodies.
+  if(job.result)job.result=compact(job.result) as Json;
   const failedBody=state==='returned'&&typeof job.result?.error==='string'&&!job.media;
   // A media tool that answered with no file, inline data or link did not deliver; a file Prime itself could not read
   // (allowlist, uploads off) is Prime's configuration, not the tool's failure.

@@ -168,6 +168,15 @@ describe('Studio executions as server-side jobs',()=>{
   expect(art).toMatchObject({kind:'voice',upload_id:r.media.uploadId,title:'Cartesia TTS: Hello Commander, Echo Prime is online.',provenance:{source:'studio',capability:'echo.cartesia.tts',prompt:'Hello Commander, Echo Prime is online.'}});
   expect(hub.outcomes().last('echo.cartesia.tts')).toMatchObject({category:'ok'});
  });
+ it('stores ElevenLabs inline audio from the op router and keeps only the compact answer, not the base64 body',async()=>{
+  const audio=Buffer.concat([mp3(),Buffer.alloc(6000,9)]);
+  const {hub}=hubWith(async()=>({status:'ok',capability:'echo.elevenlabs.sound_generation.sound_generation',content_type:'audio/mpeg',bytes:audio.length,audio_base64:audio.toString('base64')}),
+   {catalog:[cap('echo.elevenlabs.sound_generation.sound_generation',{category:'sound',description:'text -> sound effect'})]});
+  const r=await run(hub,'echo.elevenlabs.sound_generation.sound_generation',{text:'thunder rolling across distant mountains',duration_seconds:5});
+  expect(r).toMatchObject({state:'returned',kind:'sfx',media:{type:'audio/mpeg',bytes:audio.length}});
+  expect(r.result.audio_base64).toMatch(/^\[\d+ characters of base64/);
+  expect(JSON.stringify(hub.mediaJob({requestId:r.requestId})).length).toBeLessThan(3000);
+ });
  it('follows an on-prem image job through echo.media.job_status with backoff and stores the PNG from the media out directory',async()=>{
   const out=tmp('prime-media-jobs-');writeFileSync(join(out,'image_abc.png'),png(16,12));
   const clock=fakeClock(),statuses=['queued','running','done'];
