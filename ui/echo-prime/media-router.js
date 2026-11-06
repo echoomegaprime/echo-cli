@@ -154,7 +154,7 @@
   const mode=state.options.mode(),chosen=provider,current=generation;
   busy=true;state.busy=true;renderEnhance();state.note.hidden=false;state.note.textContent='Asking '+(LABELS[chosen]||chosen)+' to enhance this '+(mode==='auto'?'prompt':(ARTICLE[mode]||'a').replace(/^an? /,'')+' prompt')+'…';
   try{
-   const result=await api('prime/enhance',{mode,text,provider:chosen},125000);
+   const result=await api('prime/enhance',{mode,text,provider:chosen,...(adultOn()?{adult:true}:{})},125000);
    if(current!==generation)return;
    if(!result||typeof result.text!=='string'||!result.text.trim())throw new Error('The provider returned no text; nothing was changed.');
    const live=state.options.textarea();if(!live)return;

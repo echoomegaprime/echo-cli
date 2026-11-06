@@ -11,7 +11,7 @@ import {VoiceError,type VoiceClient} from './voice.js';
 import {ADK_MAX_STEPS_CEILING,AdkError,type AdkClient} from './agents.js';
 import {VideoAgentError,discoverVideoCatalog,offlineCatalog,parseVideoRequest,parseVideoRun,planVideo,resolveVideoInputs,videoAgentDefinition,videoRunPrompt,type VideoCatalog} from './videoagent.js';
 import {MediaRouter,callKindOf,describeCandidate} from './media.js';
-import {ADULT_NODE,adultFlagsOf,adultPolicy,isRouterCap,promptOfArguments} from './adult.js';
+import {ADULT_NODE,VIDEO_AGENT_ADULT,adultFlagsOf,adultKindOf,adultPolicy,classifyAdult,isRouterCap,textOfArguments} from './adult.js';
 import {MediaCollector,defaultMediaConfig,mediaSaveDir,type InvokeKind,type MediaConfig} from './media-collect.js';
 import {MediaJobs,type JobDescribe} from './media-jobs.js';
 import {MediaOutcomes} from './media-outcomes.js';
@@ -246,6 +246,10 @@ export class PrimeHub {
  }
  private async videoMaterial(input:unknown,signal?:AbortSignal){
   const material=parseVideoRequest(input);
+  // The video agent builds on cloud providers (shot prompts to cloud video, voice-over text to cloud TTS), so an adult brief
+  // never goes through it; adult video is the Studio's Adult mode on the on-prem router.
+  const written=[material.brief,material.style,...material.shots.flatMap(shot=>[shot.prompt,shot.camera,shot.motion,shot.voiceover])].filter(v=>typeof v==='string'&&v).join(' | ');
+  if(classifyAdult(written,{markers:this.options.adultMarkers}).adult)throw new VideoAgentError(400,VIDEO_AGENT_ADULT);
   const [inputs,catalog]=await Promise.all([resolveVideoInputs(material.inputs,this.options.uploads,this.options.uploadsOwner??'local'),this.videoCatalog(signal)]);
   return {material,plan:planVideo(material,inputs,catalog)};
  }
@@ -499,12 +503,16 @@ export class PrimeHub {
  }
  /** The server-side gate for adult briefs, whichever way the request was made (Auto pick, a manual pick, edited JSON): an adult
   * brief or an explicit adult flag is refused before any call unless it is bound for the on-prem media router, attested as
-  * fictional adults, and pinned to TEMPER. The keyword classifier decides only for pictures and video; an explicit flag decides
+  * fictional adults, and pinned to TEMPER. The keyword classifier decides for every tool except a short read-only list (search,
+  * list, status, voices...), so a cloud generator, a cloud voice or an id nobody listed is checked too; an explicit flag decides
   * for every tool. Refusals name what to change and say nothing was sent. */
  private adultGate(request:PrimeRequest){
-  const args=request.arguments,{flagged,fictional}=adultFlagsOf(args),kind=this.describeCapability(request.name).kind;
+  const args=request.arguments,{flagged,fictional}=adultFlagsOf(args);
+  // What the tool is: the ranking table's kind, else the catalog category, else its id; a read-only tool ('other') takes no brief.
+  const kind=adultKindOf(request.name,this.describeCapability(request.name).kind,this.catalog.get(request.name)?.category);
   if(!flagged&&kind==='other')return;
-  const policy=adultPolicy({text:promptOfArguments(args),flagged,fictional,kind,capability:request.name,markers:this.options.adultMarkers});
+  // Every string leaf of the request is the brief (a nested `input.prompt`, `items[].text`, `brief`...), not just `prompt`.
+  const policy=adultPolicy({text:textOfArguments(args),flagged,fictional,kind,capability:request.name,markers:this.options.adultMarkers});
   if(policy.refusal)throw new Refused(policy.refusal.message);
   if(!policy.adult||!isRouterCap(request.name))return;
   if(args.inputs!==undefined&&!(Array.isArray(args.inputs)&&args.inputs.length===0))throw new Refused('Adult mode does not take reference uploads, because an uploaded picture can show a real person. Remove them and send again; nothing was sent.');

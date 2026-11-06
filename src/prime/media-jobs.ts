@@ -4,7 +4,7 @@ import type {Json} from './hub.js';
 import {MediaCollector,TYPE_EXT,findMedia,type InvokeKind,type MediaConfig} from './media-collect.js';
 import type {MediaOutcomes} from './media-outcomes.js';
 import type {ArtifactKind,UploadStore} from './uploads.js';
-import {adultFlagsOf,isRouterCap,promptOfArguments} from './adult.js';
+import {adultFlagsOf,isRouterCap,isRouterPolicyRefusal,promptOfArguments} from './adult.js';
 /**
  * One reviewed Studio execution, followed to the end on the server. The execute request answers within `inlineMs`
  * (the public proxy cuts a request at 100 s); a call still running continues here, bounded by the per-kind invoke limit,
@@ -34,7 +34,7 @@ export interface JobMedia {uploadId:string;artifactId?:string;url:string;type:st
 export type MediaErrorKind='no_media'|'unreadable';
 interface Job {
  requestId:string;capability:string;describe:JobDescribe;arguments:Json;prompt:string;
- /** An adult request on the on-prem router: its refusals are the router's policy at work, not the tool failing, so they never count against it. */
+ /** An adult request on the on-prem router: its policy refusals (not its real failures) are the router's policy at work, so they never count against the tool. */
  adult:boolean;/** What the router named, kept from the submit answer and refreshed by each status answer (an older router's status may omit it). */
  used?:Json;state:JobState;phase:'invoking'|'polling'|'collecting'|'done';
  startedAt:number;deadline:number;updatedAt:number;polls:number;detail?:string;result?:Json;providerJobId?:string;providerStatus?:string;
@@ -129,7 +129,10 @@ export class MediaJobs {
   // A media tool that answered with no file, inline data or link did not deliver; a file Prime itself could not read
   // (allowlist, uploads off) is Prime's configuration, not the tool's failure.
   const noFile=state==='returned'&&job.mediaErrorKind==='no_media';
-  if(options.record!==false&&!(job.adult&&state==='blocked'))this.deps.outcomes?.record({cap:job.capability,provider:job.describe.provider,state:failedBody||noFile?'blocked':state,detail:failedBody?String(job.result!.error):noFile?job.mediaError??'answered without a media file':job.detail??'',callKind:job.describe.callKind});
+  // The router's policy and busy answers (a 400/404/409, "busy, try again") say nothing about whether the tool works; a real
+  // failure of an adult job (out of memory, execution error) is recorded like any other.
+  const policyRefusal=job.adult&&state==='blocked'&&isRouterPolicyRefusal(job.detail??'');
+  if(options.record!==false&&!policyRefusal)this.deps.outcomes?.record({cap:job.capability,provider:job.describe.provider,state:failedBody||noFile?'blocked':state,detail:failedBody?String(job.result!.error):noFile?job.mediaError??'answered without a media file':job.detail??'',callKind:job.describe.callKind});
   debug('%j',{event:'prime_media_job_finished',requestId:job.requestId,capability:job.capability,state,polls:job.polls,media:!!job.media,mediaError:job.mediaErrorKind??null,recorded:options.record!==false,durationMs:this.now()-job.startedAt});
  }
  /** A non-media answer is the tool's real output (the Studio saves it to Library), so it is kept whole; only the most

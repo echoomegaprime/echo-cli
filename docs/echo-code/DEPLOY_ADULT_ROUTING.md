@@ -7,14 +7,15 @@ environment variable, no secret, no router change, nothing on TEMPER. Design and
 
 | File | Change |
 |---|---|
-| `src/prime/adult.ts` | New. Classifier, policy, pre-route refusals, the fields an adult request carries |
+| `src/prime/adult.ts` | New. Classifier (term families and inflections), policy, pre-route refusals (minors, real people, audio), argument scanning, capability kinds, the fields an adult request carries |
 | `src/prime/media.ts` | `route` takes `adult`, `fictional`, `style`; `rankCandidates({adult})`; adult request template |
-| `src/prime/hub.ts` | `prepare` gate (`adultGate`), `adultMarkers` test seam |
-| `src/prime/media-jobs.ts` | `used` (model, node, backend as the router named them); adult refusals not recorded against the tool |
-| `src/prime/enhance.ts` | Enhance refuses an adult picture/video brief (cloud model) |
+| `src/prime/hub.ts` | `prepare` gate (`adultGate`: every media tool and every non-read-only tool, every string leaf of the arguments), video-agent adult refusal, `adultMarkers` test seam |
+| `src/prime/media-jobs.ts` | `used` (model, node, backend as the router named them); the router's policy and busy answers are not recorded against the tool, real failures are |
+| `src/prime/enhance.ts` | Enhance refuses an adult picture/video brief and, on the new `adult` body field, anything but chat (cloud model); `auto` resolves the kind first |
 | `ui/echo-prime/integrations.js` | Adult mode control, attestation gate, router-only tool list, model-used badge |
-| `ui/echo-prime/media-router.js` | Route request carries the adult state; composer never hands an adult brief to chat; Enhance off; no next-best offer |
+| `ui/echo-prime/media-router.js` | Route and Enhance requests carry the adult state; composer never hands an adult brief to chat; Enhance off; no next-best offer |
 | `ui/echo-prime/media.css`, `index.html` | Styles; the older listing toggle relabelled "listing only" |
+| `tests/prime-adult-hardening.test.ts` | The review-round tests (no test markers: real keywords through the route and the gate) |
 | `docs/echo-code/PRIME_MEDIA_ROUTER.md`, this file | Docs |
 
 Base: `9410bae` (live). The change is additive; an ordinary (non-adult) request produces byte-identical arguments.
@@ -80,7 +81,18 @@ Every step uses the neutral keyword `nsfw` (the mildest word the classifier know
    router's sentence verbatim ("no live nsfw-capable on-prem image model for style 'anime'; available nsfw-capable styles:
    …") and offers no other tool or style.
 
-Pass: steps 2 to 4 refuse and pick exactly as stated, 5 and 6 store an image with the model and the TEMPER badge, 7 (when it
+8. **Cloud tools of every kind are gated, spend nothing.** Same `/api/prepare` call with
+   `{target:'sdk',name:'echo.ai.sdk.together.image',arguments:{prompt:'nsfw portrait of an invented adult woman'}}`, with
+   `name:'echo.fal.generate',arguments:{command:'call',input:{prompt:'nsfw portrait of an invented adult woman'}}`, and with
+   `name:'echo.cartesia.tts',arguments:{text:'nsfw story'}`: each must answer 400. The first two say "Adult briefs run only on
+   the on-prem media router (TEMPER)", the voice one says "There is no on-prem audio tool (voice)". An ordinary brief
+   (`{prompt:'a red fox'}`) on `echo.cartesia.tts` must still be reviewable.
+9. **Enhance and video agent, spend nothing.** `fetch('/api/prime/enhance',{...,body:JSON.stringify({mode:'image',text:'a lighthouse at dusk',adult:true})})`
+   must answer 400 "Enhance sends the text to a cloud model, so it is off for adult briefs" without a model turn;
+   `POST /api/prime/video/plan` with `{brief:'nsfw beach scene',prompts:['a calm beach']}` must answer 400 "The video agent
+   builds on cloud providers". An ordinary storyboard still plans.
+
+Pass: steps 2 to 4 and 8 to 9 refuse and pick exactly as stated, 5 and 6 store an image with the model and the TEMPER badge, 7 (when it
 applies) shows the router text, and no request ever reaches a cloud capability (the gate execution log shows only
 `echo.media.image_generate`, `echo.media.job_status`, and catalog reads).
 
@@ -94,3 +106,14 @@ ssh forge "cd /home/forge/prime-prod && sudo systemctl stop echo-prime-web && rm
 No data migration, nothing persisted by this change (Adult mode lives in the page and resets on reload and on every
 account change), so rolling back leaves nothing behind. Switching Adult mode off in the Studio is the instant mitigation;
 the server gate then still refuses any adult brief bound for a cloud tool, which is the point of it.
+
+## Known limits (details in `PRIME_MEDIA_ROUTER.md` section 12)
+
+- Not covered, because they are other services or products: the Views page SDK console ("Invoke capability" posts to the
+  Workspace backend, not to `prepare`), the Workspace conversation, ADK runs, autonomous agents and bots. The router refuses
+  what it refuses whoever calls it.
+- Adult video is left to the router: Prime ranks `echo.media.video_generate` for an attested adult brief and shows the
+  router's own answer (v2: canary and admission; v1: owner-disabled on TEMPER).
+- A cloud voice reading text that merely contains an adult keyword is refused (there is no on-prem audio tool). The Commander
+  may relax this by narrowing `adultPolicy` back to pictures and video; the cost is that adult scripts can then reach a cloud voice.
+- Router v2's `sexual_regex` has no "cum laude" exemption (router-side): a diploma brief gets a 400 from the router.

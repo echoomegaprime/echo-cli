@@ -46,8 +46,10 @@ describe('candidate filtering',()=>{
   expect(adult.candidates.map(c=>c.id)).toEqual([ROUTER]);
   const together=adult.excluded.find(c=>c.id===SEEDREAM)!;
   expect(together.unavailable).toMatch(/adult/i);expect(together.unavailable).toMatch(/on-prem/i);
-  for(const id of ['echo.fal.generate','echo.deepai.image','echo.image.generate','echo.image.qwen.generate','echo.google.vertex.imagen_generate'])
-   if(snapshot.some(c=>c.id===id))expect(adult.excluded.map(c=>c.id),id).toContain(id);
+  for(const id of ['echo.fal.generate','echo.deepai.image','echo.image.generate','echo.image.qwen.generate','echo.google.vertex.imagen_generate']){
+   expect(snapshot.some(c=>c.id===id),id+' is in the shipped snapshot').toBe(true);
+   expect(adult.excluded.map(c=>c.id),id).toContain(id);
+  }
   expect(adult.candidates.some(c=>/^echo\.(?:llm|fal|deepai|google|openai|replicate|cloudflare|xai|vertex)\./.test(c.id))).toBe(false);
  });
  it('excludes the other on-prem tools too: adult runs only on the router capabilities',()=>{
@@ -206,8 +208,13 @@ describe('prepare is the server-side gate for every path (Auto, manual pick, edi
   expect(cloud.request.arguments).toEqual({command:'call',prompt:'a red fox in the snow'});
   const onprem=await prepare(hub,ROUTER,{prompt:'a red fox',wait:false});
   expect(onprem.request.arguments).toEqual({prompt:'a red fox',wait:false});
-  const tool=await prepare(hub,'echo.cartesia.tts',{text:'read this nsfw policy aloud'});
-  expect(tool.request.arguments).toEqual({text:'read this nsfw policy aloud'});
+  const tool=await prepare(hub,'echo.cartesia.tts',{text:'read the weather report aloud'});
+  expect(tool.request.arguments).toEqual({text:'read the weather report aloud'});
+ });
+ it('refuses an adult voice script too: there is no on-prem audio tool, so it is never sent to a cloud voice (Commander order: adult goes only to TEMPER)',async()=>{
+  const {hub,sdk}=hubWith(async()=>({}));
+  await expect(prepare(hub,'echo.cartesia.tts',{text:'read this nsfw policy aloud'})).rejects.toThrow(/no on-prem audio tool/i);
+  expect(sdk.read).not.toHaveBeenCalled();
  });
  it('does not gate a tool that is not a generator (a search for the word, for instance)',async()=>{
   const {hub}=hubWith(async()=>({}),{catalog:[cap('echo.acme.search',{category:'tools',description:'web search'})]});
@@ -287,7 +294,7 @@ describe('enhance never sends an adult brief to a cloud model',()=>{
   const turn=vi.fn(()=>{throw new Error('SENTINEL: reached the model');});
   const enhancer=new PromptEnhancer({turn,defaultId:'claude',config:{}} as any,{adultMarkers:markers} as any);
   await expect(enhancer.enhance({mode:'image',text:MARKER+' a woman at the beach',provider:'claude'},'s1')).rejects.toMatchObject({status:400,message:expect.stringContaining('cloud')});
-  await expect(enhancer.enhance({mode:'auto',text:MARKER+' a woman at the beach',provider:'claude'},'s1')).rejects.toMatchObject({status:400});
+  await expect(enhancer.enhance({mode:'auto',text:MARKER+' a photo of a woman at the beach',provider:'claude'},'s1')).rejects.toMatchObject({status:400});
   expect(turn).not.toHaveBeenCalled();
   await expect(enhancer.enhance({mode:'image',text:'a red fox at dawn',provider:'claude'},'s1')).rejects.toThrow(/SENTINEL/);
   expect(turn).toHaveBeenCalledTimes(1);

@@ -99,8 +99,9 @@ reason — the route returns every excluded generator, uncapped) when:
 - it is not registered (`c.registered === false`);
 - it carries a lifecycle marker (deprecated, retired, duplicate test, test-debug; see above);
 - its health maps to a zero `HEALTH_WEIGHT` (red, orphaned, unregistered — "the Studio refuses it at review");
-- it is `echo.media.video_generate` — owner-disabled on TEMPER for RAM budget; this client never passes
-  `force_video`;
+- it is `echo.media.video_generate` and the brief is not an attested adult one — not auto-routed: the v1 router has
+  TEMPER video owner-disabled (RAM budget), the v2 router runs video only for a model with a passing canary when its
+  admission gate allows it; this client never passes `force_video` (section 12 for the adult exception);
 - its id matches the source-image-only family (`-i2v`/`-r2v`/`kontext`/`imagen_edit`) — Auto never prepares
   these from a text-only brief;
 - it is `echo.cartesia.tts` and the prompt is over Cartesia's 400-character bound.
@@ -220,7 +221,7 @@ Echo's own fleet has previously confirmed working).
 | 35 | DeepAI text2img | `^echo\.deepai\.image$` | image | 4 | 7 | — | paid-low | COSTS $, generic | cap description (echo.deepai.image) |
 | 36 | Vertex Imagen edit | `imagen_edit` | image-edit | 7.5 | 6 | — | from description | needs base image | cap description |
 | 37 | Vertex Imagen 3 | `imagen_generate` | image | 7.5 | 6 | photoreal | from description | Vertex Imagen 3 predict | cap description |
-| 38 | On-prem video (Wan2.2 TI2V-5B on TEMPER) | `^echo\.media\.video_generate$` | video | 5 | 3 | — | free | $0 but owner-disabled on TEMPER (RAM budget); this client never passes force_video | cap description; INTEGRATIONS.md 2026-10-27 |
+| 38 | On-prem video (Wan2.2 TI2V-5B on TEMPER) | `^echo\.media\.video_generate$` | video | 5 | 3 | — | free | $0; runs only for a model with a passing canary when the router admits it (v1 router: owner-disabled on TEMPER, RAM budget); this client never passes force_video | cap description; INTEGRATIONS.md 2026-10-27 |
 | 39 | Veo 3.1 Lite (Together) | `veo-3\.1-lite` | video | 8 | 7 | — | from description | Google current video, lite tier | vendor tier naming |
 | 40 | Veo 3.1 (Together) | `veo-3\.1$` | video | 9 | 5 | cinematic, photoreal | paid-high | Google current video tier | vendor version ordering |
 | 41 | Veo 3.0 Fast + Audio (Together) | `veo-3\.0-fast-audio` | video | 8 | 8 | — | from description | fast tier with audio | vendor tier naming |
@@ -315,9 +316,9 @@ Echo's own fleet has previously confirmed working).
   explicitly ("nothing was prepared and no other kind was substituted") rather than quietly offering a
   different medium.
 - **Pass owner controls.** `buildArguments` never emits `force_video` or any other owner-gated override; the
-  on-prem video capability (`echo.media.video_generate`) is listed under `excluded` with the reason
-  "owner-disabled on TEMPER (RAM budget); this client never force-enables video", exactly as the registry has it
-  configured (checked against the shipped catalog in `tests/prime-media.test.ts`).
+  on-prem video capability (`echo.media.video_generate`) is listed under `excluded` as not auto-routed ("owner-disabled
+  on TEMPER for its RAM budget (v1 router), or no model with a passing canary and an admission gate that allows it (v2
+  router) ..."), a reason that holds for either router (checked against the shipped catalog in `tests/prime-media.test.ts`).
 - **Send an adult brief to a cloud provider.** An adult request (Adult mode, an adult flag, or a brief the server-side
   classifier reads as adult) can only be routed to, and can only be reviewed for, `echo.media.image_generate` /
   `echo.media.video_generate`; every other tool is listed under `excluded` and `prepare` refuses it (section 12).
@@ -730,11 +731,17 @@ order: adult generation goes ONLY to the on-prem TEMPER models through the media
 **What counts as adult** (`src/prime/adult.ts`). A request is adult when it says so (`nsfw`, `adult`, `adult_brief`, or a
 `content_class` starting `adult`, at the top level or inside `options`, read the way the router reads them), or when the
 brief itself trips `classifyAdult`: whole-word keywords, the router's own sexual-term list (`policy_terms.json`
-`sexual_regex`, 2026-11-06.1) plus a few more. The classifier is conservative in the safe direction. It runs on the server,
-does not depend on the UI, and decides for pictures and video only (a voice, music or sound script that contains one of the
-words is not an adult picture; an explicit flag still decides for any tool). Its known cost is false positives such as
-"nude colour palette" or "naked eye": the user switches Adult mode on, or rewords. `signals` name what fired, never the
-brief. The only test seam is the `adultMarkers` option (`MediaRouter`, `PrimeHub`, `PromptEnhancer`): literal strings that
+`sexual_regex`, 2026-11-06.1) plus the nouns, verbs and inflections around it (`ADULT_TERM_EXAMPLES` in `adult.ts` is the
+readable list, one example per family: "sexually", "sexting", "nudes", "undressed", "x-rated", "busty", "thong", "cumming"
+and so on). Stems are written form by form on purpose: a bare `sex\w*` would flag "sextant" and `cum\w*` "cumulus"; a few
+neutral contexts ("magna cum laude", "chicken breasts", "Moby Dick", "blue tits", "cock-a-doodle-doo") are removed first.
+Deliberately not adult by themselves: "bikini", "hardcore", "seductive", "sensual", "suggestive" (it is a term classifier,
+not a mood detector; swimwear is an ordinary brief for Together and for the router alike). The classifier is conservative in
+the safe direction. It runs on the server, does not depend on the UI, and decides for every medium: pictures, video, and
+also a voice, music or sound script, because those have no on-prem tool and must not reach a cloud voice either (an
+explicit flag decides for any tool). Its known cost is false positives such as "nude colour palette" or "naked eye", or
+text read aloud that mentions "sexual harassment": the user switches Adult mode on, or rewords. `signals` name what fired,
+never the brief. The only test seam is the `adultMarkers` option (`MediaRouter`, `PrimeHub`, `PromptEnhancer`): literal strings that
 count as an adult brief, so fixtures never carry explicit text. Production passes none.
 
 **The control.** Creative Studio, under the brief: "Adult mode (on-prem only)", off by default and off again after every
@@ -751,22 +758,34 @@ The older "Show NSFW-capable model listings" toggle stays what it was, a listing
 consider FORGE diffusers, whose Juggernaut is also `nsfw_capable`). The style is the user's choice and is never changed
 on the way: if the router has no live adult-capable model for it, the router's own answer is shown.
 
-**Where it is enforced** (three layers, each refusing before any call):
+**Where it is enforced** (four layers, each refusing before any call):
 
 | Layer | What it does |
 |---|---|
 | `MediaRouter.route` (`POST /api/prime/media/route`, new body fields `adult`, `fictional`, `style`) | Decides before discovery: an adult brief without Adult mode answers "Adult mode must be switched on and "All subjects are fictional adults" ticked before this brief can be sent anywhere. Nothing was sent." with `picked: null`, no catalog search and no classifier model turn (the text never leaves the process). Minor-indicating terms and real-person requests are refused with their own message (`adult.refusal`: `minor`, `real_person`). An attested request ranks with `rankCandidates({adult:true})`: every tool that is not `echo.media.image_generate` / `echo.media.video_generate` goes to `excluded` with "adult brief: only the on-prem media router (TEMPER) is used". The response carries `adult: {active, detected, refusal?, style?, restrictedTo?}`. |
-| `PrimeHub.prepare` (every Studio request, Auto pick or manual or edited JSON) | An adult brief or an explicit adult flag on any tool other than the two router capabilities is refused ("Adult briefs run only on the on-prem media router"). On the router: no flag, no attestation, a minor term, a real-person cue, reference uploads or a `node` other than `temper` are each refused; `node` is added when missing, so the reviewed request and its digest show it. |
-| `PromptEnhancer.enhance` | Image, video and auto Enhance of an adult brief is refused before the rate limiter and any model turn. |
+| `PrimeHub.prepare` (every Studio request, Auto pick or manual or edited JSON) | An adult brief or an explicit adult flag on any tool other than the two router capabilities is refused ("Adult briefs run only on the on-prem media router"). Which tools are checked: every one that makes media (the ranking table, else the catalog `category` image/video/voice/music/sound, else an image/video/voice/music/sora/veo id), and every other tool except a short read-only list (search, list, status, voices, backends, job_status, stt, transcribe, retrieve...), so `echo.ai.sdk.together.image`, `echo.ai.sdk.together.video_create`, a cloud voice (`echo.voice.elevenlabs.tts`, `echo.forgeplugin.personality.synthesize`, `echo.voice.speak.batch`) and an id nobody listed are all checked. The brief is every string leaf of the arguments at any depth (`input.prompt`, `items[].text`, `brief`...), not only `prompt`; a `negative_prompt` is skipped because it names what to avoid. An audio brief is refused with "There is no on-prem audio tool" (the router makes images and video only). On the router: no flag, no attestation, a minor term, a real-person cue, reference uploads or a `node` other than `temper` are each refused; `node` is added when missing, so the reviewed request and its digest show it. |
+| `PromptEnhancer.enhance` | Enhance sends text to a cloud model, so it is refused before the rate limiter and any model turn when the Studio says Adult mode is on (the new `adult` body field, sent by `media-router.js` from every surface; it decides for every mode but chat, whatever the words) and when an image or video brief carries an adult keyword (`auto` resolves the kind first, so ordinary chat text such as "sexual harassment policy" is enhanced as chat). |
+| `PrimeHub.videoPlan` / `videoAgent` (`/api/prime/video/plan`, `/agent`) | The video agent builds on cloud video and TTS providers, so a storyboard whose brief, style, shot prompt, camera, motion or voice-over reads as adult is refused with "The video agent builds on cloud providers ... Use the Creative Studio with Adult mode" before anything is planned or created. |
 
-**Pre-route refusals** mirror the router (`mediarouter/policy.py`) and are written in the same shape: a minor-indicating
-term in an adult brief (child, kid, teen, school girl/boy, "17 year old", young/little girl/boy, "underage", and the
-rest of `minor_regex`), and a real-person request (deepfake, face swap, look-alike, likeness of, real person,
-celebrity, famous, "photo of my ex/wife/boss…", "my ex/wife…", social-network names, `@handle`, or a title-cased full name
-after of/with/featuring/starring/resembling/named/called). There is no name or NER detector and no list of names (the
-router's `named_persons` is empty today). The title-cased-name rule is blunt on purpose: "in the style of Frank Frazetta"
-or "portrait of Queen Victoria" in an adult request is refused as `real_person`; the user rewords ("in a painterly 1970s
-fantasy style") or drops the name. The router remains the authority and refuses the same things again.
+**Pre-route refusals** mirror the router (`mediarouter/policy.py`) and are wider than its regexes, which miss "teenage",
+"underaged", spelled-out ages and every name that no naming word introduces. They apply to an adult brief only:
+
+- *Minors*: child (and childlike, childhood), kid, baby, babysitter, toddler, infant, teen (teenage, teenaged, teenager),
+  tween, pre-teen, adolescent, juvenile, school girl/boy, young/little/small/tiny girl or boy, "young-looking", high
+  school, middle school, junior high, elementary, kindergarten, preschool, school uniform, daughter, niece, nephew,
+  underage/underaged, "under 18", lolita, ages (digits or words, "16yo", "16 y/o", "sixteen-year-old", "a girl of 15",
+  "aged 14", "looks 12") from 0 to 17. 18 and over pass ("an eighteen-year-old", "a 118 year old tortoise").
+- *Real people*: likeness words (deepfake, face swap, look-alike, "looks like", "resembles", "face of", "modeled on a real
+  person", real person, celebrity, famous), people the user knows (sister, brother, mom, dad, wife, girlfriend, friend,
+  boss, teacher, coworker, "my ex" and the like), self-portraits ("myself", selfie), social-network names, `@handle`,
+  links, **any two adjacent Capitalised words anywhere in the brief** (a full name; two-letter words like "An" do not
+  count), and a short reviewed deny-list of public figures matched in any case (`DENIED_NAMES` in `adult.ts`; a seed that
+  an operator extends, because the router's own `named_persons` list is empty today). The Capitalised-pair rule is blunt on
+  purpose: "Gothic Cathedral", "Studio Ghibli" or "in the style of Frank Frazetta" in an adult request is refused as
+  `real_person`; the user writes it in lower case, rewords ("in a painterly 1970s fantasy style") or drops the name.
+  Accents are folded first ("Beyoncé").
+
+The router remains the authority and refuses the same things again.
 
 **Honest results.** A router job's `model`, `node` and `backend` are reported as the router named them
 (`used` on the job view: kept from the submit answer and refreshed by each status answer, so an older router whose status
@@ -774,8 +793,9 @@ omits them still shows the model); the Studio shows "Model used: …" and a badg
 reported, for example "on-prem (FORGE)"). Router refusals and explanations reach the user verbatim: "no live
 nsfw-capable on-prem image model for style 'anime'; available nsfw-capable styles: photoreal", "busy, try again in ~30s:
 …", "refused: …". Nothing is retried, and no other provider, tool or style is tried or offered: the failure box says
-"Adult mode: nothing was sent to any other provider or style". An adult request's refusal is not recorded against the
-on-prem tool, so it does not demote `echo.media.image_generate` for ordinary briefs.
+"Adult mode: nothing was sent to any other provider or style". The router's policy and busy answers (a 400/404/409, "busy, try again", "refused: ...", "no live nsfw-capable ...") are not
+recorded against the on-prem tool, so they do not demote `echo.media.image_generate` for ordinary briefs; a real failure of an
+adult job (out of memory, ComfyUI execution error) is recorded like any other (`isRouterPolicyRefusal` in `adult.ts`).
 
 **Async jobs.** Unchanged and reused (`media-jobs.ts`): the router answers a `job_id`, Prime polls `echo.media.job_status`
 with backoff up to `jobWallMs`, reads the finished file from `media.localRoots` (`/home/forge/echo-media/out`), streams it
@@ -783,18 +803,30 @@ into the uploads store and registers the Library artifact. `tests/prime-adult.te
 through queued, running, done and checks the stored PNG and that only the router capabilities were called.
 
 **Known limits.**
-- Adult video is still excluded: `describeCandidate` marks `echo.media.video_generate` "owner-disabled on TEMPER (RAM
-  budget)" and this change does not lift it; an adult video brief answers that reason, honestly, until the owner lifts it.
-- Adult mode covers pictures and video. Music, sound effects, voice and image edits have no on-prem router tool, so with
-  Adult mode on they answer "no on-prem … tool", and are never sent to a cloud tool.
-- The video-agent builder (`/api/prime/video/*`) and the Workspace conversation are not covered by this change.
-- A generator id that the catalog and the ranking table do not recognise is treated as a non-generator by `prepare` unless
-  the request carries an explicit adult flag.
+- Adult video: Prime does not decide whether the router has a live video model. For an attested adult brief
+  `echo.media.video_generate` is a normal candidate (no `style`, pinned to `temper`) and the router answers: v2 routes video
+  only for a model with a passing canary when its admission gate allows it, v1 has TEMPER video owner-disabled. Its answer
+  comes back verbatim. For an ordinary brief the tool is still listed under `excluded` as not auto-routed.
+- Adult mode covers pictures and video. Music, sound effects, voice and image edits have no on-prem router tool, so an adult
+  brief for them is refused with "There is no on-prem audio tool", and is never sent to a cloud tool. Cost: text read aloud
+  by a cloud voice that merely mentions a keyword ("sexual harassment policy") is refused too; reword it or use a non-cloud voice.
+- Not covered by this change, because they are other services or other products: the SDK console in the Views page
+  ("Invoke capability" posts to the Workspace backend's `/action`, not to `prepare`); the Workspace conversation; ADK runs
+  (`/api/prime/adk/*`), autonomous agents and bots (`/api/prime/bots/*`), which run model turns of their own; and
+  `videoRun`, which only starts an agent that `videoAgent` created from a storyboard that already passed the video-agent check.
+  The router itself refuses what it refuses regardless of the caller.
+- A prompt typed in the composer's Auto tab that reads as plain chat (no picture or video word) is a chat turn, as it always
+  was; Enhance on it is enhanced as chat unless the Studio's Adult mode is on, in which case the flag refuses it.
+- Router-side, not Prime's: v2's `sexual_regex` has no "cum laude" exemption, so a "magna cum laude diploma" brief reaches
+  the router as an adult request and is answered 400 "must declare subjects fictional". Prime's own exemption is right and
+  stays; the exemption belongs in `mediarouter/policy_terms.json`.
 - If the live health of `echo.media.image_generate` is `red` or `orphaned` (the v1 prober marks it orphaned), `prepare`
   refuses it ("Capability unavailable or unregistered") and nothing else is used. The v2 router's `GET /backends` alias
   removes that cause.
 
 Tests: `tests/prime-adult-policy.test.ts` (classifier, policy matrix, flags, fields), `tests/prime-adult.test.ts`
 (candidate filtering, adult route, the 2026-11-06 Seedream regression, `prepare` gate, jobs and verbatim refusals,
-Enhance), plus the "Creative Studio adult mode" block in `tests/prime-studio-results-ui.test.ts` and "adult mode in the
+Enhance), `tests/prime-adult-hardening.test.ts` (the review round: every term family and its look-alikes, the minor and
+real-person variants, argument scanning and capability kinds, a sweep of the whole shipped snapshot through `prepare`, real
+keywords through `MediaRouter.route` and the hub with no test marker, adult video, outcome recording, Enhance, video agent), plus the "Creative Studio adult mode" block in `tests/prime-studio-results-ui.test.ts` and "adult mode in the
 router UI" in `tests/prime-media-ui.test.ts`. Deploy and smoke steps: `DEPLOY_ADULT_ROUTING.md`.

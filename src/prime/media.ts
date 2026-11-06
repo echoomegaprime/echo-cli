@@ -201,7 +201,7 @@ export const RANKING:readonly Ranking[]=[
  {match:/imagen_edit/i,kinds:['image-edit'],quality:7.5,speed:6,label:'Vertex Imagen edit',note:'needs base image',source:'cap description'},
  {match:/imagen_generate/i,kinds:['image'],quality:7.5,speed:6,styles:['photoreal'],label:'Vertex Imagen 3',note:'Vertex Imagen 3 predict',source:'cap description'},
  // video
- {match:/^echo\.media\.video_generate$/,kinds:['video'],quality:5,speed:3,cost:'free',label:'On-prem video (Wan2.2 TI2V-5B on TEMPER)',note:'$0 but owner-disabled on TEMPER (RAM budget); this client never passes force_video',source:'cap description; INTEGRATIONS.md 2026-10-27'},
+ {match:/^echo\.media\.video_generate$/,kinds:['video'],quality:5,speed:3,cost:'free',label:'On-prem video (Wan2.2 TI2V-5B on TEMPER)',note:'$0; runs only for a model with a passing canary when the router admits it (v1 router: owner-disabled on TEMPER, RAM budget); this client never passes force_video',source:'cap description; INTEGRATIONS.md 2026-10-27'},
  {match:/veo-3\.1-lite/i,kinds:['video'],quality:8,speed:7,label:'Veo 3.1 Lite (Together)',note:'Google current video, lite tier',source:'vendor tier naming'},
  {match:/veo-3\.1$/i,kinds:['video'],quality:9,speed:5,styles:['cinematic','photoreal'],cost:'paid-high',label:'Veo 3.1 (Together)',note:'Google current video tier',source:'vendor version ordering'},
  {match:/veo-3\.0-fast-audio/i,kinds:['video'],quality:8,speed:8,label:'Veo 3.0 Fast + Audio (Together)',note:'fast tier with audio',source:'vendor tier naming'},
@@ -425,6 +425,9 @@ export function buildArguments(id:string,kind:MediaKind,text:string,classificati
 /** Reads a capability record (snapshot or live) into a ranked candidate, or null when it is not a generator for any kind:
  * an id NOT_A_GENERATOR names, or an id neither RANKING nor KIND_HINT recognises. Every other generator becomes a
  * candidate; one that cannot be used now carries `unavailable` and is listed under `excluded` with that reason. */
+/** Why Auto does not pick the router's video tool for an ordinary brief. The wording holds for both routers: v1 is owner-disabled
+ * on TEMPER (RAM budget), v2 routes video only for a model with a passing canary and when its admission gate allows it. */
+export const VIDEO_NOT_AUTO='owner-disabled on TEMPER for its RAM budget (v1 router), or no model with a passing canary and an admission gate that allows it (v2 router): not auto-routed; this client never forces video';
 export function describeCandidate(c:Capability):Candidate|null{
  if(NOT_A_GENERATOR.test(c.id))return null;
  const description=c.description||'',ranking=RANKING.find(r=>r.match.test(c.id));
@@ -439,7 +442,7 @@ export function describeCandidate(c:Capability):Candidate|null{
  if(c.registered===false)candidate.unavailable='not registered';
  else if(lifecycle)candidate.unavailable=lifecycle;
  else if((HEALTH_WEIGHT[health]??0.6)===0)candidate.unavailable='health '+health+' (the Studio refuses it at review)';
- else if(c.id==='echo.media.video_generate')candidate.unavailable='owner-disabled on TEMPER (RAM budget); this client never force-enables video';
+ else if(c.id==='echo.media.video_generate')candidate.unavailable=VIDEO_NOT_AUTO;
  else if(/-(?:i2v|r2v)\b|I2V|kontext|imagen_edit/i.test(c.id))candidate.unavailable='needs a source image the capability reads itself; Auto never prepares it from a text-only brief (attach a reference in the Studio and pick it yourself)';
  // ElevenLabs answers /v1/music/detailed as multipart/mixed (JSON metadata + audio, elevenlabs.io api-reference/music/compose-detailed);
  // the gate's ElevenLabs router (elevenlabs_full.py) passes on only audio/video/octet-stream bodies as files, so this answer arrives as text.
@@ -503,6 +506,9 @@ export function rankCandidates(kind:MediaKind,catalog:Capability[],options:RankO
    cand.healthSource=!options.liveHealth||options.liveHealth.has(cand.id)?'catalog':cand.health==='unknown'?'none':'snapshot';
   }
   if(options.adult&&!isRouterCap(cand.id))cand.unavailable=ADULT_EXCLUDED;
+  // For an attested adult brief the router decides whether it has a live video model; Prime does not second-guess it (its own
+  // answer, a canary or admission refusal, comes back verbatim). The ordinary-brief exclusion above stays as it was.
+  else if(options.adult&&cand.unavailable===VIDEO_NOT_AUTO)cand.unavailable=undefined;
   const matched=cand.styles.filter(s=>styles.includes(s));
   cand.fit=1+Math.min(0.3,0.15*matched.length);
   if(!cand.unavailable&&cand.id==='echo.cartesia.tts'&&options.text.length>400)cand.unavailable='text longer than the 400-character Cartesia bound';

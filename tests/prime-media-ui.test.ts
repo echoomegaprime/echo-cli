@@ -254,4 +254,10 @@ describe('adult mode in the router UI',()=>{
   const routes=w.calls.filter(c=>c.url==='/api/prime/media/route');
   expect(routes.length).toBe(before+1);expect(routes.at(-1).body).toMatchObject({adult:true,fictional:true,style:'photoreal'});
  });
+ it('tells the server that adult mode is on when it enhances (any surface), and sends nothing extra when it is off',async()=>{
+  const on=await harness({adult:{on:true,fictional:true,style:'photoreal'}});on.prompt.value='a lady';on.find('data-enhance','composer')!.click();await tick();
+  expect(on.calls.find((c:any)=>c.url==='/api/prime/enhance').body).toEqual({mode:'chat',text:'a lady',provider:'claude',adult:true});
+  const off=await harness({adult:{on:false,fictional:false,style:'photoreal'}});off.prompt.value='a lady';off.find('data-enhance','composer')!.click();await tick();
+  expect(off.calls.find((c:any)=>c.url==='/api/prime/enhance').body).toEqual({mode:'chat',text:'a lady',provider:'claude'});
+ });
 });
