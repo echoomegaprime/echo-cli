@@ -326,7 +326,8 @@
  // final answer is persisted) and return it once the matching assistant reply exists.
  async function recoverReply(chatId,requestId,epoch,signal){
   const target=requestId+':reply';
-  for(let attempt=0;attempt<6;attempt++){
+  // Same window as transport recovery (RECOVERY_MAX_MS): a long reply can be saved a minute or more after the stream closes.
+  for(let attempt=0;attempt<60;attempt++){
    if(epoch!==state.epoch||signal?.aborted)return null;
    try{
     const chat=await api('/chats/'+encodeURIComponent(chatId));
@@ -334,7 +335,7 @@
     const reply=(chat.messages||[]).find(message=>message&&message.role==='assistant'&&message.request_id===target&&typeof message.content==='string'&&message.content.trim());
     if(reply)return {chat,reply};
    }catch{/* transient during recovery; keep polling within the bound */}
-   if(attempt<5)await delay(2500);
+   if(attempt<59)await delay(RECOVERY_POLL_MS);
   }
   return null;
  }
