@@ -570,7 +570,7 @@
    if(options.cancelBackend!==false&&current.session.session_id&&b&&current.epoch===b.state.accountEpoch)Promise.resolve().then(()=>b.api('/voice/cancel',{chat_id:current.session.chat_id,session_id:current.session.session_id})).catch(()=>{});
    if(b&&b.state.speech===current.session)b.state.speech=null;}
   if(device){S.device=null;stopped=true;try{device.queue?.cancel(reason);}catch{}try{if(deviceAvailable())speechSynthesis.cancel();}catch{}}
-  if(S.stream&&reason!=='replace'){S.stream.cancelled=true;streamClose(S.stream);}
+  if(S.stream&&reason!=='replace'){if(reason!=='hidden'||S.stream.spokenByDevice)S.stream.cancelled=true;streamClose(S.stream);}
   if(stopped){stopLevelLoop();debug('stopped',{reason,had_echo:!!current,had_device:!!device});if(!options.quiet)setStatus(reason==='hidden'?'Paused while this tab was hidden.':reason==='barge-in'?'Listening · you interrupted Echo.':'Stopped. Microphone '+(conversation?.active?'listening':'off')+'.');}
   emitState();sync();return stopped;
  }

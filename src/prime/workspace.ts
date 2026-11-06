@@ -207,6 +207,7 @@ export class WorkspaceBridge {
     res.setHeader('Set-Cookie',`echo_workspace_session=${match[1]}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${match[1]?'28800':'0'}${this.secureCookies?'; Secure':''}`);
    }
    res.statusCode=response.status;res.setHeader('Content-Type',contentType);res.setHeader('Cache-Control','no-store');
+   if(contentType.startsWith('application/x-ndjson'))res.socket?.setNoDelay(true);
    if(!response.body){res.end();return;}
    const reader=response.body.getReader();let size=0,lineBytes=0,prefix='';
    try{

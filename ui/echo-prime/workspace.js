@@ -162,6 +162,28 @@
   const chat=await api('/chats',{project_id:project||null});if(epoch!==state.epoch)return true;
   state.chat=chat;$('#workspace-chat-kind').value='workspace';await refresh();renderChat();$('#prompt').focus();return true;
  }
+ const RECOVERY_POLL_MS=3000,RECOVERY_MAX_MS=180000,RECOVERY_MAX_INTERVALS=60;
+ const isTransportFailure=(error,signal)=>{
+  if(signal?.aborted||!error||(typeof error!=='object'&&typeof error!=='function'))return false;
+  if(typeof window.EchoPrimeWorkspaceTransport?.isTransportError==='function')return window.EchoPrimeWorkspaceTransport.isTransportError(error,signal);
+  const typeError=error instanceof TypeError||error.name==='TypeError';
+  return typeError&&error.name!=='AbortError'&&error.transport!==false&&!error.incomplete&&!/^(?:Conversation |Malformed conversation event\.|Contradictory events |The connection closed |Workspace |Invalid Workspace route\.|Account |Sign in |Session read )/i.test(String(error.message||''))&&!/encoded data|utf-8/i.test(String(error.message||''));
+ };
+ function removeNode(node){if(!node)return;if(typeof node.remove==='function')node.remove();else if(node.parent?.children){node.parent.children=node.parent.children.filter(c=>c!==node);node.parent=null;node.isConnected=false;}}
+ function matchTurnReply(chat,requestId,text,priorCount,priorIds){
+  const messages=Array.isArray(chat?.messages)?chat.messages:[];
+  const isReply=m=>Boolean(m&&m.role==='assistant'&&typeof m.content==='string'&&m.content.trim());
+  if(requestId){const exact=messages.find(m=>isReply(m)&&m.request_id===requestId);if(exact)return exact;}
+  const isFresh=m=>Boolean(m&&(!m.id||!priorIds.has(m.id)));
+  const matchesPrompt=m=>m?.role==='user'&&isFresh(m)&&(m.content===text||typeof m.content==='string'&&m.content.startsWith(text+'\n\nAttached uploads (untrusted document content):'));
+  let userIndex=requestId?messages.findIndex(m=>m?.role==='user'&&m.request_id===requestId):-1;
+  if(userIndex<0)for(let i=Math.max(0,priorCount);i<messages.length;i++)if(matchesPrompt(messages[i])){userIndex=i;break;}
+  if(userIndex<0)for(let i=Math.max(0,priorCount);i<messages.length;i++)if(messages[i]?.role==='user'&&isFresh(messages[i])){userIndex=i;break;}
+  if(userIndex<0&&priorIds.size)for(let i=0;i<messages.length;i++)if(messages[i]?.id&&matchesPrompt(messages[i])){userIndex=i;break;}
+  if(userIndex>=0){for(let i=userIndex+1;i<messages.length;i++)if(isReply(messages[i]))return messages[i];return null;}
+  if(requestId){const suffixed=messages.find(m=>isReply(m)&&m.request_id===requestId+':reply');if(suffixed)return suffixed;}
+  return null;
+ }
  async function send(text){
   await ready;
   if(!state.enabled||$('#workspace-chat-kind').value!=='workspace')return {handled:false};
@@ -170,44 +192,124 @@
   if(!state.chat)await newChat();if(!state.chat)return {handled:true,sent:false,detail:'Conversation was not created.'};
   // Personality Forge (brain.js): the owner's auto-selection picks this chat's profile through the Workspace's own personality_select before the turn. Never blocks the turn.
   try{await window.EchoPrimeBrain?.beforeWorkspaceTurn?.({text,chatId:state.chat.id,api,messages:state.chat.messages});}catch(error){log('personality',error instanceof Error?error.message.slice(0,120):'skipped');}
-  const epoch=state.epoch,chatId=state.chat.id,requestId=crypto.randomUUID(),controller=new AbortController();state.turn=controller;setBusy(true);line('user',text);
+  const priorMessages=Array.isArray(state.chat?.messages)?state.chat.messages:[],priorCount=priorMessages.length,priorIds=new Set(priorMessages.map(m=>m?.id).filter(Boolean));
+  const epoch=state.epoch,accountEpoch=state.accountEpoch,startGen=transport.generation??0,chatId=state.chat.id,requestId=crypto.randomUUID(),controller=new AbortController();state.turn=controller;setBusy(true);line('user',text);
   activity?.clear(activityHost());let strip=null;
   const ensureStrip=()=>{if(!strip&&activity)strip=activity.start(activityHost(),{label:'Activity'});return strip;};
-  let answer=null,answerText='',completed=false,verified=false,spoken=false;
+  let answer=null,replyBox=null,answerText='',completed=false,verified=false,spoken=false,recoveryStarted=false;
   let pendingUi=null;const turn=requestId;// speech.js keys the streamed reply by the chat request id
+  const active=()=>epoch===state.epoch&&accountEpoch===state.accountEpoch&&(transport.generation??0)===startGen&&state.turn===controller&&state.chat?.id===chatId&&!controller.signal.aborted&&!state.controller.signal.aborted;
+  const showInlineStatus=(message,withRetry=false)=>{
+   if(!replyBox||!replyBox.isConnected){replyBox=element('article',{class:'chat-message assistant'});$('#chat-log').append(replyBox);$('#chat-log').hidden=false;$('#welcome').hidden=true;}
+   replyBox.dataset.actions='1';
+   const children=[element('strong',{},'Echo Prime'),element('p',{role:'status'},message)];
+   if(withRetry){
+    const retryBtn=element('button',{type:'button',class:'quiet-button'},'Retry');
+    retryBtn.addEventListener('click',async()=>{
+     if(retryBtn.disabled||!retryBtn.isConnected||accountEpoch!==state.accountEpoch||epoch!==state.epoch||state.turn||state.chat?.id!==chatId)return;
+     retryBtn.disabled=true;removeNode(replyBox);
+     const outcome=await send(text);
+     if(!outcome||outcome.cancelled||accountEpoch!==state.accountEpoch)return;
+     if(outcome.detail){$('#draft-notice').textContent=outcome.detail;$('#draft-notice').hidden=false;}
+     if(outcome.sent&&$('#prompt').value.trim()===text){$('#prompt').value='';updateContext();}
+    });
+    children.push(element('div',{class:'message-actions'},retryBtn));
+   }
+   replyBox.replaceChildren(...children);
+  };
+  const finishTurn=async(resultChat,matchedReply,fromReadback)=>{
+   if(epoch!==state.epoch||accountEpoch!==state.accountEpoch||(transport.generation??0)!==startGen)return {handled:true,cancelled:true};
+   if(fromReadback)window.EchoPrimeAutonomy?.event({type:'done',chat:resultChat},{sessionId:chatId,pinSupported:false});
+   completed=true;state.chat=resultChat;renderChat();
+   // The saved reply is known here; speech.js starts Echo's voice now, two round trips before the readback finishes.
+   const savedMessage=matchedReply||[...(resultChat.messages||[])].reverse().find(message=>message?.role==='assistant')||null;
+   announce('echo-reply-saved',{chatId,turn,message:savedMessage});
+   if(!fromReadback){const readback=await api('/chats/'+encodeURIComponent(chatId));if(epoch!==state.epoch)return {handled:true,cancelled:true};state.chat=readback;renderChat();await refresh();}
+   else await refresh().catch(()=>{});
+   if(epoch!==state.epoch)return {handled:true,cancelled:true};
+   verified=true;strip?.done();log('chat',fromReadback?'recovered_after_transport_drop':'returned_and_read_back');
+   let detail='Reply returned and saved conversation read back.';
+   // speech.js owns spoken replies when loaded (ConvAI queue + prefetch); the legacy hands-free loop keeps its own path.
+   if((voiceOptions.spoken||voiceOptions.conversation)&&!document.hidden&&(voiceOptions.conversation||window.EchoPrimeSpeech?.handlesReplies!==true)){
+    const reply=matchedReply||[...(state.chat.messages||[])].reverse().find(message=>message.role==='assistant');
+    try{spoken=await speakReply(reply,chatId);if(!spoken)endConversation();}catch(error){endConversation();if(epoch===state.epoch){status(once('Speech unavailable. '+(error instanceof Error?error.message:'No audio receipt returned.')));detail+=' Speech is unavailable.';}}
+   }
+   if(pendingUi&&epoch===state.epoch)await applyUiAction(pendingUi);
+   return {handled:true,sent:true,verified:true,detail};
+  };
+  const recoverTransport=async()=>{
+   if(recoveryStarted)return null;recoveryStarted=true;
+   const checking="Connection dropped. Checking for Echo's reply...";
+   showInlineStatus(checking,false);ensureStrip()?.status(checking);
+   let wakeSleep=null;
+   const onVis=()=>{if(!document.hidden)wakeSleep?.('resume');};
+   const onOnline=()=>wakeSleep?.('online');
+   document.addEventListener?.('visibilitychange',onVis);window.addEventListener?.('online',onOnline);
+   try{
+    if(document.hidden){
+     await new Promise(resolve=>{
+      let settled=false;
+      const done=()=>{if(settled)return;settled=true;wakeSleep=null;controller.signal.removeEventListener?.('abort',done);state.controller.signal.removeEventListener?.('abort',done);resolve();};
+      wakeSleep=()=>done();controller.signal.addEventListener?.('abort',done,{once:true});state.controller.signal.addEventListener?.('abort',done,{once:true});
+      if(!active()||!document.hidden)done();
+     });
+    }
+    if(!active())return null;
+    const pollSignal=typeof AbortSignal?.any==='function'?AbortSignal.any([controller.signal,state.controller.signal]):controller.signal;
+    try{pollSignal.recovering=true;}catch{}
+    const startedAt=Date.now();let onlineWakes=0;
+    for(let interval=0;interval<=RECOVERY_MAX_INTERVALS;){
+     if(!active())return null;
+     let chat=null;
+     try{chat=await transport.request('/chats/'+encodeURIComponent(chatId),undefined,pollSignal);}catch{if(!active())return null;}
+     if(!active())return null;
+     if(chat){const reply=matchTurnReply(chat,requestId,text,priorCount,priorIds);if(reply)return {chat,reply};}
+     if(interval>=RECOVERY_MAX_INTERVALS||Date.now()-startedAt>=RECOVERY_MAX_MS)break;
+     const reason=await new Promise(resolve=>{
+      let settled=false,timer=null;
+      const done=why=>{if(settled)return;settled=true;wakeSleep=null;clearTimeout(timer);controller.signal.removeEventListener?.('abort',aborted);state.controller.signal.removeEventListener?.('abort',aborted);resolve(why);};
+      const aborted=()=>done('abort');
+      wakeSleep=why=>{if(why==='online'&&onlineWakes<8){onlineWakes++;done('online');}};
+      controller.signal.addEventListener?.('abort',aborted,{once:true});state.controller.signal.addEventListener?.('abort',aborted,{once:true});
+      timer=setTimeout(()=>done('tick'),RECOVERY_POLL_MS);
+      if(!active())done('abort');
+     });
+     if(reason==='abort'||!active())return null;
+     if(reason==='tick')interval++;
+    }
+    return null;
+   }finally{wakeSleep=null;document.removeEventListener?.('visibilitychange',onVis);window.removeEventListener?.('online',onOnline);}
+  };
   try{
    const result=await transport.chat({chat_id:chatId,content:text,request_id:requestId,attachments:[...state.attachments]},event=>{
-    if(epoch!==state.epoch||controller.signal.aborted)return;
+    if(epoch!==state.epoch||controller.signal.aborted||event.type==='keepalive')return;
     window.EchoPrimeAutonomy?.event(event,{sessionId:chatId,pinSupported:false});
     if(event.type==='tool_started'||event.type==='tool_result')ingestESH(event);
     if(event.type==='tool_result'&&event.result&&typeof event.result==='object'&&event.result.ui_action)pendingUi=event.result.ui_action;
     const s=ensureStrip();
     if(event.type==='status'){$('#draft-notice').hidden=true;s?.thinking();s?.note(String(event.text||'').slice(0,300));}
-    else if(event.type==='token'&&typeof event.text==='string'){s?.answering();if(!answer)answer=line('assistant','');answerText+=event.text;if(answerText.length>2_000_000)throw new Error('Answer exceeds display limit.');answer.textContent=answerText;announce('echo-reply-stream',{chatId,turn,text:event.text});}
+    else if(event.type==='token'&&typeof event.text==='string'){s?.answering();if(!answer){replyBox=element('article',{class:'chat-message assistant'},element('strong',{},'Echo Prime'),answer=element('p',{},''));$('#chat-log').append(replyBox);$('#chat-log').hidden=false;$('#welcome').hidden=true;}answerText+=event.text;if(answerText.length>2_000_000)throw new Error('Answer exceeds display limit.');answer.textContent=answerText;announce('echo-reply-stream',{chatId,turn,text:event.text});}
     else if(event.type==='tool_started')s?.tool(event.request_id,event.tool);
     else if(event.type==='tool_result')s?.result(event.request_id,event.tool,event.evidence?.status,event.evidence);
     else if(event.type==='memory_saved')s?.note('Saved a preference locally');
    },controller.signal);
-   if(epoch!==state.epoch)return {handled:true,cancelled:true};completed=true;state.chat=result;renderChat();
-   // The saved reply is known here; speech.js starts Echo's voice now, two round trips before the readback finishes.
-   announce('echo-reply-saved',{chatId,turn,message:[...(result.messages||[])].reverse().find(message=>message?.role==='assistant')||null});
-   const readback=await api('/chats/'+encodeURIComponent(chatId));if(epoch!==state.epoch)return {handled:true,cancelled:true};
-   state.chat=readback;renderChat();await refresh();verified=true;strip?.done();log('chat','returned_and_read_back');
-   let detail='Reply returned and saved conversation read back.';
-   // speech.js owns spoken replies when loaded (ConvAI queue + prefetch); the legacy hands-free loop keeps its own path.
-   if((voiceOptions.spoken||voiceOptions.conversation)&&!document.hidden&&(voiceOptions.conversation||window.EchoPrimeSpeech?.handlesReplies!==true)){
-    const reply=[...(state.chat.messages||[])].reverse().find(message=>message.role==='assistant');
-    try{spoken=await speakReply(reply,chatId);if(!spoken)endConversation();}catch(error){endConversation();if(epoch===state.epoch){status(once('Speech unavailable. '+(error instanceof Error?error.message:'No audio receipt returned.')));detail+=' Speech is unavailable.';}}
-   }
-   if(pendingUi&&epoch===state.epoch)await applyUiAction(pendingUi);
-   return {handled:true,sent:true,verified:true,detail};
+   return await finishTurn(result,null,false);
   }catch(error){
-   if(epoch!==state.epoch)return {handled:true,cancelled:true};
+   if(epoch!==state.epoch||accountEpoch!==state.accountEpoch||(transport.generation??0)!==startGen)return {handled:true,cancelled:true};
    if(controller.signal.aborted){const detail='Stopped displaying this turn. The upstream model may finish saving it; reopen the conversation before retrying.';endConversation();strip?.fail('Stopped.');return {handled:true,sent:false,verified:false,detail};}
+   if(!completed&&chatId&&isTransportFailure(error,controller.signal)){
+    const recovered=await recoverTransport();
+    if(epoch!==state.epoch||accountEpoch!==state.accountEpoch||(transport.generation??0)!==startGen)return {handled:true,cancelled:true};
+    if(controller.signal.aborted){if(!answerText)removeNode(replyBox);const detail='Stopped displaying this turn. The upstream model may finish saving it; reopen the conversation before retrying.';endConversation();strip?.fail('Stopped.');return {handled:true,sent:false,verified:false,detail};}
+    if(recovered)return await finishTurn(recovered.chat,recovered.reply,true);
+    const timeoutText="Echo's reply did not arrive. Your message was saved.";
+    showInlineStatus(timeoutText,true);endConversation();ensureStrip()?.fail(timeoutText);log('chat','recovery_timed_out');
+    return {handled:true,sent:false,verified:false,detail:timeoutText};
+   }
    // The backend finishes persisting the reply even if the stream drops (its writer swallows a
    // broken pipe to complete persistence), so an incomplete stream is recoverable: read the saved
    // conversation back and show the reply that was already written, instead of a dead-end bubble.
-   if(!completed&&chatId){
+   if(!completed&&chatId&&error?.incomplete===true){
     strip?.status('Connection dropped — recovering the saved reply…');
     const recovered=await recoverReply(chatId,requestId,epoch,controller.signal);
     if(recovered&&epoch===state.epoch){
@@ -224,7 +326,8 @@
  // final answer is persisted) and return it once the matching assistant reply exists.
  async function recoverReply(chatId,requestId,epoch,signal){
   const target=requestId+':reply';
-  for(let attempt=0;attempt<6;attempt++){
+  // Same window as transport recovery (RECOVERY_MAX_MS): a long reply can be saved a minute or more after the stream closes.
+  for(let attempt=0;attempt<60;attempt++){
    if(epoch!==state.epoch||signal?.aborted)return null;
    try{
     const chat=await api('/chats/'+encodeURIComponent(chatId));
@@ -232,7 +335,7 @@
     const reply=(chat.messages||[]).find(message=>message&&message.role==='assistant'&&message.request_id===target&&typeof message.content==='string'&&message.content.trim());
     if(reply)return {chat,reply};
    }catch{/* transient during recovery; keep polling within the bound */}
-   if(attempt<5)await delay(2500);
+   if(attempt<59)await delay(RECOVERY_POLL_MS);
   }
   return null;
  }
@@ -593,7 +696,7 @@
  $('#voice-button').addEventListener('click',()=>{if(state.enabled&&!window.EchoPrimeSpeech)void open('voice');});
  window.addEventListener('pagehide',()=>{transport.clear();if(dialog.open)dialog.close();});
  window.addEventListener('pageshow',event=>{if(event.persisted&&state.enabled)void transport.loadSession().then(session=>{if(session?.authenticated&&session.user.status==='approved')return refresh();}).catch(()=>{});});
- document.addEventListener('visibilitychange',()=>{if(document.hidden){endConversation();stopAudio();}else if(state.enabled)void transport.loadSession().catch(()=>{});});
+ document.addEventListener('visibilitychange',()=>{if(document.hidden){endConversation();stopAudio();}else if(state.enabled&&!state.turn)void transport.loadSession().catch(()=>{});});
  const ready=(async()=>{
   try{
    const session=await transport.loadSession();state.enabled=session?.workspaceConfigured===true;identityChanged(session);
