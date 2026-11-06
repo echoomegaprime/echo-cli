@@ -22,15 +22,18 @@ function element(tag = 'div'): El {
   };
   return el;
 }
-/** A 2D context that records call counts, the centre of every arc() in paint order, and accepts every style the orb sets. */
+/** A 2D context that records call counts, the centre of every arc() in paint order with the composite operation it was
+ *  painted under, and accepts every style the orb sets. save()/restore() keep the composite like a real context does. */
 function context2d() {
   const calls: Record<string, number> = {};
-  const arcLog: number[][] = [];
+  const arcLog: number[][] = [], arcOps: string[] = [], saved: string[] = [];
   const gradient = () => ({ addColorStop() { /* colours are not inspected */ } });
-  const ctx: Record<string, unknown> = { fillStyle: '', strokeStyle: '', lineWidth: 1, globalCompositeOperation: 'source-over', calls, arcLog, createRadialGradient: gradient, createLinearGradient: gradient };
-  for (const name of ['setTransform', 'clearRect', 'fillRect', 'beginPath', 'fill', 'stroke', 'moveTo', 'lineTo', 'save', 'restore', 'clip', 'closePath']) ctx[name] = () => { calls[name] = (calls[name] ?? 0) + 1; };
-  ctx.arc = (x: number, y: number, r: number) => { calls.arc = (calls.arc ?? 0) + 1; arcLog.push([x, y, r]); };
-  return ctx as Record<string, unknown> & { calls: Record<string, number>; arcLog: number[][] };
+  const ctx: Record<string, unknown> = { fillStyle: '', strokeStyle: '', lineWidth: 1, globalCompositeOperation: 'source-over', calls, arcLog, arcOps, createRadialGradient: gradient, createLinearGradient: gradient };
+  for (const name of ['setTransform', 'clearRect', 'fillRect', 'beginPath', 'fill', 'stroke', 'moveTo', 'lineTo', 'clip', 'closePath']) ctx[name] = () => { calls[name] = (calls[name] ?? 0) + 1; };
+  ctx.save = () => { calls.save = (calls.save ?? 0) + 1; saved.push(ctx.globalCompositeOperation as string); };
+  ctx.restore = () => { calls.restore = (calls.restore ?? 0) + 1; if (saved.length) ctx.globalCompositeOperation = saved.pop(); };
+  ctx.arc = (x: number, y: number, r: number) => { calls.arc = (calls.arc ?? 0) + 1; arcLog.push([x, y, r]); arcOps.push(ctx.globalCompositeOperation as string); };
+  return ctx as Record<string, unknown> & { calls: Record<string, number>; arcLog: number[][]; arcOps: string[] };
 }
 /** A WebGL 1 stand-in: every call succeeds and is recorded. It proves the orb's WebGL frame (what is uploaded, in which
  *  order, through which arrays), not what a GPU would draw; shader sources are kept but not compiled. */
@@ -67,8 +70,9 @@ function fakeGL() {
   return { gl, uploads, draws, uniforms, enabled, initial };
 }
 interface Opts { webgl?: boolean; twoD?: boolean; reduced?: boolean; gl?: ReturnType<typeof fakeGL> }
-interface OrbApi { setState(d: unknown): boolean; getState(): Record<string, unknown> & { mode: string; hover: { id: string; name: string; kind: string } | null; claims: string[]; pulse: number; ripple: number; amplitude: number; intensity: number; transient: string | null; arcs: number; satellites: number; energy: number; swirl: number; flow: number; filaments: number; hue: number; ampl: number };
-  pulse(s?: number): number; setSatellites(d: unknown): boolean; satellites(): { id: string; kind: string; name: string; status: string; busy: boolean; size: number; color: number[]; x: number; y: number; z: number; sx: number; sy: number; front: boolean }[];
+interface Moon { id: string; kind: string; name: string; status: string; busy: boolean; size: number; color: number[]; x: number; y: number; z: number; sx: number; sy: number; radius: number; front: boolean; hidden: boolean }
+interface OrbApi { setState(d: unknown): boolean; getState(): Record<string, unknown> & { mode: string; hover: { id: string; name: string; kind: string } | null; sphere: { x: number; y: number; r: number }; claims: string[]; pulse: number; ripple: number; amplitude: number; intensity: number; transient: string | null; arcs: number; satellites: number; energy: number; swirl: number; flow: number; filaments: number; hue: number; ampl: number };
+  pulse(s?: number): number; setSatellites(d: unknown): boolean; satellites(): Moon[];
   depthOrder(): string[]; arcs(): { from: string; to: string; kind: string }[]; links(): { to: string }[]; destroy(): void }
 interface Mounted { motion: boolean; frames: number; setPalette(v: string): void; setQuality(v: string): void; setMotion(v: boolean): void; destroy(): void }
 function setup(opts: Opts = {}) {
@@ -108,6 +112,11 @@ function setup(opts: Opts = {}) {
   return { doc, stage, canvas, ctx, orb, api, frame, dispatch, sat, rafs, media, fallback, motionChange, cancelled: () => cancelled, win, winFire, winListeners };
 }
 const lum = (c: number[]) => c[0] + c[1] + c[2];
+/** Steps frames until moon `id` orbits in front of the sphere (behind it, the sphere may hide it), then returns it. */
+function inFront(s: ReturnType<typeof setup>, id: string) {
+  for (let i = 0; i < 400; i++) { s.frame(60); const m = s.api()!.satellites().find(x => x.id === id); if (m?.front) return m; }
+  throw new Error(id + ' never came round in front of the sphere');
+}
 
 beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-04T20:00:00Z')); });
 afterEach(() => { vi.useRealTimers(); });
@@ -336,7 +345,7 @@ describe('reduced motion, hidden tab and teardown', () => {
 });
 
 describe('hover and open', () => {
-  function locate(s: ReturnType<typeof setup>, id: string) { s.frame(); return s.api()!.satellites().find(x => x.id === id)!; }
+  const locate = inFront;
   it('shows the satellite name on hover and hides it when the pointer leaves', () => {
     const s = setup(); s.dispatch('echo-orb-satellites', { satellites: [s.sat('bot:1', 'bot', { name: 'Ledger Bot', status: 'running' })] });
     const m = locate(s, 'bot:1');
@@ -352,6 +361,146 @@ describe('hover and open', () => {
     const m = locate(s, 'agent:researcher');
     s.canvas.fire('click', { clientX: m.sx + 250, clientY: m.sy + 250 }); expect(opened).toEqual([]);
     s.canvas.fire('click', { clientX: m.sx, clientY: m.sy }); expect(opened).toEqual([{ id: 'agent:researcher', kind: 'agent' }]);
+  });
+});
+
+describe('pointer: only what is painted can be hovered or opened (both renderers share the bridge)', () => {
+  const renderers: [string, boolean][] = [['2D', false], ['WebGL', true]];
+  const make = (webgl: boolean) => setup(webgl ? { gl: fakeGL() } : {});
+  const tipOf = (s: ReturnType<typeof setup>) => s.stage.children.find(c => c.className === 'orb-tip');
+  const watchOpen = (s: ReturnType<typeof setup>) => { const opened: { id: string; kind: string }[] = []; s.doc.addEventListener('echo-orb-open', (e: unknown) => opened.push((e as CustomEvent).detail)); return opened; };
+  const fromCentre = (s: ReturnType<typeof setup>, x: number, y: number) => { const d = s.api()!.getState().sphere; return Math.hypot(x - d.x, y - d.y); };
+  it.each(renderers)('%s: a moon behind the limb inside the sphere disc shows no name tag, no pointer cursor and never opens', (_name, webgl) => {
+    const s = make(webgl); const api = s.api()!, opened = watchOpen(s);
+    expect(s.canvas.dataset.renderer).toBe(webgl ? 'webgl' : 'canvas-3d');
+    s.dispatch('echo-orb-satellites', { satellites: Array.from({ length: 12 }, (_, i) => s.sat('agent:a' + i, 'agent', { name: 'A' + i })) });
+    let checked = 0;
+    for (let f = 0; f < 300; f++) {
+      s.frame(50);
+      const sphere = api.getState().sphere; expect(sphere.r).toBeGreaterThan(100);
+      for (const m of api.satellites()) {
+        if (m.front || fromCentre(s, m.sx, m.sy) > sphere.r - 12) continue;
+        checked++; expect(m.hidden).toBe(true);
+        s.canvas.fire('pointermove', { clientX: m.sx, clientY: m.sy });
+        const hover = api.getState().hover;
+        expect(hover?.id).not.toBe(m.id);
+        if (hover) expect(api.satellites().find(x => x.id === hover.id)!.front, 'only a moon in front of the sphere shows over its face').toBe(true);
+        else { expect(s.canvas.dataset.orbHover).toBe('false'); expect(tipOf(s)?.hidden ?? true).toBe(true); }
+        const before = opened.length; s.canvas.fire('click', { clientX: m.sx, clientY: m.sy });
+        expect(opened.slice(before).map(o => o.id)).not.toContain(m.id);
+        if (opened.length > before) expect(api.satellites().find(x => x.id === opened.at(-1)!.id)!.front).toBe(true);
+      }
+    }
+    expect(checked).toBeGreaterThan(20);
+  });
+  it.each(renderers)('%s: a moon in front of the sphere face shows its tag there and opens', (_name, webgl) => {
+    const s = make(webgl); const api = s.api()!, opened = watchOpen(s);
+    s.dispatch('echo-orb-satellites', { satellites: Array.from({ length: 12 }, (_, i) => s.sat('agent:f' + i, 'agent', { name: 'F' + i })) });
+    let checked = 0;
+    for (let f = 0; f < 300 && checked < 15; f++) {
+      s.frame(50);
+      const sphere = api.getState().sphere, moons = api.satellites();
+      for (const m of moons) {
+        if (!m.front || fromCentre(s, m.sx, m.sy) > sphere.r - 12) continue;
+        checked++;
+        s.canvas.fire('pointermove', { clientX: m.sx, clientY: m.sy });
+        const hover = api.getState().hover; expect(hover).not.toBeNull();
+        const shown = moons.find(x => x.id === hover!.id)!;
+        // m itself, or a nearer moon whose body covers m's centre.
+        expect(shown.front).toBe(true); expect(shown.z).toBeGreaterThanOrEqual(m.z); expect(Math.hypot(shown.sx - m.sx, shown.sy - m.sy)).toBeLessThanOrEqual(shown.radius);
+        expect(s.canvas.dataset.orbHover).toBe('true'); expect(tipOf(s)!.hidden).toBe(false); expect(tipOf(s)!.children[0].textContent).toBe(shown.name);
+        s.canvas.fire('click', { clientX: m.sx, clientY: m.sy }); expect(opened.at(-1)).toEqual({ id: shown.id, kind: 'agent' });
+      }
+    }
+    expect(checked).toBeGreaterThan(0);
+  });
+  it.each(renderers)('%s: where two bodies overlap, the nearer moon wins, not the one whose centre is closer', (_name, webgl) => {
+    const s = make(webgl); const api = s.api()!;
+    s.dispatch('echo-orb-satellites', { satellites: Array.from({ length: 16 }, (_, i) => s.sat('o' + i, i % 2 ? 'bot' : 'swarm')) });
+    let overlaps = 0;
+    for (let f = 0; f < 400 && overlaps < 4; f++) {
+      s.frame(50);
+      const moons = api.satellites();
+      for (const far of moons) for (const near of moons) {
+        if (far === near || !far.front || !near.front || near.z <= far.z || Math.hypot(far.sx - near.sx, far.sy - near.sy) >= near.radius) continue;
+        overlaps++;
+        s.canvas.fire('pointermove', { clientX: far.sx, clientY: far.sy });
+        const hover = moons.find(x => x.id === api.getState().hover?.id)!;
+        expect(hover.id).not.toBe(far.id); expect(hover.z).toBeGreaterThanOrEqual(near.z);
+      }
+    }
+    expect(overlaps).toBeGreaterThan(0);
+  });
+  it.each(renderers)('%s: a moon peeking out from behind the limb opens where it shows and not where the sphere covers it', (_name, webgl) => {
+    const s = make(webgl); const api = s.api()!, opened = watchOpen(s);
+    s.dispatch('echo-orb-satellites', { satellites: Array.from({ length: 12 }, (_, i) => s.sat('bot:p' + i, i % 3 ? 'bot' : 'swarm', { name: 'P' + i })) });
+    let checked = 0;
+    for (let f = 0; f < 600 && checked < 6; f++) {
+      s.frame(50);
+      const sphere = api.getState().sphere, moons = api.satellites();
+      for (const m of moons) {
+        if (m.front) continue;
+        const c = fromCentre(s, m.sx, m.sy), ux = (m.sx - sphere.x) / c, uy = (m.sy - sphere.y) / c;
+        const outFrom = Math.max(sphere.r, c - m.radius), inTo = Math.min(sphere.r, c + m.radius);
+        if (c + m.radius - outFrom < 2 || inTo - (c - m.radius) < 2) continue; // needs a visible and a covered part
+        const out = (outFrom + c + m.radius) / 2, inside = (c - m.radius + inTo) / 2;
+        const covered = (t: number) => moons.some(o => o !== m && Math.hypot(o.sx - (sphere.x + ux * t), o.sy - (sphere.y + uy * t)) <= o.radius + 18);
+        if (covered(out) || covered(inside)) continue; // keep every other moon out of the way
+        checked++; expect(m.hidden).toBe(false);
+        opened.length = 0;
+        s.canvas.fire('pointermove', { clientX: sphere.x + ux * inside, clientY: sphere.y + uy * inside }); expect(api.getState().hover?.id).not.toBe(m.id);
+        s.canvas.fire('click', { clientX: sphere.x + ux * inside, clientY: sphere.y + uy * inside }); expect(opened.map(o => o.id)).not.toContain(m.id);
+        s.canvas.fire('pointermove', { clientX: sphere.x + ux * out, clientY: sphere.y + uy * out }); expect(api.getState().hover?.id).toBe(m.id);
+        s.canvas.fire('click', { clientX: sphere.x + ux * out, clientY: sphere.y + uy * out }); expect(opened.at(-1)?.id).toBe(m.id);
+      }
+    }
+    expect(checked).toBeGreaterThan(0);
+  });
+  it.each(renderers)('%s: a still mouse is re-tested every frame, so the tag leaves a moon that moves off or slides behind the sphere', (_name, webgl) => {
+    const s = make(webgl); const api = s.api()!;
+    s.dispatch('echo-orb-satellites', { satellites: Array.from({ length: 12 }, (_, i) => s.sat('agent:s' + i, 'agent', { name: 'S' + i })) });
+    let holding = false, held = 0, lost = 0;
+    for (let f = 0; f < 600 && lost < 4; f++) {
+      s.frame(50);
+      const hover = api.getState().hover;
+      if (hover) {
+        // No pointer event since the mouse came to rest: whatever the tag names is visible and still under the mouse.
+        const shown = api.satellites().find(x => x.id === hover.id)!; held++; holding = true;
+        expect(shown.hidden).toBe(false); expect(s.canvas.dataset.orbHover).toBe('true'); expect(tipOf(s)!.hidden).toBe(false); expect(tipOf(s)!.children[0].textContent).toBe(shown.name);
+      } else if (holding) {
+        lost++; holding = false; expect(s.canvas.dataset.orbHover).toBe('false'); expect(tipOf(s)!.hidden).toBe(true);
+      } else {
+        const m = api.satellites().find(x => x.front); if (m) s.canvas.fire('pointermove', { clientX: m.sx, clientY: m.sy });
+      }
+    }
+    expect(held).toBeGreaterThan(0); expect(lost).toBeGreaterThan(0);
+  });
+  it('touch: a name tag goes as soon as its moon is out of sight behind the sphere, before its timer', () => {
+    const s = setup(); const api = s.api()!;
+    s.dispatch('echo-orb-satellites', { satellites: Array.from({ length: 12 }, (_, i) => s.sat('bot:h' + i, i % 3 ? 'bot' : 'swarm', { name: 'H' + i })) });
+    const last = new Map<string, number>(); let tapped = '', tappedAt = 0, gone = 0;
+    for (let f = 0; f < 1200 && gone < 2; f++) {
+      s.frame(50);
+      const sphere = api.getState().sphere, moons = api.satellites(), hover = api.getState().hover;
+      if (tapped) {
+        const m = moons.find(x => x.id === tapped)!;
+        if (m.hidden) { expect(hover?.id).not.toBe(tapped); if (Date.now() - tappedAt < 1500) { gone++; expect(tipOf(s)!.hidden).toBe(true); } tapped = ''; }
+        else if (!hover) tapped = '';
+      } else {
+        // Tap a moon behind the limb that still shows outside the disc and is sinking behind the sphere.
+        for (const m of moons) {
+          const c = fromCentre(s, m.sx, m.sy), was = last.get(m.id) ?? c;
+          if (m.front || m.hidden || c >= was || c > sphere.r + m.radius * .5) continue;
+          const t = (Math.max(sphere.r, c - m.radius) + c + m.radius) / 2, x = sphere.x + (m.sx - sphere.x) / c * t, y = sphere.y + (m.sy - sphere.y) / c * t;
+          if (moons.some(o => o !== m && Math.hypot(o.sx - x, o.sy - y) <= o.radius + 26)) continue;
+          s.canvas.fire('pointerdown', { pointerType: 'touch' }); s.canvas.fire('click', { clientX: x, clientY: y });
+          if (api.getState().hover?.id === m.id) { tapped = m.id; tappedAt = Date.now(); expect(tipOf(s)!.hidden).toBe(false); }
+          break;
+        }
+      }
+      for (const m of moons) last.set(m.id, fromCentre(s, m.sx, m.sy));
+    }
+    expect(gone).toBeGreaterThan(0);
   });
 });
 
@@ -423,12 +572,12 @@ describe('bot deltas, dedupe and account changes', () => {
   it('names a delta-only bot by its short id and keeps a name the bots list already gave it', () => {
     const s = setup(); const api = s.api()!;
     s.winFire('echo-orb-satellites', { action: 'created', botId: BOT, status: 'idle' });
-    s.frame(); const m = api.satellites()[0]; s.canvas.fire('pointermove', { clientX: m.sx, clientY: m.sy });
+    const m = inFront(s, 'bot:' + BOT); s.canvas.fire('pointermove', { clientX: m.sx, clientY: m.sy });
     expect(api.getState().hover!.name).toBe('bot aaaaaaaa');
     s.dispatch('echo-orb-satellites', { source: 'bots', satellites: [s.sat('bot:' + BOT2, 'bot', { name: 'Ledger' })] });
     s.winFire('echo-orb-satellites', { source: 'bots', action: 'created', botId: BOT2, status: 'running' });
     expect(api.satellites().find(x => x.id === 'bot:' + BOT2)).toMatchObject({ status: 'running', busy: true });
-    s.frame(); const l = api.satellites().find(x => x.id === 'bot:' + BOT2)!; s.canvas.fire('pointermove', { clientX: l.sx, clientY: l.sy });
+    const l = inFront(s, 'bot:' + BOT2); s.canvas.fire('pointermove', { clientX: l.sx, clientY: l.sy });
     expect(api.getState().hover!.name).toBe('Ledger');
   });
   it('lets the next full bots list replace delta moons, so a bot deleted elsewhere does not linger', () => {
@@ -466,8 +615,8 @@ describe('bot deltas, dedupe and account changes', () => {
 describe('touch: the first tap names a moon, the second opens it', () => {
   function placed(s: ReturnType<typeof setup>) {
     const opened: unknown[] = []; s.doc.addEventListener('echo-orb-open', (e: unknown) => opened.push((e as CustomEvent).detail));
-    s.dispatch('echo-orb-satellites', { satellites: [s.sat('bot:t', 'bot', { name: 'Tap Bot' })] }); s.frame();
-    return { opened, m: s.api()!.satellites()[0] };
+    s.dispatch('echo-orb-satellites', { satellites: [s.sat('bot:t', 'bot', { name: 'Tap Bot' })] });
+    return { opened, m: inFront(s, 'bot:t') };
   }
   it('shows the name on the first tap without opening, opens on a second tap while the name shows', () => {
     const s = setup(); const { opened, m } = placed(s);
@@ -508,18 +657,37 @@ describe('depth order', () => {
     const s = setup(); const api = s.api()!; eight(s);
     let checked = 0;
     for (let f = 0; f < 40; f++) {
-      s.ctx.arcLog.length = 0; s.frame(60);
+      s.ctx.arcLog.length = 0; s.ctx.arcOps.length = 0; s.frame(60);
       const by = Object.fromEntries(api.satellites().map(m => [m.id, m])), order = api.depthOrder();
       const at = (id: string) => s.ctx.arcLog.findIndex(a => Math.abs(a[0] - by[id].sx) < 1e-9 && Math.abs(a[1] - by[id].sy) < 1e-9);
       const body = s.ctx.arcLog.findIndex(a => a[0] === 320 && a[1] === 220);
       const back = order.filter(id => !by[id].front), front = order.filter(id => by[id].front);
-      expect(body).toBeGreaterThanOrEqual(0);
+      expect(body).toBeGreaterThanOrEqual(0); expect(s.ctx.arcOps[body]).toBe('source-over');
       for (const id of back) expect(at(id)).toBeLessThan(body);
       for (const id of front) expect(at(id)).toBeGreaterThan(body);
       for (const side of [back, front]) for (let k = 1; k < side.length; k++) expect(at(side[k])).toBeGreaterThan(at(side[k - 1]));
+      // Painting order only hides anything if the bodies are painted over what lies behind them, never added as light.
+      for (const id of order) expect(s.ctx.arcOps[at(id)], id + ' body').toBe('source-over');
       if (back.length && front.length) checked++;
     }
     expect(checked).toBeGreaterThan(0);
+  });
+  it('2D: a nearer moon body covers a farther one where they overlap (both painted source-over, nearer last)', () => {
+    const s = setup(); const api = s.api()!;
+    s.dispatch('echo-orb-satellites', { satellites: Array.from({ length: 16 }, (_, i) => s.sat('o' + i, i % 2 ? 'bot' : 'swarm')) });
+    let overlaps = 0;
+    for (let f = 0; f < 160 && overlaps < 3; f++) {
+      s.ctx.arcLog.length = 0; s.ctx.arcOps.length = 0; s.frame(60);
+      const moons = api.satellites(), order = api.depthOrder(), by = Object.fromEntries(moons.map(m => [m.id, m]));
+      const at = (id: string) => s.ctx.arcLog.findIndex(a => Math.abs(a[0] - by[id].sx) < 1e-9 && Math.abs(a[1] - by[id].sy) < 1e-9);
+      for (let a = 0; a < order.length; a++) for (let b = a + 1; b < order.length; b++) {
+        const far = by[order[a]], near = by[order[b]];
+        if (far.front !== near.front || Math.hypot(far.sx - near.sx, far.sy - near.sy) >= far.radius + near.radius) continue;
+        overlaps++; expect(near.z).toBeGreaterThanOrEqual(far.z);
+        expect(at(near.id)).toBeGreaterThan(at(far.id)); expect(s.ctx.arcOps[at(near.id)]).toBe('source-over'); expect(s.ctx.arcOps[at(far.id)]).toBe('source-over');
+      }
+    }
+    expect(overlaps).toBeGreaterThan(0);
   });
   it('retires a bolt whose moon slips behind the sphere, so no arc ever ends behind the limb', () => {
     const s = setup(); const api = s.api()!;
@@ -557,10 +725,16 @@ describe('name tag', () => {
   it('builds the tag once, follows the moon without rebuilding it, and rewrites its text only when the roster changes', () => {
     const s = setup(); const api = s.api()!;
     s.dispatch('echo-orb-satellites', { satellites: [s.sat('bot:n', 'bot', { name: 'Night Bot', status: 'running' })] });
-    s.frame(); const m = api.satellites()[0]; s.canvas.fire('pointermove', { clientX: m.sx, clientY: m.sy });
+    // Wait for the moon to come round in front of the sphere, then keep the mouse on it while it orbits.
+    let m = api.satellites()[0]; for (let i = 0; i < 400 && !m.front; i++) { s.frame(60); m = api.satellites()[0]; }
+    expect(m.front).toBe(true); s.canvas.fire('pointermove', { clientX: m.sx, clientY: m.sy });
     const tip = s.stage.children.find(c => c.className === 'orb-tip')!; const [name, meta] = tip.children;
     const lefts = new Set<string>();
-    for (let i = 0; i < 30; i++) { s.frame(60); lefts.add(tip.style.left); expect(tip.children).toHaveLength(2); expect(tip.children[0]).toBe(name); expect(tip.children[1]).toBe(meta); }
+    for (let i = 0; i < 30; i++) {
+      s.frame(60); m = api.satellites()[0]; if (!m.front) break;
+      expect(api.getState().hover!.id).toBe('bot:n'); lefts.add(tip.style.left); expect(tip.children).toHaveLength(2); expect(tip.children[0]).toBe(name); expect(tip.children[1]).toBe(meta);
+      s.canvas.fire('pointermove', { clientX: m.sx, clientY: m.sy });
+    }
     expect(lefts.size).toBeGreaterThan(1); expect(name.textContent).toBe('Night Bot'); expect(meta.textContent).toContain('running');
     s.dispatch('echo-orb-satellites', { satellites: [s.sat('bot:n', 'bot', { name: 'Night Bot', status: 'paused' })] }); s.frame();
     expect(api.getState().hover!.id).toBe('bot:n'); expect(tip.children[0]).toBe(name); expect(meta.textContent).toContain('paused');
@@ -626,11 +800,11 @@ describe('the animated frame path allocates nothing', () => {
     [/\.(map|filter|slice|subarray|concat|join|split|push|splice|from|keys|values|entries)\(/, 'copying array method'], [/`/, 'template literal'],
     [/[=(,:?]\s*\[/, 'array literal'], [/[=(,:?]\s*\{|return\s*\{/, 'object literal'], [/'\s*\+|\+\s*'/, 'string concatenation']];
   const frameFunctions: [string, number][] = [
-    ...['step(dt,motion){', 'orbit(motion){', 'sortDepth(){', 'colorFor(s){', 'busyCount(){', 'activeArcs(){', 'spawn(a,b,t){', 'arcStep(t){', 'lightStep(){', 'makeBolt(x0,y0,x1,y1,seed,t){'].map(sig => [sig, createScene] as [string, number]),
+    ...['step(dt,motion){', 'orbit(motion){', 'sortDepth(){', 'colorFor(s){', 'busyCount(){', 'activeArcs(){', 'spawn(a,b,t){', 'arcStep(t){', 'lightStep(){', 'makeBolt(x0,y0,x1,y1,seed,t){', 'hidden(i){', 'hit(px,py,maxDistance){'].map(sig => [sig, createScene] as [string, number]),
     ...['function draw(){', 'function fillMoons(){', 'function fillLines(){', 'function vertex(px,py,r,g,b,a,behind){', 'function anchor(s){', 'function satScreen(){', 'function project(x,y,z){', 'function tick(stamp){',
       'function location(prog,name){', 'function u1(prog,name,a){', 'function u2(prog,name,a,b){', 'function u3(prog,name,a,b,c){', 'function u4(prog,name,a,b,c,d){', 'function u4v(prog,name,v){', 'function colors(prog){', 'function off(loc){',
       'function attrib(prog,name,size,stride,offset){'].map(sig => [sig, mountGL] as [string, number]),
-    ['function place(i){', bridge], ['function show(){', bridge]];
+    ['function place(i){', bridge], ['function show(){', bridge], ['function refresh(){', bridge]];
   it.each(frameFunctions)('%s', (signature, from) => {
     const code = body(signature, from);
     for (const [pattern, what] of ALLOCATING) expect(pattern.test(code), signature + ' contains a ' + what).toBe(false);

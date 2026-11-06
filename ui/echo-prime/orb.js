@@ -29,6 +29,12 @@
  * Depth: every frame the moons are insertion-sorted by depth into a preallocated index (back to front). Moons behind the
  * sphere's limb are painted before the sphere (2D) or clipped by its disc in the shader (WebGL), and their trails and
  * steady links are clipped the same way; bolts only join moons in front of the limb and die if an end slips behind.
+ * In 2D the trails and halos add light while each body is painted over what lies behind it, so a nearer moon covers a
+ * farther one (moons behind the limb at 75 % opacity, as in WebGL).
+ * Pointer: hit-testing follows what is painted. Each renderer records the sphere's screen disc every frame (the radius it
+ * paints or clips with); a moon behind the limb can be hovered or opened only outside that disc and only while part of its
+ * body shows, and the topmost body under the pointer wins. A still mouse is re-tested every animated frame, so a moon that
+ * slides behind the sphere loses its name tag and a touch tag goes as soon as its moon is out of sight.
  * Allocation: the scene step and the WebGL frame write into preallocated typed arrays, pooled moons and pooled arcs; the
  * 2D fallback takes its colour strings from a bounded cache but still creates CanvasGradient objects each frame (the
  * Canvas 2D API binds a gradient to its coordinates).
@@ -250,8 +256,11 @@ void main(){if(vBehind>.5&&distance(gl_FragCoord.xy,sphere.xy)<sphere.z)discard;
     let clock=0,fclock=0,hover=-1,hoverId='',tipUntil=0;
     const palette=[new Float32Array(3),new Float32Array(3),new Float32Array(3)];
     const base=[new Float32Array(3),new Float32Array(3),new Float32Array(3)];
+    // The sphere's screen disc (centre x, y and radius, CSS pixels) as last drawn; each renderer writes it every frame with
+    // the radius it paints (2D) or clips moons with (WebGL), so hit-testing matches the screen.
+    const disc=new Float64Array(3);
     const self={
-      state,look,sats,arcs,lights,bolt,palette,base,order,
+      state,look,sats,arcs,lights,bolt,palette,base,order,disc,
       get satCount(){return satCount;},get clock(){return clock;},get fclock(){return fclock;},get hover(){return hover;},get version(){return version;},
       setBase(colors){for(let i=0;i<3;i++){base[i][0]=colors[i][0];base[i][1]=colors[i][1];base[i][2]=colors[i][2];}},
       setState(detail){
@@ -439,17 +448,36 @@ void main(){if(vBehind>.5&&distance(gl_FragCoord.xy,sphere.xy)<sphere.z)discard;
         }
         return SEGMENTS+1;
       },
-      hit(px,py,maxDistance){let best=-1,bd=maxDistance;for(let i=0;i<satCount;i++){const s=sats[i];const d=Math.hypot(s.sx-px,s.sy-py)-s.size*s.k*.6;if(d<bd){bd=d;best=i;}}return best;},
+      /** True while moon i is out of sight: behind the limb with its whole body inside the sphere's screen disc. */
+      hidden(i){
+        const s=sats[i];if(s.z>=look.limb)return false;
+        const dx=s.sx-disc[0],dy=s.sy-disc[1];return Math.sqrt(dx*dx+dy*dy)+s.size*s.k<=disc[2];
+      },
+      /** The moon at a screen point, as painted. Front to back, the first body under the point wins (a nearer moon covers a
+       *  farther one); a moon behind the limb counts only outside the sphere's disc, where it shows, and only while part of
+       *  its body shows. With no body under the point: the visible moon whose edge is nearest, within maxDistance. */
+      hit(px,py,maxDistance){
+        const ox=px-disc[0],oy=py-disc[1],overSphere=ox*ox+oy*oy<disc[2]*disc[2],limb=look.limb;
+        let best=-1,bd=maxDistance;
+        for(let k=satCount-1;k>=0;k--){
+          const i=order[k],s=sats[i];
+          if(s.z<limb&&(overSphere||self.hidden(i)))continue;
+          const r=s.size*s.k,dx=s.sx-px,dy=s.sy-py,d=Math.sqrt(dx*dx+dy*dy);
+          if(d<=r)return i;
+          if(d-r<bd){bd=d-r;best=i;}
+        }
+        return best;
+      },
       setHover(index,t){hover=index;hoverId=index>=0?sats[index].id:'';if(index>=0)tipUntil=t+TIP_MS;},
       get hoverId(){return hoverId;},get tipUntil(){return tipUntil;},
       snapshot(){
-        const list=[];for(let i=0;i<satCount;i++){const s=sats[i];list.push({id:s.id,kind:s.kind,name:s.name,status:s.status,busy:s.busy,group:s.group||undefined,size:s.size,color:[s.color[0],s.color[1],s.color[2]],glow:s.glow,x:s.x,y:s.y,z:s.z,sx:s.sx,sy:s.sy,front:s.z>=look.limb});}return list;
+        const list=[];for(let i=0;i<satCount;i++){const s=sats[i];list.push({id:s.id,kind:s.kind,name:s.name,status:s.status,busy:s.busy,group:s.group||undefined,size:s.size,color:[s.color[0],s.color[1],s.color[2]],glow:s.glow,x:s.x,y:s.y,z:s.z,sx:s.sx,sy:s.sy,radius:s.size*s.k,front:s.z>=look.limb,hidden:self.hidden(i)});}return list;
       },
       /** Moon ids in painting order, back to front (what both renderers draw). */
       depthOrder(){const list=[];for(let i=0;i<satCount;i++)list.push(sats[order[i]].id);return list;},
       arcList(){const list=[];for(const a of arcs)if(a.active)list.push({from:a.a<0?'core':sats[a.a].id,to:sats[a.b].id,alpha:a.alpha,kind:a.a<0?'core':'group'});return list;},
       linkList(){const list=[];for(let i=0;i<satCount;i++)if(sats[i].busy)list.push({to:sats[i].id,steady:true});return list;},
-      getState(){return {mode:state.mode,source:state.source,intensity:state.intensity,amplitude:state.amplitude,transient:transient?transient.mode:null,pulse:look.pulse,ripple:look.ripple,red:look.red,flash:look.flash,energy:look.energy,swirl:look.swirl,flow:look.flow,filaments:look.filaments,hue:look.hue,ampl:look.ampl,hover:hover>=0?{id:sats[hover].id,name:sats[hover].name,kind:sats[hover].kind}:null,satellites:satCount,arcs:self.activeArcs(),claims:Object.keys(claims)};},
+      getState(){return {mode:state.mode,source:state.source,intensity:state.intensity,amplitude:state.amplitude,transient:transient?transient.mode:null,pulse:look.pulse,ripple:look.ripple,red:look.red,flash:look.flash,energy:look.energy,swirl:look.swirl,flow:look.flow,filaments:look.filaments,hue:look.hue,ampl:look.ampl,hover:hover>=0?{id:sats[hover].id,name:sats[hover].name,kind:sats[hover].kind}:null,sphere:{x:disc[0],y:disc[1],r:disc[2]},satellites:satCount,arcs:self.activeArcs(),claims:Object.keys(claims)};},
       destroy(){if(transientTimer)clearTimeout(transientTimer);transientTimer=0;},
     };
     return self;
@@ -483,6 +511,8 @@ void main(){if(vBehind>.5&&distance(gl_FragCoord.xy,sphere.xy)<sphere.z)discard;
   function px(v){const n=Math.max(-4096,Math.min(8191,Math.round(v))),i=n+4096;return PX[i]||(PX[i]=n+'px');}
   function pointerBridge(canvas,scene,redraw){
     let tip=null,tipName=null,tipMeta=null,pointerType='mouse',tipTimer=0,filledIndex=-1,filledVersion=-1,left=NaN,top=NaN;
+    // The mouse position over the canvas (CSS pixels), NaN while the pointer is elsewhere; re-tested every animated frame.
+    let mouseX=NaN,mouseY=NaN;
     // The tag and its two lines are built once; a hover change only rewrites their text.
     function ensureTip(){
       if(tip||!canvas.parentNode||typeof document.createElement!=='function')return;
@@ -510,8 +540,17 @@ void main(){if(vBehind>.5&&distance(gl_FragCoord.xy,sphere.xy)<sphere.z)discard;
     function locate(event){const r=canvas.getBoundingClientRect();return [event.clientX-r.left,event.clientY-r.top];}
     function hide(){tipTimer=0;if(scene.hover>=0){scene.setHover(-1,now());show();redraw();}}
     function down(event){pointerType=event&&typeof event.pointerType==='string'&&event.pointerType?event.pointerType:'mouse';}
-    function move(event){if(event&&event.pointerType){if(event.pointerType==='touch')return;pointerType=event.pointerType;}const [x,y]=locate(event);const hit=scene.hit(x,y,14);if(hit!==scene.hover){scene.setHover(hit,now());show();redraw();}}
-    function leave(event){if(((event&&event.pointerType)||pointerType)==='touch')return;if(tipTimer){clearTimeout(tipTimer);tipTimer=0;}hide();}
+    function move(event){if(event&&event.pointerType){if(event.pointerType==='touch')return;pointerType=event.pointerType;}const [x,y]=locate(event);mouseX=x;mouseY=y;const hit=scene.hit(x,y,14);if(hit!==scene.hover){scene.setHover(hit,now());show();redraw();}}
+    function leave(event){if(((event&&event.pointerType)||pointerType)==='touch')return;mouseX=NaN;mouseY=NaN;if(tipTimer){clearTimeout(tipTimer);tipTimer=0;}hide();}
+    /** Every animated frame: the moons move under a still mouse, so what lies under it is tested again (a moon that slides
+     *  behind the sphere loses its tag and the pointer cursor; one that slides under the mouse gains them). A touch tag
+     *  stays up for its timer unless its moon goes out of sight. Then the showing tag follows its moon. */
+    function refresh(){
+      if(pointerType!=='touch'){
+        if(!Number.isNaN(mouseX)){const hit=scene.hit(mouseX,mouseY,14);if(hit!==scene.hover){scene.setHover(hit,now());show();return;}}
+      }else if(scene.hover>=0&&scene.hidden(scene.hover)){if(tipTimer){clearTimeout(tipTimer);tipTimer=0;}scene.setHover(-1,now());show();return;}
+      if(scene.hover>=0||filledIndex>=0)show();
+    }
     function click(event){
       const touch=pointerType==='touch',[x,y]=locate(event),hit=scene.hit(x,y,touch?26:18);
       if(hit<0){if(touch&&scene.hover>=0){if(tipTimer)clearTimeout(tipTimer);hide();}return;}
@@ -519,7 +558,7 @@ void main(){if(vBehind>.5&&distance(gl_FragCoord.xy,sphere.xy)<sphere.z)discard;
       scene.setHover(hit,now());show();const s=scene.sats[hit];dispatch('echo-orb-open',{id:s.id,kind:s.kind});
     }
     canvas.addEventListener('pointerdown',down);canvas.addEventListener('pointermove',move);canvas.addEventListener('pointerleave',leave);canvas.addEventListener('click',click);
-    return {refresh(){if(scene.hover>=0||filledIndex>=0)show();},destroy(){if(tipTimer)clearTimeout(tipTimer);tipTimer=0;canvas.removeEventListener('pointerdown',down);canvas.removeEventListener('pointermove',move);canvas.removeEventListener('pointerleave',leave);canvas.removeEventListener('click',click);if(tip&&tip.parentNode)tip.parentNode.removeChild(tip);tip=null;}};
+    return {refresh,destroy(){if(tipTimer)clearTimeout(tipTimer);tipTimer=0;canvas.removeEventListener('pointerdown',down);canvas.removeEventListener('pointermove',move);canvas.removeEventListener('pointerleave',leave);canvas.removeEventListener('click',click);if(tip&&tip.parentNode)tip.parentNode.removeChild(tip);tip=null;}};
   }
   function stageMode(canvas,mode){try{if(canvas.dataset&&canvas.dataset.orbMode!==mode)canvas.dataset.orbMode=mode;const stage=canvas.parentNode;if(stage&&stage.dataset&&stage.dataset.orbMode!==mode)stage.dataset.orbMode=mode;}catch{}}
 
@@ -543,21 +582,29 @@ void main(){if(vBehind>.5&&distance(gl_FragCoord.xy,sphere.xy)<sphere.z)discard;
     function rotate(x,y,z,a){const c=Math.cos(a),s=Math.sin(a),xx=x*c+z*s;z=z*c-x*s;x=xx;const angle=-.16+Math.sin(scene.clock*.035)*.12+pointer[1]*.035,cc=Math.cos(angle),ss=Math.sin(angle);R3[0]=x;R3[1]=y*cc-z*ss;R3[2]=y*ss+z*cc;return R3;}
     function project(x,y,z){const k=height*1.2/(3.3-z);P3[0]=width/2+x*k;P3[1]=height/2-y*k;P3[2]=k;return P3;}
     function orbit(front){const clock=scene.clock;ctx.lineWidth=.55;for(let ring=0;ring<3;ring++){const c=scene.palette[ring],incl=RING_INCL[ring],tilt=RING_TILT[ring]+Math.sin(clock*.03)*.04;ctx.strokeStyle=rgb(c,front?.24:.085);ctx.beginPath();let connected=false;for(let i=0;i<=240;i++){const a=i/240*Math.PI*2;let x=Math.cos(a)*1.19,y=Math.sin(a)*1.19,z=y*Math.sin(incl);y*=Math.cos(incl);const xx=x*Math.cos(tilt)-y*Math.sin(tilt);y=x*Math.sin(tilt)+y*Math.cos(tilt);x=xx;rotate(x,y,z,clock*.025);if((R3[2]>=0)!==front){connected=false;continue;}project(R3[0],R3[1],R3[2]);if(connected)ctx.lineTo(P3[0],P3[1]);else ctx.moveTo(P3[0],P3[1]);connected=true;}ctx.stroke();}}
-    function satScreen(){for(let i=0;i<scene.satCount;i++){const s=scene.sats[i];project(s.x,s.y,s.z);s.sx=P3[0];s.sy=P3[1];s.k=P3[2]/(height*.37);}}
-    /** Paints the moons on one side of the limb in depth order (back to front), so a nearer moon covers a farther one. */
+    /** Moon screen positions and the sphere's disc as this frame paints it (the body in draw() has radius height*.312*scale). */
+    function satScreen(){const D=scene.disc;D[0]=width/2;D[1]=height/2;D[2]=height*.312*scene.look.scale;for(let i=0;i<scene.satCount;i++){const s=scene.sats[i];project(s.x,s.y,s.z);s.sx=P3[0];s.sy=P3[1];s.k=P3[2]/(height*.37);}}
+    /** Paints the moons on one side of the limb in depth order (back to front). A trail and a halo add light ('lighter');
+     *  the body is then painted over whatever lies behind it ('source-over'), so a nearer moon covers a farther one. Leaves
+     *  the composite at 'source-over'. */
     function moons(front){
       const clock=scene.clock,limb=scene.look.limb,order=scene.order;
       for(let k=0;k<scene.satCount;k++){
         const i=order[k],s=scene.sats[i];if((s.z>=limb)!==front)continue;
         const size=s.size*s.k*(1+(s.busy?.08*Math.sin(clock*7+i):0)),dim=front?1:.75;
+        ctx.globalCompositeOperation='lighter';
         if(motion&&quality!=='quiet'&&s.trailLen>1){ctx.beginPath();project(s.x,s.y,s.z);ctx.moveTo(P3[0],P3[1]);for(let k=0;k<s.trailLen;k++){project(s.trail[k*2],s.trail[k*2+1],s.z);ctx.lineTo(P3[0],P3[1]);}ctx.strokeStyle=rgb(s.color,.16*dim*(s.busy?1.5:1));ctx.lineWidth=Math.max(.5,size*.25);ctx.stroke();}
         if(s.glow>0){const g=ctx.createRadialGradient(s.sx,s.sy,0,s.sx,s.sy,size*3.2);g.addColorStop(0,rgb(s.color,.4*s.glow*dim));g.addColorStop(1,rgb(s.color,0));ctx.fillStyle=g;ctx.fillRect(s.sx-size*3.2,s.sy-size*3.2,size*6.4,size*6.4);}
+        ctx.globalCompositeOperation='source-over';
         const g=ctx.createRadialGradient(s.sx-size*.35,s.sy-size*.4,size*.1,s.sx,s.sy,size);g.addColorStop(0,rgb(mix(s.color,WHITE,.55),dim));g.addColorStop(.55,rgb(s.color,dim));g.addColorStop(1,rgb(mix(s.color,DEEP,.75),dim));
         ctx.fillStyle=g;ctx.beginPath();ctx.arc(s.sx,s.sy,size,0,Math.PI*2);ctx.fill();
         if(i===scene.hover){ctx.strokeStyle=rgb(WHITE,.8);ctx.lineWidth=1;ctx.beginPath();ctx.arc(s.sx,s.sy,size+3,0,Math.PI*2);ctx.stroke();}
       }
+      ctx.globalCompositeOperation='source-over';
     }
+    /** Electrical arcs, added as light over everything ('lighter'). */
     function bolts(){
+      ctx.globalCompositeOperation='lighter';
       const t=now(),B=scene.bolt;
       for(let k=0;k<MAX_ARCS;k++){
         const arc=scene.arcs[k];if(!arc.active)continue;const to=scene.sats[arc.b];let x0,y0;
@@ -581,7 +628,7 @@ void main(){if(vBehind>.5&&distance(gl_FragCoord.xy,sphere.xy)<sphere.z)discard;
       ctx.globalCompositeOperation='source-over';
       orbit(false);
       // Everything behind the limb is painted before the sphere body, which then hides whatever lies over its face.
-      ctx.globalCompositeOperation='lighter';if(!motion)links(false);moons(false);ctx.globalCompositeOperation='source-over';
+      ctx.globalCompositeOperation='lighter';if(!motion)links(false);moons(false);
       // A solid tinted body keeps the emerald volume visible throughout the animation.
       ctx.fillStyle=rgb(mix(colors[0],DEEP,.9));ctx.beginPath();ctx.arc(cx,cy,r,0,Math.PI*2);ctx.fill();
       // Analytic lighting: a shaded glass core, reflected color and a soft rim.
@@ -645,6 +692,9 @@ void main(){if(vBehind>.5&&distance(gl_FragCoord.xy,sphere.xy)<sphere.z)discard;
     const MOON_STRIDE=8,moonData=new Float32Array(MAX_SATS*MOON_STRIDE),LINE_STRIDE=7;
     const lineCap=MAX_ARCS*SEGMENTS*2+MAX_SATS*TRAIL*2+MAX_SATS*2+MAX_ARCS*(SEGMENTS+1),lineData=new Float32Array(lineCap*LINE_STRIDE);
     const P2=new Float64Array(3);
+    // Screen radius (per unit of canvas height and of look.scale) inside which moons, trails and links behind the limb are
+    // discarded: the sphere's silhouette (~.312) plus a little margin for its antialiased rim.
+    const SPHERE_CLIP=.3152;
     function shader(type,code){const s=gl.createShader(type);gl.shaderSource(s,code);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)){const message=gl.getShaderInfoLog(s);gl.deleteShader(s);throw new Error('ECHO orb shader: '+message);}resources.push(['shader',s]);return s;}
     function program(vertex,fragment){const p=gl.createProgram();gl.attachShader(p,shader(gl.VERTEX_SHADER,vertex));gl.attachShader(p,shader(gl.FRAGMENT_SHADER,fragment));gl.linkProgram(p);if(!gl.getProgramParameter(p,gl.LINK_STATUS)){const message=gl.getProgramInfoLog(p);gl.deleteProgram(p);throw new Error('ECHO orb program failed: '+message);}resources.push(['program',p]);locations.set(p,new Map());return p;}
     function buffer(data,usage){const b=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.bufferData(gl.ARRAY_BUFFER,data instanceof Float32Array?data:new Float32Array(data),usage||gl.STATIC_DRAW);resources.push(['buffer',b]);return b;}
@@ -671,7 +721,9 @@ void main(){if(vBehind>.5&&distance(gl_FragCoord.xy,sphere.xy)<sphere.z)discard;
     function off(loc){if(loc>=0)gl.disableVertexAttribArray(loc);}
     function attrib(prog,name,size,stride,offset){const a=gl.getAttribLocation(prog,name);if(a>=0){gl.enableVertexAttribArray(a);gl.vertexAttribPointer(a,size,gl.FLOAT,false,stride,offset);}return a;}
     function project(x,y,z){const d=3.3-z;P2[0]=2.4*x/d/(width/height);P2[1]=2.4*y/d;P2[2]=3.3/d;return P2;}
-    function satScreen(){for(let i=0;i<scene.satCount;i++){const s=scene.sats[i];project(s.x,s.y,s.z);s.sx=(P2[0]+1)/2*width;s.sy=(1-P2[1])/2*height;s.k=P2[2]*height*1.2/3.3/(height*.37);}}
+    /** Moon screen positions and the sphere's disc in CSS pixels: the radius the moon and line shaders clip with (draw()
+     *  passes the same .3152*height*scale in device pixels as the `sphere` uniform). */
+    function satScreen(){const D=scene.disc;D[0]=width/2;D[1]=height/2;D[2]=SPHERE_CLIP*height*scene.look.scale;for(let i=0;i<scene.satCount;i++){const s=scene.sats[i];project(s.x,s.y,s.z);s.sx=(P2[0]+1)/2*width;s.sy=(1-P2[1])/2*height;s.k=P2[2]*height*1.2/3.3/(height*.37);}}
     /** Moon vertices in painting order (back to front): alpha-blended bodies then overlap the way their depths say. */
     function fillMoons(){
       const order=scene.order,hover=scene.hover;
@@ -718,7 +770,7 @@ void main(){if(vBehind>.5&&distance(gl_FragCoord.xy,sphere.xy)<sphere.z)discard;
       gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE);gl.useProgram(particles);gl.bindBuffer(gl.ARRAY_BUFFER,cloud);
       const pp=attrib(particles,'position',3,20,0),ps=attrib(particles,'seed',1,20,12),pk=attrib(particles,'kind',1,20,16);
       u1(particles,'time',scene.fclock);u1(particles,'aspect',width/height);u1(particles,'pixelRatio',ratio);u2(particles,'pointer',pointer[0],pointer[1]);colors(particles);gl.drawArrays(gl.POINTS,0,count);off(pp);off(ps);off(pk);
-      const sx=canvas.width/2,sy=canvas.height/2,sr=.3152*canvas.height*look.scale;
+      const sx=canvas.width/2,sy=canvas.height/2,sr=SPHERE_CLIP*canvas.height*look.scale;
       // Trails, steady links, bolts and bolt glow.
       if(lineVerts){gl.useProgram(lineProgram);gl.bindBuffer(gl.ARRAY_BUFFER,lineBuffer);gl.bufferSubData(gl.ARRAY_BUFFER,0,lineData);
         const lp=attrib(lineProgram,'position',2,LINE_STRIDE*4,0),lc=attrib(lineProgram,'color',4,LINE_STRIDE*4,8),lb=attrib(lineProgram,'behind',1,LINE_STRIDE*4,24);
