@@ -25,19 +25,20 @@ const walk=(n:Node):Node[]=>n.children.flatMap(c=>[c,...walk(c)]);
 const flush=async()=>{for(let i=0;i<30;i++)await new Promise(r=>setImmediate(r));};
 const UPL='upl_'+'a'.repeat(32);
 const media=(kind:'image'|'video'|'audio')=>({uploadId:UPL,artifactId:'art_'+'b'.repeat(32),url:'/api/prime/uploads/'+UPL+'/file',type:kind==='image'?'image/png':kind==='video'?'video/mp4':'audio/mpeg',kind,bytes:900,name:'out.'+(kind==='image'?'png':kind==='video'?'mp4':'mp3')});
-function world(opts:{execute?:any;jobs?:any[];prepareStatus?:number;catalog?:any[]}={}){
+function world(opts:{execute?:any;executes?:any[];jobs?:any[];jobFor?:(body:any)=>any;prepareStatus?:number;catalog?:any[]}={}){
  const ids=new Map<string,Node>(),root=new Node('body');
  const make=(id:string,tag='div')=>{const n=new Node(tag);n.setAttribute('id',id);ids.set('#'+id,n);return n;};
  const label=new Node('label'),brief=make('creative-prompt','textarea');label.append(brief);
  const request=new Node('div');request.append(make('selected-tool','h3'),make('tool-details','p'),label,make('creative-inputs'),make('creative-arguments','textarea'),make('prepare-creative','button'),make('refresh-catalog','button'),make('creative-result','pre'));
  root.append(make('catalog-state'),make('creative-search','input'),make('creative-category','select'),make('model-list'),make('include-adult','input'),make('creative-tools'),request,make('request-review'),make('request-cost'),make('connection-result'),make('execute-request','button'),make('review-dialog','dialog'),make('creative-dialog','dialog'),make('refresh-connections','button'));
- const calls:any[]=[],jobs=[...(opts.jobs??[])],events:any[]=[],windowEvents:Record<string,((e:any)=>unknown)[]>={};
+ const calls:any[]=[],jobs=[...(opts.jobs??[])],executes=[...(opts.executes??[])],events:any[]=[],windowEvents:Record<string,((e:any)=>unknown)[]>={};
+ const ticketIds=['11111111-2222-4333-8444-555555555555','22222222-2222-4333-8444-555555555555','33333333-2222-4333-8444-555555555555'];let prepared=0;
  const json=(status:number,body:any)=>({ok:status>=200&&status<300,status,headers:{get:()=> 'application/json'},json:async()=>body});
  const fetch=vi.fn(async(url:string,init:any={})=>{
   const body=init.body?JSON.parse(init.body):undefined;calls.push({url,body});
-  if(url==='/api/prepare')return opts.prepareStatus?json(opts.prepareStatus,{error:'Same-origin Prime session required'}):json(200,{id:'tkt',digest:'dig',requestId:'11111111-2222-4333-8444-555555555555',cost:'Provider charges or quota may apply. No automatic fallback.',scope:'tier:1',request:body});
-  if(url==='/api/execute')return json(200,opts.execute??{state:'returned',requestId:'11111111-2222-4333-8444-555555555555',result:{ok:true},job:{label:'Tool',elapsedMs:1000}});
-  if(url==='/api/prime/media/job')return json(200,jobs.shift());
+  if(url==='/api/prepare')return opts.prepareStatus?json(opts.prepareStatus,{error:'Same-origin Prime session required'}):json(200,{id:'tkt'+prepared,digest:'dig',requestId:ticketIds[Math.min(prepared++,2)],cost:'Provider charges or quota may apply. No automatic fallback.',scope:'tier:1',request:body});
+  if(url==='/api/execute')return json(200,executes.length?executes.shift():opts.execute??{state:'returned',requestId:'11111111-2222-4333-8444-555555555555',result:{ok:true},job:{label:'Tool',elapsedMs:1000}});
+  if(url==='/api/prime/media/job')return json(200,jobs.length?jobs.shift():opts.jobFor?.(body));
   throw new Error('unexpected '+url);
  });
  const workspace={ownerHeaders:async()=>({'x-prime-request':'1'}),invalidate:vi.fn(),recheck:vi.fn(async()=>({authenticated:true}))};
@@ -117,6 +118,53 @@ describe('Creative Studio results',()=>{
   w.studio.open('image','fox');await w.runRequest();expect(w.get('#creative-result').textContent).not.toBe('');
   w.studio.select('echo.cartesia.tts');expect(w.get('#creative-result').textContent).toBe('');expect(w.output()!.children).toHaveLength(0);
   await w.runRequest();w.studio.open('video','boat');expect(w.get('#creative-result').textContent).toBe('');
+ });
+ it('stops painting a running request into the result area once another tool is chosen, and still follows it to Library',async()=>{
+  const id='11111111-2222-4333-8444-555555555555',deadline=new Date(Date.now()+900000).toISOString();
+  const running={state:'running',requestId:id,job:{phase:'polling',label:'On-prem video',providerStatus:'running',polls:1,elapsedMs:3000,deadline}};
+  let done=false;
+  const w=world({execute:running,jobFor:()=>done?{state:'returned',requestId:id,media:media('video'),job:{label:'On-prem video',elapsedMs:65000}}:running,
+   catalog:[{id:'echo.media.video_generate',category:'video',description:'on-prem video',health:'green'},{id:'echo.cartesia.tts',category:'voice',description:'Cartesia',health:'green'}]});
+  w.studio.open('video','waves at dusk');await w.runRequest();
+  expect(w.get('#creative-result').textContent).toContain('On-prem video is working');
+  w.studio.select('echo.cartesia.tts');await flush();
+  expect(w.get('#creative-result').textContent).toBe('');expect(w.output()!.children).toHaveLength(0);
+  const note=walk(w.get('#creative-result').parentNode!).find(n=>n.getAttribute('id')==='creative-background')!;
+  expect(note.textContent).toContain('On-prem video is still running');expect(note.textContent).toContain(id);
+  done=true;await flush();
+  expect(w.get('#creative-result').textContent).toBe('');expect(w.output()!.children).toHaveLength(0);
+  expect(note.textContent).toContain('On-prem video finished; saved to Library as out.mp4.');
+  expect(w.window.EchoPrimeLibrary.refresh).toHaveBeenCalled();
+ });
+ it('lets the owner submit another request while an earlier one is still running',async()=>{
+  const id='11111111-2222-4333-8444-555555555555',deadline=new Date(Date.now()+900000).toISOString();
+  const running={state:'running',requestId:id,job:{phase:'polling',label:'On-prem video',providerStatus:'running',polls:1,elapsedMs:3000,deadline}};
+  let polls=0;
+  const w=world({executes:[running,{state:'returned',requestId:'22222222-2222-4333-8444-555555555555',media:media('audio'),job:{label:'Cartesia TTS',elapsedMs:900}}],
+   jobFor:()=>++polls>150?{state:'returned',requestId:id,media:media('video'),job:{label:'On-prem video',elapsedMs:65000}}:running,
+   catalog:[{id:'echo.media.video_generate',category:'video',description:'on-prem video',health:'green'},{id:'echo.cartesia.tts',category:'voice',description:'Cartesia',health:'green'}]});
+  // The first Execute click is not awaited: the owner keeps working while the video is followed.
+  w.studio.open('video','waves at dusk');await w.get('#prepare-creative').click();await flush();
+  const first=w.get('#execute-request').click();await flush();
+  expect(polls).toBeGreaterThan(0);expect(polls).toBeLessThanOrEqual(60);
+  w.studio.select('echo.cartesia.tts');w.get('#creative-prompt').value='Hello Commander';await w.get('#creative-prompt').fire('input');
+  await w.get('#prepare-creative').click();await flush();await w.get('#execute-request').click();await flush();
+  expect(w.calls.filter(c=>c.url==='/api/execute')).toHaveLength(2);
+  expect(walk(w.output()!).find(n=>n.tagName==='AUDIO')!.attributes.src).toBe('/api/prime/uploads/'+UPL+'/file');
+  expect(w.get('#creative-result').textContent).toContain('Cartesia TTS finished');
+  for(let i=0;i<20&&polls<=150;i++)await flush();
+  await first;
+  expect(w.get('#creative-result').textContent).toContain('Cartesia TTS finished');
+ });
+ it('counts only a missing file as a failed run; a file Prime could not read is reported as generated',async()=>{
+  const id='11111111-2222-4333-8444-555555555555';
+  const w=world({execute:{state:'returned',requestId:id,mediaError:'the file /x.png is outside media.localRoots',mediaErrorKind:'unreadable',result:{ok:true,path:'/x.png'},job:{label:'On-prem media router'}}});
+  w.studio.open('image','fox');await w.runRequest();
+  expect(w.events.at(-1)).toMatchObject({state:'returned'});
+  expect(w.get('#creative-result').textContent).toContain('On-prem media router generated a file, but Prime could not read it');
+  const v=world({execute:{state:'returned',requestId:id,mediaError:'On-prem media router answered without a media file',mediaErrorKind:'no_media',result:{ok:true},job:{label:'On-prem media router'}}});
+  v.studio.open('image','fox');await v.runRequest();
+  expect(v.events.at(-1)).toMatchObject({state:'failed'});
  });
  it('treats a 403 as a refusal: re-reads the session, never signs out, and shows the reason',async()=>{
   const w=world({prepareStatus:403});w.studio.open('image','fox');await w.get('#prepare-creative').click();await flush();

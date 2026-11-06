@@ -1,23 +1,26 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- focused SDK stand-ins */
 import {afterEach, describe, expect, it, vi} from 'vitest';
+import {createHash, randomBytes} from 'node:crypto';
 import {mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {createServer, type Server} from 'node:http';
 import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {dirname, join} from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {deflateSync} from 'node:zlib';
 import {PrimeHub, type Capability, type SdkBroker} from '../src/prime/hub.js';
 import {startPrimeServer} from '../src/prime/server.js';
 import {UploadStore, parseUploadsConfig} from '../src/prime/uploads.js';
-import {DEFAULT_GATE_CALL_KINDS, MediaCollector, defaultMediaConfig, findMedia, parseMediaConfig, sniffType, type MediaConfig} from '../src/prime/media-collect.js';
+import {DEFAULT_GATE_CALL_KINDS, MediaCollector, defaultMediaConfig, findMedia, parseMediaConfig, resolveMediaHost, sniffType, type MediaConfig} from '../src/prime/media-collect.js';
 import {MediaOutcomes, classifyOutcome} from '../src/prime/media-outcomes.js';
-import {MediaRouter, executability} from '../src/prime/media.js';
+import {MediaRouter, executability, rankCandidates, untestedCallKind} from '../src/prime/media.js';
+import {StdioMcp} from '../src/prime/stdio.js';
 
 const dirs:string[]=[],servers:Array<{close:()=>Promise<void>|void}>=[];
 afterEach(async()=>{for(const s of servers.splice(0).reverse())await s.close();for(const d of dirs.splice(0))rmSync(d,{recursive:true,force:true});});
 const tmp=(prefix:string)=>{const d=mkdtempSync(join(tmpdir(),prefix));dirs.push(d);return d;};
 function crc32(buf:Buffer){let c=0xffffffff;for(const b of buf){c^=b;for(let k=0;k<8;k++)c=(c>>>1)^(c&1?0xedb88320:0);}return (c^0xffffffff)>>>0;}
 function chunk(type:string,data:Buffer){const len=Buffer.alloc(4);len.writeUInt32BE(data.length);const t=Buffer.from(type,'ascii'),crc=Buffer.alloc(4);crc.writeUInt32BE(crc32(Buffer.concat([t,data])));return Buffer.concat([len,t,data,crc]);}
-function png(w=8,h=6){const ihdr=Buffer.alloc(13);ihdr.writeUInt32BE(w,0);ihdr.writeUInt32BE(h,4);ihdr[8]=8;ihdr[9]=6;const raw=Buffer.alloc(h*(1+w*4),120);for(let y=0;y<h;y++)raw[y*(1+w*4)]=0;return Buffer.concat([Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]),chunk('IHDR',ihdr),chunk('IDAT',deflateSync(raw)),chunk('IEND',Buffer.alloc(0))]);}
+function png(w=8,h=6,noise=false){const ihdr=Buffer.alloc(13);ihdr.writeUInt32BE(w,0);ihdr.writeUInt32BE(h,4);ihdr[8]=8;ihdr[9]=6;const raw=noise?randomBytes(h*(1+w*4)):Buffer.alloc(h*(1+w*4),120);for(let y=0;y<h;y++)raw[y*(1+w*4)]=0;return Buffer.concat([Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]),chunk('IHDR',ihdr),chunk('IDAT',deflateSync(raw)),chunk('IEND',Buffer.alloc(0))]);}
 const mp3=()=>Buffer.concat([Buffer.from('ID3'),Buffer.from([4,0,0,0,0,0,0]),Buffer.alloc(256,7)]);
 const cap=(id:string,extra:Partial<Capability>={}):Capability=>({id,registered:true,health:'green',category:'image',description:'generator',...extra});
 async function serve(handler:Parameters<typeof createServer>[1]){const s:Server=createServer(handler);await new Promise<void>(r=>s.listen(0,'127.0.0.1',()=>r()));servers.push({close:()=>new Promise<void>(r=>s.close(()=>r()))});return 'http://127.0.0.1:'+(s.address() as {port:number}).port;}
@@ -61,14 +64,17 @@ describe('execution outcomes',()=>{
   now+=13*3600_000;expect(new MediaOutcomes({file,now:()=>now}).demotion('echo.llm.openrouter.google-gemini-2.5-flash-image','OpenRouter')).toMatchObject({category:'billing'});
   now+=12*3600_000;expect(new MediaOutcomes({file,now:()=>now}).demotion('echo.llm.openrouter.google-gemini-2.5-flash-image','OpenRouter')).toBeUndefined();
  });
- it('excludes call kinds the gate cannot run, and readmits one once a run of it succeeds',()=>{
+ it('demotes an untested call kind instead of excluding it, excludes one the gate refused or the config denies, and clears it after a success',()=>{
   const seedream={id:'echo.llm.together.ByteDance-Seed-Seedream-4.0',description:'type=image; call_kind=together_image_generation.'};
-  expect(executability(seedream,['openai_compat'])).toContain('together_image_generation is not one the SDK gate runs');
+  expect(executability(seedream,['openai_compat'])).toBeUndefined();
+  expect(untestedCallKind(seedream,['openai_compat'])).toContain('together_image_generation');
+  expect(executability(seedream,['openai_compat'],undefined,'image',['together_image_generation'])).toContain('media.denyCallKinds');
   const o=new MediaOutcomes();o.record({cap:'echo.llm.together.other',provider:'Together AI',state:'returned',callKind:'together_image_generation'});
-  expect(executability(seedream,['openai_compat'],o)).toBeUndefined();
+  expect(untestedCallKind(seedream,['openai_compat'],o)).toBeUndefined();
   o.record({cap:seedream.id,provider:'Together AI',state:'blocked',detail:"unsupported call_kind 'together_image_generation'"});
   expect(executability(seedream,['openai_compat','together_image_generation'],o)).toContain('answered "unsupported call_kind');
   expect(executability({id:'echo.media.image_generate',description:'on-prem'},['openai_compat'])).toBeUndefined();
+  expect(untestedCallKind({id:'echo.media.image_generate',description:'on-prem'},['openai_compat'])).toBeUndefined();
  });
  it('offers the runnable on-prem image tool for the live-test fox brief, and says why the Together and OpenRouter image caps are out',async()=>{
   const snapshot=(JSON.parse(readFileSync(new URL('../ui/echo-prime/catalog.json',import.meta.url),'utf8')) as {capabilities:Capability[]}).capabilities;
@@ -77,8 +83,13 @@ describe('execution outcomes',()=>{
   expect(r.picked!.id).toBe('echo.media.image_generate');
   expect(r.picked!.request.arguments).toEqual({prompt:text,wait:false,style:'photoreal'});
   expect(r.excluded.find(x=>x.id==='echo.llm.openrouter.google-gemini-2.5-flash-image')!.reason).toContain('chat path');
-  expect(r.excluded.find(x=>x.id==='echo.llm.together.ByteDance-Seed-Seedream-4.0')!.reason).toContain('together_image_generation');
-  expect(r.excluded.filter(x=>x.reason.includes('together_image_generation')).length).toBeGreaterThan(10);
+  // Together's image call kind is untested on this gate: those tools rank lower with the reason shown, never hidden.
+  expect(r.excluded.some(x=>x.reason.includes('together_image_generation'))).toBe(false);
+  const ranked=rankCandidates('image',snapshot,{text,styles:['photoreal']});
+  expect(ranked.candidates.find(c=>c.id==='echo.llm.together.ByteDance-Seed-Seedream-4.0')!.demoted).toMatchObject({category:'untested',reason:expect.stringContaining('together_image_generation')});
+  expect(ranked.candidates.filter(c=>c.demoted?.category==='untested').length).toBeGreaterThan(10);
+  const denied=await new MediaRouter({catalog:()=>snapshot,denyCallKinds:['together_image_generation']}).route({text,mode:'image',classifier:false,probe:false});
+  expect(denied.excluded.filter(x=>x.reason.includes('together_image_generation')).length).toBeGreaterThan(10);
   // Whichever tools end up runnable: once the gate runs Together images (config, or one successful run), they rank again.
   const later=await new MediaRouter({catalog:()=>snapshot,callKinds:[...DEFAULT_GATE_CALL_KINDS,'together_image_generation']}).route({text,mode:'image',classifier:false,probe:false});
   expect([later.picked!.id,...later.alternatives.map(a=>a.id)]).toContain('echo.llm.together.ByteDance-Seed-Seedream-4.0');
@@ -241,5 +252,153 @@ describe('uploads ingest',()=>{
   const store=new UploadStore(parseUploadsConfig({root:tmp('prime-ingest-')}));
   await expect(store.ingest('o',{name:'fox.png',type:'image/png',data:png(20,10),tags:['studio']})).resolves.toMatchObject({kind:'image',type:'image/png',width:20,height:10,tags:['studio']});
   await expect(store.ingest('o',{name:'fake.png',type:'image/png',data:Buffer.from('MZ not an image at all')})).rejects.toMatchObject({status:415});
+ });
+});
+
+describe('review fixes: media that is actually stored',()=>{
+ const MUSIC='echo.elevenlabs.music_generation.generate';
+ it('has ElevenLabs save a long track where Prime reads it, so an answer over the 1 MiB bridge bound is stored, not blocked',async()=>{
+  const out=tmp('prime-media-el-'),big=Buffer.concat([mp3(),randomBytes(1_400_000)]);
+  const {hub,sdk}=hubWith(async(request:any)=>{
+   const p=request.params;
+   if(typeof p._save_to==='string'){mkdirSync(dirname(p._save_to),{recursive:true});writeFileSync(p._save_to,big);return {status:'ok',capability:request.capability,content_type:'audio/mpeg',bytes:big.length,saved_to:p._save_to};}
+   return {status:'ok',capability:request.capability,content_type:'audio/mpeg',bytes:big.length,audio_base64:big.toString('base64')};
+  },{config:{localRoots:[out]},catalog:[cap(MUSIC,{category:'music',description:'compose music'})]});
+  const t=await hub.prepare({target:'sdk',name:MUSIC,arguments:{prompt:'a 2 minute synthwave track',music_length_ms:120000}});
+  // Prime chooses the path (keyed by the request id) and the ElevenLabs wait, and the review shows both.
+  expect(t.request.arguments).toEqual({prompt:'a 2 minute synthwave track',music_length_ms:120000,_save_to:join(out,'elevenlabs',t.requestId+'.mp3'),_timeout:280});
+  const r=await hub.execute(t.id,t.digest) as any;
+  expect(r).toMatchObject({state:'returned',kind:'music',media:{type:'audio/mpeg',bytes:big.length}});
+  expect(sdk.invoke.mock.calls[0][0].params._save_to).toBe(join(out,'elevenlabs',t.requestId+'.mp3'));
+  expect(hub.outcomes().last(MUSIC)).toMatchObject({category:'ok'});
+ });
+ it('refuses at review a track this Prime could not receive inline, and never lets the browser pick the save path',async()=>{
+  const {hub}=hubWith(async()=>({}),{catalog:[cap(MUSIC,{category:'music',description:'compose music'})]});
+  await expect(hub.prepare({target:'sdk',name:MUSIC,arguments:{prompt:'x',music_length_ms:120000}})).rejects.toThrow(/media\.localRoots/);
+  await expect(hub.prepare({target:'sdk',name:MUSIC,arguments:{prompt:'x'}})).rejects.toThrow(/media\.localRoots/);
+  const short=await hub.prepare({target:'sdk',name:MUSIC,arguments:{prompt:'x',music_length_ms:20000}});
+  expect(short.request.arguments).toEqual({prompt:'x',music_length_ms:20000});
+  await expect(hub.prepare({target:'sdk',name:MUSIC,arguments:{prompt:'x',_save_to:'/home/forge/.ssh/authorized_keys'}})).rejects.toThrow(/cannot be overridden/);
+  await expect(hub.prepare({target:'sdk',name:'echo.cartesia.tts',arguments:{text:'x',_timeout:9000}})).rejects.toThrow(/cannot be overridden/);
+ });
+ it('never auto-picks ElevenLabs compose_detailed, whose multipart answer the gate router cannot pass on as a file',async()=>{
+  const catalog=()=>[cap('echo.elevenlabs.music_generation.compose_detailed',{category:'music'}),cap('echo.elevenlabs.music_generation.compose_detailed_stream',{category:'music'}),cap(MUSIC,{category:'music'})];
+  const r=await new MediaRouter({catalog}).route({text:'a synthwave track',mode:'music',classifier:false,probe:false});
+  expect(r.picked!.id).toBe(MUSIC);
+  for(const id of ['echo.elevenlabs.music_generation.compose_detailed','echo.elevenlabs.music_generation.compose_detailed_stream'])expect(r.excluded.find(x=>x.id===id)!.reason).toMatch(/multipart/);
+ });
+ it('reads Cartesia, ElevenLabs TTS and voice-gateway links from their loopback services with no media section',async()=>{
+  const seen:string[]=[];
+  const fetchImpl=(async(url:URL|string)=>{seen.push(String(url));return new Response(new Uint8Array(mp3()),{status:200,headers:{'content-type':'audio/mpeg'}});}) as unknown as typeof fetch;
+  const collector=new MediaCollector({config:defaultMediaConfig(),fetch:fetchImpl});
+  await expect(collector.collect('echo.cartesia.tts',{ok:true,path:'/home/forge/echo-integrations/audio/a.mp3',file:'a.mp3',audio_url:'/cartesia/audio/a.mp3'})).resolves.toMatchObject({type:'audio/mpeg',source:'url'});
+  await expect(collector.collect('echo.elevenlabs.tts',{ok:true,audio_url:'/tts/audio/b.mp3'})).resolves.toMatchObject({type:'audio/mpeg'});
+  // The gateway names FORGE's wired address; Prime reads the same port on the mapped loopback origin, never the LAN host.
+  await expect(collector.collect('echo.voice.speak',{url:'http://192.168.1.220:8239/audio/c.mp3',minio_key:'speak/x.wav'})).resolves.toMatchObject({type:'audio/mpeg'});
+  expect(seen).toEqual(['http://127.0.0.1:8302/cartesia/audio/a.mp3','http://127.0.0.1:8282/tts/audio/b.mp3','http://127.0.0.1:8239/audio/c.mp3']);
+  await expect(collector.collect('echo.voice.speak',{url:'http://192.168.1.220:22/c.mp3'})).rejects.toThrow(/not an internal origin named in media.origins/);
+  await expect(collector.collect('echo.voice.speak',{url:'http://example.com:8239/c.mp3'})).rejects.toThrow(/not an internal origin/);
+  expect(seen).toHaveLength(3);
+ });
+ it('adds the FORGE generator output directories as local roots only when they exist, and warns when Prime can read nothing',()=>{
+  const on=resolveMediaHost(parseMediaConfig(undefined),undefined,dir=>dir==='/home/forge/echo-media/out');
+  expect(on.config.localRoots).toEqual(['/home/forge/echo-media/out']);expect(on.warnings).toEqual([]);
+  const off=resolveMediaHost(parseMediaConfig(undefined),undefined,()=>false);
+  expect(off.config.localRoots).toEqual([]);expect(off.warnings.join(' ')).toMatch(/media\.localRoots/);
+  const explicit=resolveMediaHost(parseMediaConfig({localRoots:['/srv/out']}),{localRoots:['/srv/out']},()=>true);
+  expect(explicit.config.localRoots).toEqual(['/srv/out']);
+  const none=resolveMediaHost(parseMediaConfig({origins:[]}),{origins:[]},()=>false);
+  expect(none.warnings.join(' ')).toMatch(/media\.origins/);
+ });
+ it('reads a large data URL nested as OpenRouter returns it, Gemini inlineData and Imagen bytesBase64Encoded, and stores it',async()=>{
+  const big=png(200,200,true),b64=big.toString('base64');expect(big.length).toBeGreaterThan(100_000);
+  const openrouter={id:'gen-1',choices:[{index:0,message:{role:'assistant',content:'Here is your fox.',images:[{type:'image_url',image_url:{url:'data:image/png;base64,'+b64}}]}}]};
+  expect(findMedia(openrouter)[0]).toMatchObject({kind:'base64',type:'image/png'});
+  expect(findMedia({candidates:[{content:{role:'model',parts:[{text:'here'},{inlineData:{mimeType:'image/png',data:b64}}]}}]})[0]).toMatchObject({kind:'base64',type:'image/png',key:'inlineData'});
+  expect(findMedia({predictions:[{bytesBase64Encoded:b64,mimeType:'image/png'}]})[0]).toMatchObject({kind:'base64',type:'image/png'});
+  // A bare `data` field is never read as bytes without a sibling media type.
+  expect(findMedia({data:[{id:1}],inlineData:{data:b64}})).toEqual([]);
+  const {hub}=hubWith(async()=>openrouter,{catalog:[cap('echo.acme.image_gen',{description:'text-to-image'})]});
+  const r=await run(hub,'echo.acme.image_gen',{prompt:'a fox'});
+  expect(r).toMatchObject({state:'returned',kind:'image',media:{type:'image/png',width:200,height:200,bytes:big.length}});
+  expect(r.result.choices[0].message.images[0].image_url.url).toMatch(/^\[\d+ characters of base64/);
+ });
+});
+
+describe('review fixes: job states and answers',()=>{
+ it('ends a followed on-prem job as blocked with the reason when the media router reports it failed',async()=>{
+  const clock=fakeClock();
+  const {hub}=hubWith(async(request:any)=>request.capability==='echo.media.image_generate'?{ok:true,job_id:'j9',status:'queued'}:{ok:false,job_id:'j9',status:'failed',error:'ComfyUI ran out of memory'},{clock});
+  const r=await run(hub,'echo.media.image_generate',{prompt:'a fox',wait:false});
+  expect(r).toMatchObject({state:'blocked',job:{polls:1,providerJobId:'j9'}});
+  expect(r.detail).toContain('ComfyUI ran out of memory');expect(r.detail).not.toMatch(/may still be running/);
+  expect(hub.outcomes().last('echo.media.image_generate')!.category).toBe('refused');
+ });
+ it('keeps polling through a transient status-read failure',async()=>{
+  const clock=fakeClock(),reads=[{ok:false,error:'SDK gate HTTP 503'},{ok:true,job_id:'j2',status:'running'},{ok:true,job_id:'j2',status:'failed',error:'bad seed'}];
+  const {hub}=hubWith(async(request:any)=>request.capability==='echo.media.image_generate'?{ok:true,job_id:'j2',status:'queued'}:reads.shift(),{clock});
+  const r=await run(hub,'echo.media.image_generate',{prompt:'a fox',wait:false});
+  expect(r).toMatchObject({state:'blocked',job:{polls:3}});expect(r.detail).toContain('bad seed');
+ });
+ it('returns a non-media answer in full and marks any compaction of a media answer',async()=>{
+  const summary='word '.repeat(1000),rows=Array.from({length:60},(_,i)=>({i}));
+  const {hub}=hubWith(async()=>({ok:true,summary,rows}),{catalog:[cap('echo.acme.convert',{category:'tools',description:'converts notes'})]});
+  const r=await run(hub,'echo.acme.convert',{text:'notes'});
+  expect(r.kind).toBe('other');expect(r.result.summary).toBe(summary);expect(r.result.rows).toHaveLength(60);expect(r.truncated).toBeUndefined();
+  const audio=Buffer.concat([mp3(),Buffer.alloc(6000,9)]);
+  const {hub:media}=hubWith(async()=>({status:'ok',audio_base64:audio.toString('base64'),content_type:'audio/mpeg',lyrics:summary,parts:rows}),{catalog:[cap('echo.elevenlabs.sound_generation.sound_generation',{category:'sound'})]});
+  const m=await run(media,'echo.elevenlabs.sound_generation.sound_generation',{text:'thunder'});
+  expect(m.result.lyrics).toBe(summary);expect(m.result.audio_base64).toMatch(/^\[\d+ characters of base64/);
+  expect(m.result.parts).toHaveLength(51);expect(m.result.parts[50]).toBe('[10 more items not shown]');expect(m.truncated).toBe(true);
+ });
+ it('never fetches or stores links in a non-media tool answer',async()=>{
+  const fetchSpy=vi.fn(async()=>new Response('x'));
+  const {hub}=hubWith(async()=>({ok:true,results:[{title:'A',url:'https://api.together.ai/x.png',path:'/tmp/a.png'}]}),{catalog:[cap('echo.acme.search',{category:'tools',description:'web search'})],fetch:fetchSpy as unknown as typeof fetch});
+  const r=await run(hub,'echo.acme.search',{query:'fox'});
+  expect(r).toMatchObject({state:'returned',kind:'other',result:{results:[{url:'https://api.together.ai/x.png'}]}});
+  expect(fetchSpy).not.toHaveBeenCalled();expect(r.mediaError).toBeUndefined();expect(r.media).toBeUndefined();
+ });
+ it('tells a file Prime could not read apart from an answer without a file',async()=>{
+  const {hub}=hubWith(async()=>({ok:true,path:'/elsewhere/out/a.png'}));
+  const unreadable=await run(hub,'echo.media.image_generate',{prompt:'fox'});
+  expect(unreadable).toMatchObject({state:'returned',mediaErrorKind:'unreadable',mediaError:expect.stringContaining('media.localRoots')});
+  expect(hub.outcomes().last('echo.media.image_generate')).toMatchObject({category:'ok'});
+  const {hub:h2}=hubWith(async()=>({ok:true,note:'nothing'}));
+  const none=await run(h2,'echo.cartesia.tts',{text:'hi'});
+  expect(none).toMatchObject({state:'returned',mediaErrorKind:'no_media'});
+  expect(h2.outcomes().last('echo.cartesia.tts')!.category).not.toBe('ok');
+ });
+ it('says a request Prime could not send was not sent, and records no outcome against the tool',async()=>{
+  const {hub,sdk}=hubWith(async()=>{throw new Error('MCP long-request limit reached; the request was not sent');});
+  const r=await run(hub,'echo.cartesia.tts',{text:'hi'});
+  expect(r).toMatchObject({state:'blocked',detail:expect.stringContaining('not sent')});
+  expect(r.detail).not.toMatch(/outcome is unknown/);
+  expect(hub.outcomes().last('echo.cartesia.tts')).toBeUndefined();expect(sdk.invoke).toHaveBeenCalledTimes(1);
+ });
+ it('gives long calls their own request budget on the MCP connection',async()=>{
+  const client=await StdioMcp.connect({command:process.execPath,args:[fileURLToPath(new URL('./fixtures/prime-mcp.mjs',import.meta.url))]},5000);
+  const pending:Promise<unknown>[]=[];const keep=(p:Promise<unknown>)=>{pending.push(p.catch(()=>{}));return p;};
+  try{
+   for(let i=0;i<16;i++)keep(client.call('never',{}));
+   await expect(keep(client.call('never',{}))).rejects.toThrow(/request limit reached; the request was not sent/);
+   const long=keep(client.call('never',{},{timeoutMs:60000}));
+   expect(await Promise.race([long.then(()=>'settled',()=>'rejected'),new Promise(r=>setTimeout(()=>r('pending'),100))])).toBe('pending');
+   for(let i=0;i<7;i++)keep(client.call('never',{},{timeoutMs:60000}));
+   await expect(keep(client.call('never',{},{timeoutMs:60000}))).rejects.toThrow(/long-request limit reached; the request was not sent/);
+  }finally{client.close();await Promise.all(pending);}
+ });
+ it('streams a fetched file into the uploads store chunk by chunk',async()=>{
+  const body=Buffer.concat([mp3(),randomBytes(3*1024*1024)]);
+  const origin=await serve((req,res)=>{res.writeHead(200,{'content-type':'audio/mpeg'});for(let o=0;o<body.length;o+=65536)res.write(body.subarray(o,o+65536));res.end();});
+  const store=new UploadStore(parseUploadsConfig({root:tmp('prime-stream-')}));
+  const collector=new MediaCollector({config:{...defaultMediaConfig(),origins:[{prefix:'echo.cartesia.',origin}]}});
+  const sizes:number[]=[];
+  const got=await collector.collectInto('echo.cartesia.tts',{audio_url:'/a.mp3'},file=>store.ingestStream('o',{name:'a.mp3',type:file.type,tags:['studio'],chunks:(async function*(){for await(const c of file.chunks){sizes.push(c.length);yield c;}})()}));
+  expect(got).toMatchObject({type:'audio/mpeg',source:'url',value:{bytes:body.length,type:'audio/mpeg',sha256:createHash('sha256').update(body).digest('hex')}});
+  expect(sizes.length).toBeGreaterThan(4);expect(Math.max(...sizes)).toBeLessThan(1024*1024);
+  // A body that grows past the limit mid-stream is refused with the reason and leaves no upload behind.
+  const small=new MediaCollector({config:{...defaultMediaConfig(),origins:[{prefix:'echo.cartesia.',origin}],maxBytes:1024*1024}});
+  await expect(small.collectInto('echo.cartesia.tts',{audio_url:'/a.mp3'},file=>store.ingestStream('o',{name:'a.mp3',type:file.type,chunks:file.chunks}))).rejects.toThrow(/larger than the 1 MiB media limit/);
+  expect((await store.list('o')).length).toBe(1);
  });
 });

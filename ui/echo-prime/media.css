@@ -58,6 +58,9 @@
 .creative-progress{width:100%;height:6px;accent-color:#61c7a1}
 .creative-media-error{font-size:12px;color:#f0cf9d;line-height:1.55;margin:0}
 .creative-answer summary{font-size:12px;color:#aac8b9;cursor:pointer}
+/* Requests still running after the owner moved on to another tool: followed quietly, reported here. */
+.creative-background{font-size:12px;color:#aac8b9;line-height:1.55;margin:8px 0 0}
+.creative-background[hidden]{display:none}
 /* The Studio length control (video, music, sound effects); hidden for tools that take no length. */
 .creative-duration{max-width:260px}
 .creative-duration[hidden]{display:none}

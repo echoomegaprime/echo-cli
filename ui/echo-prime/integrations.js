@@ -2,7 +2,10 @@
  'use strict';
  const $=s=>document.querySelector(s), snapshot=window.EchoPrimeCatalog||{capabilities:[],models:[]};
  let catalog=snapshot.capabilities, selected=null, template=null, ticket=null, host=false, submitting=false,generation=0,revision=0,controller=new AbortController();
- let studioInputs=[],pickerOpen=false,output=null,durationRow=null,durationInput=null,durationHint=null;
+ let studioInputs=[],pickerOpen=false,output=null,durationRow=null,durationInput=null,durationHint=null,background=null,view=0;
+ // Requests still running after the owner moved on (another tool, medium or submission): Prime keeps following each one by
+ // its request id, and its state shows in #creative-background, never in #creative-result, which belongs to the request on screen.
+ const followers=new Map();
  const ROLES=['reference','init','mask','audio','script'];
  const status=$('#catalog-state'), result=$('#creative-result');
  // Per-call client waits. Execute answers within Prime's inline window (20 s) and long runs continue server-side, so no
@@ -29,11 +32,17 @@
   return value;
  }
  function debug(operation,outcome){console.debug('[echo.studio]',{schema_version:1,event:'studio_operation',operation,outcome});}
- function clearResult(){result.textContent='';if(output)output.replaceChildren();}
+ function noteBackground(){
+  const lines=[...followers.values()].filter(f=>f.view!==view).map(f=>f.done||f.label+' is still running (request ID '+f.requestId+'). Prime keeps following it and saves the result to Library.');
+  if(!lines.length&&!background)return;
+  if(!background){background=el('p',{id:'creative-background',class:'creative-background','aria-live':'polite'});(output||result).after(background);}
+  background.textContent=lines.join(' ');background.hidden=!lines.length;
+ }
+ function clearResult(){for(const [id,f] of followers)if(f.done)followers.delete(id);view++;result.textContent='';if(output)output.replaceChildren();noteBackground();}
  function invalidate(){generation++;revision++;controller.abort();controller=new AbortController();ticket=null;selected=null;template=null;host=false;submitting=false;catalog=snapshot.capabilities;studioInputs=[];pickerOpen=false;
   for(const id of ['creative-prompt','creative-arguments','creative-search'])$('#'+id).value='';
   for(const id of ['creative-result','request-review','request-cost','connection-result','tool-details','selected-tool'])$('#'+id).textContent='';
-  if(output)output.replaceChildren();if(durationInput)durationInput.value='';syncDuration();
+  if(output)output.replaceChildren();followers.clear();view++;if(background){background.textContent='';background.hidden=true;}if(durationInput)durationInput.value='';syncDuration();
   $('#execute-request').disabled=true;for(const id of ['review-dialog','creative-dialog'])if($('#'+id).open)$('#'+id).close();renderStudioInputs();render();debug('account','cleared');
  }
  window.addEventListener('echo-account-changed',invalidate);
@@ -191,7 +200,7 @@
   const j=r.job||{},label=j.label||r.capability||'The tool';
   if(r.state==='running')return label+' is working · '+clock(j.elapsedMs||0)+' elapsed · '+(j.phase==='polling'?'job '+(j.providerStatus||'queued')+(j.polls?' (status read '+j.polls+')':''):j.phase==='collecting'?'saving the file':'waiting for the provider')+'. Prime follows it until '+timeOf(j.deadline)+' and keeps the result in Library. Request ID '+r.requestId+'.';
   if(r.state==='submitted')return j.howToCheck||r.detail||label+' accepted the request. Request ID '+r.requestId+'.';
-  if(r.state==='returned')return r.media?label+' finished in '+clock(j.elapsedMs||0)+'. Saved to Library as '+r.media.name+'.':label+' answered'+(r.mediaError?', but no media file was stored.':'.');
+  if(r.state==='returned')return r.media?label+' finished in '+clock(j.elapsedMs||0)+'. Saved to Library as '+r.media.name+'.':r.mediaErrorKind==='unreadable'?label+' generated a file, but Prime could not read it: its media settings or uploads refused it (details below).':label+' answered'+(r.mediaError?', but no media file was stored.':'.');
   if(r.state==='blocked')return label+' did not complete: '+(r.detail||'refused')+(/[.!?]$/.test(r.detail||'')?'':'.');
   return r.detail||'Outcome unknown. Do not resubmit automatically. Request ID '+r.requestId+'.';
  }
@@ -217,55 +226,72 @@
   output.replaceChildren(...nodes);
  }
  /** Follows a running request by its id until it ends (returned, blocked, uncertain or submitted-but-unfollowable),
-  *  backing off from 2 s to 10 s, never past Prime's own deadline. */
- async function follow(first,epoch,prompt){
+  *  backing off from 2 s to 10 s, never past Prime's own deadline. It paints #creative-result only while its request is the
+  *  one on screen (`mine===view`); after that it keeps following quietly and reports in #creative-background. */
+ async function follow(first,epoch,prompt,mine){
   // The deadline moves when the call becomes a followed provider job (invoke limit -> job wall), so each answer resets it.
   let r=first,wait=2000,misses=0,until=(Date.parse(first.job?.deadline||'')||Date.now()+900000)+60000;
+  const shown=()=>epoch===generation&&mine===view;
   while(epoch===generation&&r.state==='running'){
    const deadline=Date.parse(r.job?.deadline||'');if(Number.isFinite(deadline))until=deadline+60000;
    if(Date.now()>until){r={...r,state:'uncertain',detail:'Prime did not report a result by its own deadline. Check request ID '+first.requestId+' in Library or the gate execution log before submitting again.'};break;}
    await new Promise(resolve=>setTimeout(resolve,wait));wait=Math.min(10000,Math.round(wait*1.5));
    if(epoch!==generation)return null;
-   try{r=await api('prime/media/job',{requestId:first.requestId});misses=0;}
-   catch(e){if(epoch!==generation)return null;misses++;result.textContent='Could not read progress ('+(e instanceof Error?e.message:'unavailable')+'); trying again. Request ID '+first.requestId+'.';
+   try{const next=await api('prime/media/job',{requestId:first.requestId});if(!next||typeof next.state!=='string')throw Error('Prime answered without a request state');r=next;misses=0;}
+   catch(e){if(epoch!==generation)return null;misses++;if(shown())result.textContent='Could not read progress ('+(e instanceof Error?e.message:'unavailable')+'); trying again. Request ID '+first.requestId+'.';
     if(misses>=5){r={...r,state:'uncertain',detail:'Progress could not be read five times in a row. The request may still be running: check request ID '+first.requestId+' before submitting again.'};break;}continue;}
-   if(epoch===generation)renderOutcome(r,prompt);
+   const f=followers.get(first.requestId);if(f&&r.job?.label)f.label=r.job.label;
+   if(shown())renderOutcome(r,prompt);
   }
   return epoch===generation?r:null;
  }
+ /** A request's final answer: shown when it is still the one on screen, reported to the auto-router (which offers the next
+  *  tool after a failure), and kept: media files are already in Library (Prime registered them), other answers are saved. */
+ function settle(r,ctx){
+  const {current,tool,prompt,mine,executed}=ctx,shown=mine===view;
+  if(shown)renderOutcome(r,prompt);
+  // A provider body that says it failed (ok:false or an error string), or a media tool that answered without any file,
+  // counts as a failure for the router's next-best offer. A file Prime's own settings could not read is not the tool's fault.
+  const cat=tool?.category||'other',mediaTool=['image','video','music','sound','voice'].includes(cat);
+  const body=r&&r.result&&typeof r.result==='object'&&!Array.isArray(r.result)?r.result:null,failed=r.state==='returned'&&!r.media&&(!!body&&(body.ok===false||typeof body.error==='string')||mediaTool&&r.mediaErrorKind==='no_media');
+  if(shown)executed(failed?'failed':r.state,failed?String(body?.error||body?.detail||r.mediaError||'provider reported a failure'):r.detail||r.mediaError);
+  if(r.media&&typeof window.EchoPrimeLibrary?.refresh==='function')void window.EchoPrimeLibrary.refresh().catch(()=>{});
+  // Media results are registered by Prime with the stored file. Other tools' answers are kept as data, titled with the brief.
+  if(r.state==='returned'&&!r.media&&!mediaTool&&typeof window.EchoPrimeArtifacts?.register==='function'){
+   const reqArgs=current.request?.arguments||{},reqOpts=reqArgs.options||{};
+   void window.EchoPrimeArtifacts.register({
+    title:`${(current.request?.name||'Studio').replace(/^echo\./,'')} · ${(prompt||'result').slice(0,80)}`,
+    kind:'other',content:r.result??r,
+    provenance:{source:'studio',capability:current.request?.name,...(prompt?{prompt}:{}),...(typeof (reqArgs.model||reqOpts.model)==='string'?{model:String(reqArgs.model||reqOpts.model)}:{}),run_id:String(current.requestId||''),...(Array.isArray(reqArgs.inputs)&&reqArgs.inputs.length?{inputs:reqArgs.inputs}:{})},
+   }).catch(()=>{});
+  }
+  const f=followers.get(current.requestId);
+  if(f){if(shown)followers.delete(current.requestId);else f.done=r.state==='returned'&&r.media?f.label+' finished; saved to Library as '+r.media.name+'.':line(r);noteBackground();}
+ }
  $('#execute-request').addEventListener('click',async()=>{
   if(!ticket||submitting)return;submitting=true;$('#execute-request').disabled=true;const current=ticket,epoch=generation,tool=selected;ticket=null;
-  $('#review-dialog').close();clearResult();result.textContent='Submitting the reviewed request…';
+  $('#review-dialog').close();clearResult();const mine=view;result.textContent='Submitting the reviewed request…';
   const prompt=promptOf(current.request?.arguments||{});
   // The auto-router listens for this to offer the next-best tool after a failure; it never resubmits by itself.
   const executed=(state,detail)=>{try{window.dispatchEvent(new CustomEvent('echo-studio-executed',{detail:{state,detail:String(detail||'').slice(0,600),name:current.request.name,requestId:current.requestId}}));}catch{}};
+  let r;
   try{
-   let r;
    try{r=await api('execute',{id:current.id,digest:current.digest});}
    catch(e){
     // The answer was lost, not necessarily the request: Prime may still be running it, so look it up by id first.
     if(epoch!==generation)return;
     try{r=await api('prime/media/job',{requestId:current.requestId});}catch{throw e;}
    }
-   if(epoch!==generation)return;
-   renderOutcome(r,prompt);debug('execute',r.state);
-   if(r.state==='running'){r=await follow(r,epoch,prompt);if(!r)return;renderOutcome(r,prompt);}
-   // A provider body that says it failed (ok:false or an error string), or a media tool that answered without a file,
-   // counts as a failure for the router's next-best offer.
-   const cat=tool?.category||'other',mediaTool=['image','video','music','sound','voice'].includes(cat);
-   const body=r&&r.result&&typeof r.result==='object'&&!Array.isArray(r.result)?r.result:null,failed=r.state==='returned'&&!r.media&&(!!body&&(body.ok===false||typeof body.error==='string')||mediaTool&&!!r.mediaError);
-   executed(failed?'failed':r.state,failed?String(body?.error||body?.detail||r.mediaError||'provider reported a failure'):r.detail||r.mediaError);
-   if(r.media&&typeof window.EchoPrimeLibrary?.refresh==='function')void window.EchoPrimeLibrary.refresh().catch(()=>{});
-   // Media results are registered by Prime with the stored file. Other tools' answers are kept as data, titled with the brief.
-   if(r.state==='returned'&&!r.media&&!mediaTool&&typeof window.EchoPrimeArtifacts?.register==='function'){
-    const reqArgs=current.request?.arguments||{},reqOpts=reqArgs.options||{};
-    void window.EchoPrimeArtifacts.register({
-     title:`${(current.request?.name||'Studio').replace(/^echo\./,'')} · ${(prompt||'result').slice(0,80)}`,
-     kind:'other',content:r.result??r,
-     provenance:{source:'studio',capability:current.request?.name,...(prompt?{prompt}:{}),...(typeof (reqArgs.model||reqOpts.model)==='string'?{model:String(reqArgs.model||reqOpts.model)}:{}),run_id:String(current.requestId||''),...(Array.isArray(reqArgs.inputs)&&reqArgs.inputs.length?{inputs:reqArgs.inputs}:{})},
-    }).catch(()=>{});
-   }
-  }catch(e){if(epoch===generation){result.textContent='Outcome unknown. Do not resubmit automatically. Request ID: '+current.requestId+'. '+e.message;debug('execute','unconfirmed');executed('uncertain',e.message);}}finally{if(epoch===generation)submitting=false;}
+  }catch(e){if(epoch===generation&&mine===view){result.textContent='Outcome unknown. Do not resubmit automatically. Request ID: '+current.requestId+'. '+e.message;debug('execute','unconfirmed');executed('uncertain',e.message);}return;}
+  // Prime has answered: the owner can review and submit the next request while this one keeps running server-side.
+  finally{if(epoch===generation)submitting=false;}
+  if(epoch!==generation)return;
+  debug('execute',r.state);
+  const ctx={current,tool,prompt,mine,executed};
+  if(r.state!=='running'){settle(r,ctx);return;}
+  if(mine===view)renderOutcome(r,prompt);
+  followers.set(current.requestId,{requestId:current.requestId,label:r.job?.label||current.request.name,view:mine,done:''});
+  void follow(r,epoch,prompt,mine).then(last=>{if(last)settle(last,ctx);}).catch(e=>{if(epoch===generation)settle({state:'uncertain',requestId:current.requestId,detail:'This page lost track of the request ('+(e instanceof Error?e.message:'error')+'). Check request ID '+current.requestId+' in Library or the gate execution log before submitting again.'},ctx);});
  });
  window.EchoPrimeStudio={open,addInput:addStudioInput,inputs:()=>studioInputs.map(i=>({...i})),templateFor,materialize,
    /** Auto-router hooks: select a listed capability by id, or select it and set the exact request the router prepared

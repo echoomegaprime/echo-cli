@@ -366,10 +366,10 @@ excluded tools; each alternative carries the same fields as `picked`:
   "alternatives": [
     {"id": "echo.image.qwen.generate", "label": "Qwen Image on TEMPER", "health": "amber", "score": 0.518, "...": "same fields as picked"},
     {"id": "echo.image.generate", "label": "FORGE diffusers (SDXL-class)", "health": "amber", "score": 0.476, "...": "same fields as picked"},
-    {"id": "echo.fal.generate", "label": "fal.ai (FLUX schnell default)", "health": "amber", "score": 0.378, "...": "same fields as picked"}
+    {"id": "echo.fal.generate", "label": "fal.ai (FLUX schnell default)", "health": "amber", "score": 0.378, "...": "same fields as picked"},
+    {"id": "echo.llm.together.ByteDance-Seed-Seedream-4.0", "label": "Seedream 4.0 (Together)", "demoted": {"category": "untested", "reason": "its call kind together_image_generation is untested on this SDK gate (not in media.gateCallKinds and no successful run yet); the gate may refuse it"}, "...": "same fields as picked"}
   ],
   "excluded": [
-    {"id": "echo.llm.together.ByteDance-Seed-Seedream-4.0", "label": "Seedream 4.0 (Together)", "reason": "its call kind together_image_generation is not one the SDK gate runs (openai_compat, dedicated_endpoint, together_audio_transcription, anthropic_api, vertex_generate, anthropic_cli, grok_cli); add it to media.gateCallKinds once the gate supports it"},
     {"id": "echo.llm.openrouter.google-gemini-2.5-flash-image", "label": "Gemini 2.5 Flash Image (Nano Banana)", "reason": "it runs through the SDK gate's chat path (openai_compat; no media call kind in the registry), which returns text, not a media file"}
   ],
   "probe": {"probed": [], "source": "none"},
@@ -589,16 +589,25 @@ sound effects), the on-prem video router's `length` frames at an `fps` (5–129 
 "Length in seconds" control for those tools; the router fills it from the brief ("5 seconds") or the route's
 `durationSeconds`.
 
-**Only tools the gate can run are offered.** `executability()`:
-- An `echo.llm.*` generator must name a *media* call kind (`*_image_generation`, `*_video_generation`,
+**Tools the gate cannot run are out; tools it has not run yet rank lower.** `executability()` excludes:
+- An `echo.llm.*` generator that names no *media* call kind (`*_image_generation`, `*_video_generation`,
   `*_audio_speech`). Every chat kind returns text: `llm_router.py` has no image, video or audio output path, so the
   OpenRouter image models (`openai_compat`) and the Together `dedicated_endpoint` video/voice rows cannot return a
   file and are listed under `excluded` with that reason.
-- That call kind must be one the gate runs: the Prime config `media.gateCallKinds` (default: the seven kinds
-  `llm_router.py:_call_once` dispatches on 2026-11-06), or a kind a real run succeeded with. A gate answer
-  `unsupported call_kind 'X'` excludes kind X for 12 hours, then it is tried again. So when the gate gains a
-  Together image handler, adding `together_image_generation` to `media.gateCallKinds` (or one successful hand-picked
-  run in the Studio tool list) brings those tools back; nothing else changes.
+- A call kind listed in `media.denyCallKinds` (an operator's explicit exclusion).
+- A call kind the gate answered `unsupported call_kind 'X'` for: excluded for 12 hours, then tried again.
+
+`untestedCallKind()` demotes (score × 0.4, `demoted.category: "untested"`, the reason in `reason`) a tool whose
+call kind is not in `media.gateCallKinds` (default: the seven kinds `llm_router.py:_call_once` dispatches on
+2026-11-06) and has no successful run here. It is never excluded for that alone, so the ranking adapts whichever
+tools end up runnable: when the gate gains a Together image or video handler, the first successful run (or adding
+the kind to `media.gateCallKinds`) clears the demotion; until then a hand-picked try costs nothing (the gate
+refuses before calling the provider) and teaches the 12-hour exclusion.
+
+ElevenLabs `music_generation.compose_detailed` and `compose_detailed_stream` are excluded: ElevenLabs answers them
+`multipart/mixed` (JSON metadata plus audio, elevenlabs.io api-reference/music/compose-detailed) and the gate's
+ElevenLabs router (`elevenlabs_full.py`) passes on only audio/video/octet-stream bodies as files, so they arrive as
+text. Before this, the id tie-break picked `compose_detailed` over `generate` for every music brief.
 
 **Recent outcomes rank tools lower** (`src/prime/media-outcomes.ts`). Every Studio execution is recorded per
 capability (bounded: 300 capabilities, 50 call kinds; persisted to `media.outcomesFile`, default
@@ -620,18 +629,60 @@ provider job id, the request id and where to look, never "Outcome unknown". The 
 with `POST /api/prime/media/job {"requestId": "<id from the review ticket>"}` (owner-only; 404 for an unknown id),
 backing off 2 s to 10 s.
 
-**Results are files, not JSON** (`src/prime/media-collect.ts`). A finished answer's media is found in nested bodies
-(`audio_base64`, `b64_json`, data URLs, `path`, `audio_url`, `video_url`, `outputs.video_url`, `image_urls[]`, …) and
-read server-side under a strict allowlist: inline bytes; a local path under `media.localRoots`; a relative URL
-resolved against the loopback/LAN origin `media.origins` maps to the capability prefix (and only that origin); an
-absolute URL on a configured origin, or HTTPS on a host in `media.fetchHosts` (default Together's
-`api.together.ai`, `api.together.xyz`). Redirects are followed by hand (at most 3), each hop checked again; the
-response type must be an image, video or audio type; the bytes must sniff as the same medium; the size is capped at
-`min(media.maxBytes, uploads.maxBytes)`. The bytes are stored through `UploadStore.ingest` (the same checks as a
-browser upload) and registered as an Artifact Center record with `upload_id`, titled and provenanced with the actual
+- A status read the gate refuses with the provider's own failed status (the media router answers a failed job
+  `{ok:false, status:"failed", error}`, which the hub's `unwrap` refuses) ends the job `blocked` with that error, as
+  does `unknown job_id`; only transport failures count toward the five-misses "may still be running" ending.
+- A call Prime could not send (its MCP connection's request budget was full) ends `blocked` saying it was not sent,
+  and records no outcome against the tool. `StdioMcp` keeps two budgets: 16 for ordinary calls and 8 for calls that
+  carry a longer wait (generations, status reads), so long jobs never starve reviews and catalog reads.
+- The Studio releases Execute as soon as `/api/execute` answers. A request still running keeps being followed by its
+  request id; it paints `#creative-result` only while it is the request on screen. Choosing another tool or medium,
+  or submitting another request, moves it to `#creative-background` ("… is still running (request ID …)", then
+  "… finished; saved to Library as …"), and its result still lands in Library.
+
+**Results are files, not JSON** (`src/prime/media-collect.ts`). Only media kinds are collected: a search or
+conversion tool's links and paths are its answer and are never fetched. A finished answer's media is found in nested
+bodies (depth 8): inline `audio_base64`, `b64_json`, Imagen `bytesBase64Encoded` + `mimeType` (Vertex predict
+`predictions[]`), Gemini `inlineData {mimeType, data}` (a bare `data` is never read without its media type), data URLs
+of any size (OpenRouter `choices[0].message.images[0].image_url.url`), local `path` / ElevenLabs `saved_to`, and links
+(`audio_url`, `video_url`, `outputs.video_url`, `image_urls[]`, …). They are read server-side under a strict
+allowlist: inline bytes; a local path under `media.localRoots`; a relative URL resolved against the internal origin
+`media.origins` maps to the capability prefix (and only that origin); an absolute URL on a configured origin; a URL on
+another internal IP with the mapped origin's scheme and port (the voice gateway names FORGE's wired address
+`http://192.168.1.220:8239`; Prime reads the same path from the mapped loopback origin, never from the named host);
+or HTTPS on a host in `media.fetchHosts` (default Together's `api.together.ai`, `api.together.xyz`). Redirects are
+followed by hand (at most 3), each hop checked again; the response type must be an image, video or audio type; the
+first bytes must sniff as the same medium; the size is capped at `min(media.maxBytes, uploads.maxBytes)` while the
+bytes stream. They are streamed into `UploadStore.ingestStream` (the same checks as a browser upload, never the whole
+file in memory) and registered as an Artifact Center record with `upload_id`, titled and provenanced with the actual
 brief. The Studio renders `<img>`, `<video controls>` or `<audio controls>` from `/api/prime/uploads/<id>/file` (the
-page's `img-src/media-src 'self'` policy allows nothing else), plus the provider answer (long base64 replaced by its
-length) as untrusted data.
+page's `img-src/media-src 'self'` policy allows nothing else), plus the provider answer as untrusted data: for media
+tools long base64 is replaced by its length and long lists are cut with a "[N more items not shown]" marker
+(`truncated: true`); a non-media tool's answer is returned whole.
+
+`mediaErrorKind` tells the two media failures apart: `no_media` (the tool answered without any file, inline data or
+link: recorded as a failed run, and the router offers the next tool) and `unreadable` (it did answer with one, but
+Prime's own allowlist, limits or uploads setting stopped it: recorded as a successful run, worded "generated a file,
+but Prime could not read it", so nobody pays a second provider for a render that already exists).
+
+**Defaults that work on FORGE with no `media` section.** `media.origins` defaults to the internal services the
+registry's `target_url` names (read 2026-11-06; the gate's capability detail does not expose `target_url`, so Prime
+ships them): `echo.cartesia.` → `http://127.0.0.1:8302`, `echo.elevenlabs.tts` → `http://127.0.0.1:8282`,
+`echo.voice.` → `http://127.0.0.1:8239`, `echo.media.` → `http://127.0.0.1:8561`. A configured list replaces it.
+`media.localRoots` defaults, at startup, to whichever of `/home/forge/echo-media/out`,
+`/home/forge/echo-integrations/audio` and `/home/forge/echo-comms/tts_out` exist and are readable; a configured list
+replaces it. Startup logs `prime_media_config_warning` to stderr (and the start line's `media` counts) when either is
+empty.
+
+**ElevenLabs music and sound effects are saved, not sent back inline.** The op router returns binary audio as base64
+unless `_save_to` names a path, and the SDK bridge and hub refuse answers over 1 MiB (a 49 s mp3 at 128 kbps; about
+32 s at the music v2 `auto` format mp3_48000_192). For `music_generation.generate`, `music_generation.stream_compose`
+and `sound_generation.sound_generation`, `prepare` sets `_save_to` = `<first media.localRoots>/elevenlabs/<request
+id>.mp3` and `_timeout` = the kind's invoke limit minus 20 s (music 280 s, under the gate's 300 s cap timeout), so the
+review shows the exact path and the digest covers it; the answer carries `saved_to`, which Prime reads. The browser
+may not set `_save_to` or `_timeout` itself. With no local root, a music request over 25 s (or with no length, which
+lets the model pick one) is refused at review with the reason. The gate writes that path as `forge` on the gate's
+host, so this is correct only while Prime and the gate share a host (FORGE today).
 
 **A refused request is not a sign-out.** `integrations.js`, `media-router.js` and `library.js` no longer call
 `EchoPrimeWorkspace.invalidate()` on a 401/403. They call `EchoPrimeWorkspace.recheck()`, a fresh `/api/session`
@@ -648,11 +699,12 @@ provider for the next press. The success note names the provider and model used.
 ```json
 "media": {
   "gateCallKinds": ["openai_compat", "dedicated_endpoint", "together_audio_transcription", "anthropic_api", "vertex_generate", "anthropic_cli", "grok_cli"],
+  "denyCallKinds": [],
   "outcomesFile": "/home/forge/prime-prod/media-outcomes.json",
   "inlineMs": 20000, "jobWallMs": 900000,
   "invokeTimeoutsMs": {"image": 180000, "video": 300000, "music": 300000, "sfx": 120000, "voice": 90000, "other": 20000},
-  "localRoots": ["/home/forge/echo-media/out"],
-  "origins": [{"prefix": "echo.cartesia.", "origin": "http://127.0.0.1:8302"}, {"prefix": "echo.elevenlabs.tts", "origin": "http://127.0.0.1:8282"}],
+  "localRoots": ["/home/forge/echo-media/out", "/home/forge/echo-integrations/audio", "/home/forge/echo-comms/tts_out"],
+  "origins": [{"prefix": "echo.cartesia.", "origin": "http://127.0.0.1:8302"}, {"prefix": "echo.elevenlabs.tts", "origin": "http://127.0.0.1:8282"}, {"prefix": "echo.voice.", "origin": "http://127.0.0.1:8239"}, {"prefix": "echo.media.", "origin": "http://127.0.0.1:8561"}],
   "fetchHosts": ["api.together.ai", "api.together.xyz"],
   "maxBytes": 209715200, "fetchTimeoutMs": 60000
 }

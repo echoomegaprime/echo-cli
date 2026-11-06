@@ -30,7 +30,7 @@ import {EcfTools} from '../code/tools/ecf.js';
 import {ContinuityClient} from '../code/continuity.js';
 import {PrimeAutonomyHooks} from './autonomy-hooks.js';
 import {FleetRoles,parseRolesConfig} from './roles.js';
-import {parseMediaConfig} from './media-collect.js';
+import {parseMediaConfig,resolveMediaHost} from './media-collect.js';
 import {MediaOutcomes,prepareOutcomesFile} from './media-outcomes.js';
 interface PrimeConfig {esh?:StdioConfig;sdk?:StdioConfig&{tools:SdkTools;fixedArguments?:Json};steward?:StdioConfig&{tools:StewardTools};workspace?:WorkspaceConfig;publicOrigin?:string;models?:unknown;swarm?:unknown;voice?:unknown;adk?:unknown;bots?:unknown;browser?:unknown;uploads?:unknown;tools?:unknown;build?:unknown;autonomy?:unknown;roles?:unknown;media?:unknown}
 export function registerPrimeCommands(code:Command){
@@ -44,7 +44,10 @@ export function registerPrimeCommands(code:Command){
   const autonomy=parseAutonomyConfig(config.autonomy),rolesConfig=parseRolesConfig(config.roles);
   // Media: call kinds the gate runs, time limits and where generated files may be read from. Outcomes of real Studio runs
   // persist beside the code sessions unless the section names another file.
-  const mediaConfig=parseMediaConfig(config.media);
+  // On FORGE the generator output directories that exist become readable roots unless the section names its own; every
+  // gap that leaves generated files unreadable is logged once here, so a Studio with no pictures is never a silent mystery.
+  const media=resolveMediaHost(parseMediaConfig(config.media),config.media),mediaConfig=media.config;
+  for(const warning of media.warnings)process.stderr.write(JSON.stringify({schemaVersion:1,event:'prime_media_config_warning',warning})+'\n');
   const outcomesFile=mediaConfig.outcomesFile??join(opts.codeStateDir,'prime-media-outcomes.json');prepareOutcomesFile(outcomesFile);
   const outcomes=new MediaOutcomes({file:outcomesFile});
   const connections:StdioMcp[]=[];
@@ -82,7 +85,7 @@ export function registerPrimeCommands(code:Command){
    const autoagents=adk&&bots&&broker?new AutoAgents({adk,bots,caps:brokerCapabilityLookup(broker)}):undefined;
    const hub=new PrimeHub({capabilities:snapshot.capabilities,esh,steward,models:router,chat,tools,build:builds,autonomy,ecf,swarm:config.swarm!==undefined?new SwarmClient(parseSwarmConfig(config.swarm)):undefined,voice:config.voice!==undefined?new VoiceClient(parseVoiceConfig(config.voice)):undefined,adk,bots,uploads,uploadsOwner:config.workspace?.ownerUid??'local',browser:config.browser!==undefined?new BrowserClient(parseBrowserConfig(config.browser)):undefined,sdk:broker,autoagents,mediaConfig,outcomes});
    const server=await startPrimeServer(hub,ui,Number(opts.port),{workspace:config.workspace,publicOrigin:config.publicOrigin,uploads});
-   process.stdout.write(JSON.stringify({url:server.url,publicOrigin:config.publicOrigin??null,esh:!!esh,sdk:!!sdk,steward:!!steward,scope:'loopback host; public ingress requires configured TLS proxy and release evidence'})+'\n');
+   process.stdout.write(JSON.stringify({url:server.url,publicOrigin:config.publicOrigin??null,esh:!!esh,sdk:!!sdk,steward:!!steward,media:{localRoots:mediaConfig.localRoots.length,origins:mediaConfig.origins.length,warnings:media.warnings.length},scope:'loopback host; public ingress requires configured TLS proxy and release evidence'})+'\n');
    const close=async()=>{await server.close();await builds?.close();connections.forEach(c=>c.close());};
    process.once('SIGINT',()=>void close());process.once('SIGTERM',()=>void close());
   }catch(e){await builds?.close();connections.forEach(c=>c.close());throw e;}

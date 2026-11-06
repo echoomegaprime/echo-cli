@@ -8,6 +8,7 @@ import cases from './fixtures/media-classifier-cases.json';
 import type {ModelRouter} from '../src/code/model-factory.js';
 import type {PromptEnhancer} from '../src/prime/enhance.js';
 import {DEFAULT_GATE_CALL_KINDS,defaultMediaConfig} from '../src/prime/media-collect.js';
+import {MediaOutcomes} from '../src/prime/media-outcomes.js';
 import {PrimeHub, type Capability, type Json, type SdkBroker} from '../src/prime/hub.js';
 import {sdkBroker} from '../src/prime/sdk.js';
 import {startPrimeServer} from '../src/prime/server.js';
@@ -297,18 +298,26 @@ describe('shipped catalog snapshot',()=>{
     const edit=rankCandidates('image-edit',snapshot,{text:'edit this photo'});
     expect(edit.excluded.find(c=>c.id==='echo.google.vertex.imagen_edit')!.unavailable).toContain('health orphaned');
   });
-  it('lists the owner-disabled on-prem video tool, the registry test rows and the call kinds the gate cannot run under excluded, uncapped',async()=>{
+  it('lists the owner-disabled on-prem video tool and the registry test rows under excluded, ranks an untested call kind lower, and excludes it once the gate refused it',async()=>{
     const r=await new MediaRouter({catalog:()=>snapshot}).route({text:'a ten second video of waves at dusk',classifier:false,probe:false});
     expect(r.classification.kind).toBe('video');
     expect(r.excluded.find(x=>x.id==='echo.media.video_generate')!.reason).toContain('owner-disabled');
     expect(r.excluded.find(x=>x.id==='echo.llm.together.google-veo-3.0')!.reason).toContain('duplicate test');
     expect(r.excluded.find(x=>x.id==='echo.llm.together.google-veo-3.1-test-debug')!.reason).toContain('test/debug');
-    expect(r.excluded.find(x=>x.id==='echo.llm.together.openai-sora-2')!.reason).toContain('together_video_generation');
-    expect(r.excluded.length).toBeGreaterThan(8);
-    // The gate (llm_router.py, 2026-11-06) runs no Together video kind, so nothing is offered rather than a tool that cannot run.
-    expect(r.picked).toBeNull();expect(r.reason).toMatch(/No healthy, runnable video generator/);
+    expect(r.excluded.length).toBeGreaterThan(2);
+    // The gate's known call kinds (llm_router.py, 2026-11-06) include no Together video kind: those tools are offered ranked
+    // lower with that reason, so the ranking adapts the moment the gate runs them.
+    expect(r.excluded.some(x=>x.id==='echo.llm.together.openai-sora-2')).toBe(false);
+    expect(r.picked!.id).toMatch(/^echo\.llm\.together\./);
+    expect(r.picked!.demoted).toMatchObject({category:'untested',reason:expect.stringContaining('together_video_generation')});
+    expect(r.picked!.reason).toContain('ranked lower');
+    // Once the gate answered "unsupported call_kind", the kind is out: nothing is offered rather than a tool that cannot run.
+    const learned=new MediaOutcomes();learned.record({cap:'echo.llm.together.openai-sora-2',provider:'Together AI',state:'blocked',detail:"unsupported call_kind 'together_video_generation'"});
+    const refused=await new MediaRouter({catalog:()=>snapshot,outcomes:learned}).route({text:'a ten second video of waves at dusk',classifier:false,probe:false});
+    expect(refused.picked).toBeNull();expect(refused.reason).toMatch(/No healthy, runnable video generator/);
+    expect(refused.excluded.find(x=>x.id==='echo.llm.together.openai-sora-2')!.reason).toContain('together_video_generation');
     const once=await new MediaRouter({catalog:()=>snapshot,callKinds:['openai_compat','together_video_generation']}).route({text:'a ten second video of waves at dusk',classifier:false,probe:false});
-    expect(once.picked!.id).toMatch(/^echo\.llm\.together\./);expect(once.picked!.request.arguments).toMatchObject({command:'call',seconds:'10'});
+    expect(once.picked!.id).toMatch(/^echo\.llm\.together\./);expect(once.picked!.request.arguments).toMatchObject({command:'call',seconds:'10'});expect(once.picked!.demoted).toBeUndefined();
   });
   it('shows retired voice tools as excluded and never offers a voice listing as a generator',async()=>{
     const r=await new MediaRouter({catalog:()=>snapshot}).route({text:'read this aloud in a calm voice: welcome home',classifier:false,probe:false});
@@ -323,9 +332,10 @@ describe('shipped catalog snapshot',()=>{
     const r=await new MediaRouter({catalog:()=>snapshot,search}).route({text:'anime girl with a katana under cherry blossoms',classifier:false,probe:false});
     expect(r.classification).toMatchObject({kind:'image',styles:expect.arrayContaining(['anime'])});
     expect(r.picked).toMatchObject({id:'echo.media.image_generate',health:'green',healthSource:'catalog',catalogSource:'live',cost:'free',request:{arguments:{prompt:'anime girl with a katana under cherry blossoms',style:'anime',wait:false}}});
-    // Seedream's call kind (together_image_generation) is not one the gate runs: excluded with that reason, never offered.
-    expect(r.alternatives.map(a=>a.id)).not.toContain('echo.llm.together.ByteDance-Seed-Seedream-4.0');
-    expect(r.excluded.find(x=>x.id==='echo.llm.together.ByteDance-Seed-Seedream-4.0')!.reason).toContain('together_image_generation');
+    // Seedream's call kind (together_image_generation) is untested on this gate: never excluded, and any Together tool
+    // offered is marked ranked lower with that reason.
+    expect(r.excluded.some(x=>x.id==='echo.llm.together.ByteDance-Seed-Seedream-4.0')).toBe(false);
+    for(const a of r.alternatives.filter(a=>a.id.startsWith('echo.llm.together.')))expect(a.demoted,a.id).toMatchObject({category:'untested',reason:expect.stringContaining('together_image_generation')});
     // Snapshot only (amber), the hosted Seedream tier outranks it; the result says the ranking is the snapshot's.
     const offline=await new MediaRouter({catalog:()=>snapshot}).route({text:'anime girl with a katana under cherry blossoms',classifier:false,probe:false});
     expect(offline.catalog.source).toBe('snapshot');expect([offline.picked!.id,...offline.alternatives.map(a=>a.id)]).toContain('echo.media.image_generate');

@@ -238,6 +238,8 @@
  alternativesTitle.hidden=true;
  repick.addEventListener('click',()=>{void routeInStudio(brief?brief.value.trim():'',null,HINT_OF_CATEGORY[category?category.value:'auto']);});
  const badge=(text,cls)=>el('span',{class:'media-badge'+(cls?' '+cls:'')},text);
+ // A recent failed run says so; a call kind the gate has never run here is only untested, not a failure.
+ const demotedLabel=d=>d.category==='untested'?'untested on this gate':'last run: '+d.category;
  function applyPick(pick,how){
   if(!studio||typeof studio.apply!=='function')return false;
   const seconds=lastRoute&&lastRoute.classification&&typeof lastRoute.classification.durationSeconds==='number'?lastRoute.classification.durationSeconds:undefined;
@@ -268,7 +270,7 @@
    const p=r.picked;
    pickBox.hidden=false;
    pickBox.append(el('strong',{},p.label+' · '+p.provider),el('p',{class:'media-reason'},p.reason),
-    el('div',{class:'media-badges'},badge(kind+' · '+sure+'% sure'+(c.styles&&c.styles.length?' · '+c.styles.join(', '):'')),badge('health '+p.health+(p.healthSource==='probe'?' (probed)':p.healthSource==='catalog'?' (live catalog)':p.healthSource==='snapshot'?' (snapshot)':''),'health-'+p.health),badge(p.costNote),badge('quality '+p.quality+'/10 · speed '+p.speed+'/10'),catalogBadge(r.catalog,p),...(p.demoted?[badge('last run: '+p.demoted.category,'health-amber')]:[]),...(p.argumentShape==='unmodeled'?[badge('review request details','health-unknown')]:[])));
+    el('div',{class:'media-badges'},badge(kind+' · '+sure+'% sure'+(c.styles&&c.styles.length?' · '+c.styles.join(', '):'')),badge('health '+p.health+(p.healthSource==='probe'?' (probed)':p.healthSource==='catalog'?' (live catalog)':p.healthSource==='snapshot'?' (snapshot)':''),'health-'+p.health),badge(p.costNote),badge('quality '+p.quality+'/10 · speed '+p.speed+'/10'),catalogBadge(r.catalog,p),...(p.demoted?[badge(demotedLabel(p.demoted),'health-amber')]:[]),...(p.argumentShape==='unmodeled'?[badge('review request details','health-unknown')]:[])));
    status.textContent='Echo picked a tool for this '+kind+' brief. Review the request below, then submit it yourself; nothing runs until you do.'+catalogNote;
    if(!applyPick(p,'auto'))status.textContent+=' (The tool is not in this catalog view; search the live registry.)';
   }else{
@@ -278,7 +280,7 @@
   alternatives.hidden=!alts.length;alternativesTitle.hidden=!alts.length;
   alternativesTitle.textContent=r.picked?'Or use one of these instead (one tap):':'Tools for this ('+alts.length+'):';
   for(const a of alts){
-   const b=el('button',{type:'button',class:'media-alternative'+(a.demoted?' media-demoted':''),role:'listitem','data-media-alternative':a.id},el('strong',{},a.label+' · '+a.provider),el('span',{},'health '+a.health+' · '+a.costNote+' · '+a.quality+'/10'+(a.demoted?' · last run: '+a.demoted.category:'')),el('small',{},a.reason));
+   const b=el('button',{type:'button',class:'media-alternative'+(a.demoted?' media-demoted':''),role:'listitem','data-media-alternative':a.id},el('strong',{},a.label+' · '+a.provider),el('span',{},'health '+a.health+' · '+a.costNote+' · '+a.quality+'/10'+(a.demoted?' · '+demotedLabel(a.demoted):'')),el('small',{},a.reason));
    b.addEventListener('click',()=>{if(applyPick(a,'override')){status.textContent='You chose '+a.label+'. Review the request below, then submit it yourself.';lastRoute.picked=a;}});
    alternatives.append(b);
   }

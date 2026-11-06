@@ -437,6 +437,9 @@ export function describeCandidate(c:Capability):Candidate|null{
  else if((HEALTH_WEIGHT[health]??0.6)===0)candidate.unavailable='health '+health+' (the Studio refuses it at review)';
  else if(c.id==='echo.media.video_generate')candidate.unavailable='owner-disabled on TEMPER (RAM budget); this client never force-enables video';
  else if(/-(?:i2v|r2v)\b|I2V|kontext|imagen_edit/i.test(c.id))candidate.unavailable='needs a source image the capability reads itself; Auto never prepares it from a text-only brief (attach a reference in the Studio and pick it yourself)';
+ // ElevenLabs answers /v1/music/detailed as multipart/mixed (JSON metadata + audio, elevenlabs.io api-reference/music/compose-detailed);
+ // the gate's ElevenLabs router (elevenlabs_full.py) passes on only audio/video/octet-stream bodies as files, so this answer arrives as text.
+ else if(/^echo\.elevenlabs\.music_generation\.compose_detailed(?:_stream)?$/.test(c.id))candidate.unavailable='answers multipart/mixed (metadata plus audio), which the gate\'s ElevenLabs router passes on as text, not an audio file; use music_generation.generate';
  return candidate;
 }
 export interface RankOptions {text:string;styles?:StyleCue[];aspect?:Aspect;durationSeconds?:number;
@@ -447,8 +450,11 @@ export interface RankOptions {text:string;styles?:StyleCue[];aspect?:Aspect;dura
  liveHealth?:ReadonlySet<string>;
  /** Recent real executions: a tool whose last run failed for billing/auth ranks far lower, with the reason shown. */
  outcomes?:MediaOutcomes;
- /** `call_kind` values the SDK gate executes. A tool whose description names another kind is excluded with that reason. */
+ /** `call_kind` values the SDK gate is known to execute. A media tool whose description names another kind ranks lower
+  * as untested (the reason is shown); it is excluded only by `denyCallKinds` or a learned "unsupported call_kind" answer. */
  callKinds?:readonly string[];
+ /** Call kinds never offered (Prime config `media.denyCallKinds`). */
+ denyCallKinds?:readonly string[];
  /** Live registry shapes read for these ids (argument envelope and field names). */
  shapes?:ReadonlyMap<string,CapShape>}
 export interface RankResult {candidates:Candidate[];excluded:Candidate[]}
@@ -458,18 +464,26 @@ export function callKindOf(c:{description?:string}):string|undefined{return /\bc
  * router runs (openai_compat, dedicated_endpoint, anthropic_*, grok_cli, vertex_generate) is a chat completion: the gate's
  * llm_router.py has no image, video or audio output path (no images/b64/modalities handling, read 2026-11-06). */
 const MEDIA_CALL_KIND=/_(?:image|video)_generation$|_audio_speech$/;
-/** Why the gate cannot run this tool now, or nothing. An `echo.llm.*` generator must name a media call kind (the chat
- * kinds return text); that kind must be one the gate runs (configured, or a run of it succeeded) and not one the gate
- * answered "unsupported" for recently. */
-export function executability(c:{id:string;description?:string},callKinds:readonly string[],outcomes?:MediaOutcomes,mediaKind?:MediaKind):string|undefined{
+/** Why the gate cannot run this tool now, or nothing: an `echo.llm.*` generator must name a media call kind (the chat kinds
+ * return text); a kind the operator denies (`media.denyCallKinds`) or the gate answered "unsupported" for recently is out.
+ * A kind that is merely untested here is not excluded: see untestedCallKind. */
+export function executability(c:{id:string;description?:string},callKinds:readonly string[],outcomes?:MediaOutcomes,mediaKind?:MediaKind,deny:readonly string[]=[]):string|undefined{
  const kind=callKindOf(c);
  if(/^echo\.llm\./.test(c.id)&&mediaKind&&mediaKind!=='chat'&&(!kind||!MEDIA_CALL_KIND.test(kind)))return 'it runs through the SDK gate\'s chat path ('+(kind??'openai_compat; no media call kind in the registry')+'), which returns text, not a media file';
  if(!kind)return undefined;
+ if(deny.includes(kind))return 'its call kind '+kind+' is listed in media.denyCallKinds';
  const learned=outcomes?.callKind(kind);
  if(learned&&!learned.supported)return 'the SDK gate answered "unsupported call_kind \''+kind+'\'" for '+learned.cap.replace(/^echo\./,'')+' at '+new Date(learned.at).toISOString().slice(0,16).replace('T',' ')+' UTC; tools of that kind are not offered until the gate runs it';
- if(learned?.supported||callKinds.includes(kind))return undefined;
- return 'its call kind '+kind+' is not one the SDK gate runs ('+callKinds.join(', ')+'); add it to media.gateCallKinds once the gate supports it';
+ return undefined;
 }
+/** Why a tool ranks lower because Prime has no evidence the gate runs its call kind: the kind is not in the gate's known
+ * list and no run of that kind has succeeded here. Once the gate supports it, the first successful run clears this. */
+export function untestedCallKind(c:{id:string;description?:string},callKinds:readonly string[],outcomes?:MediaOutcomes):string|undefined{
+ const kind=callKindOf(c);
+ if(!kind||callKinds.includes(kind)||outcomes?.callKind(kind)?.supported)return undefined;
+ return 'its call kind '+kind+' is untested on this SDK gate (not in media.gateCallKinds and no successful run yet); the gate may refuse it';
+}
+const UNTESTED_WEIGHT=0.4;
 /** Deterministic ranking: fit x health x cost x quality (x a light speed factor x a demotion for a recent failed run).
  * Ties: health, cost, quality, id. */
 export function rankCandidates(kind:MediaKind,catalog:Capability[],options:RankOptions):RankResult{
@@ -483,14 +497,15 @@ export function rankCandidates(kind:MediaKind,catalog:Capability[],options:RankO
   const matched=cand.styles.filter(s=>styles.includes(s));
   cand.fit=1+Math.min(0.3,0.15*matched.length);
   if(!cand.unavailable&&cand.id==='echo.cartesia.tts'&&options.text.length>400)cand.unavailable='text longer than the 400-character Cartesia bound';
-  if(!cand.unavailable){const why=executability(c,callKinds,options.outcomes,kind);if(why)cand.unavailable=why;}
-  const demotion=options.outcomes?.demotion(cand.id,cand.provider);
+  if(!cand.unavailable){const why=executability(c,callKinds,options.outcomes,kind,options.denyCallKinds);if(why)cand.unavailable=why;}
+  const demotion=options.outcomes?.demotion(cand.id,cand.provider),untested=untestedCallKind(c,callKinds,options.outcomes);
   const healthWeight=HEALTH_WEIGHT[cand.health]??0.6;
-  cand.score=Math.round(cand.fit*healthWeight*COST_WEIGHT[cand.cost]*(cand.quality/10)*(0.85+0.015*cand.speed)*(demotion?.weight??1)*1000)/1000;
+  cand.score=Math.round(cand.fit*healthWeight*COST_WEIGHT[cand.cost]*(cand.quality/10)*(0.85+0.015*cand.speed)*(demotion?.weight??1)*(untested?UNTESTED_WEIGHT:1)*1000)/1000;
   const healthNote=cand.healthSource==='probe'?' (probed now)':cand.healthSource==='catalog'?' (live catalog)':cand.healthSource==='snapshot'?(cand.catalogSource==='live'?' (snapshot; the live catalog row carries no health)':' (snapshot)'):' (not reported)';
   cand.reasons=[kind+(matched.length?' + '+matched.join(', '):''),'health '+cand.health+healthNote,cand.costNote,'quality '+cand.quality+'/10, speed '+cand.speed+'/10'];
   if(demotion){cand.demoted={category:demotion.category,reason:demotion.reason};cand.reasons.push('ranked lower: '+demotion.reason);}
   else{const last=options.outcomes?.last(cand.id);if(last?.category==='ok')cand.reasons.push('last run succeeded '+new Date(last.at).toISOString().slice(0,16).replace('T',' ')+' UTC');}
+  if(untested){cand.demoted??={category:'untested',reason:untested};cand.reasons.push('ranked lower: '+untested);}
   if(cand.catalogSource==='snapshot')cand.reasons.push(SNAPSHOT_ONLY);
   const built=buildArguments(cand.id,kind,options.text,{styles,aspect:options.aspect,durationSeconds:options.durationSeconds},options.shapes?.get(cand.id));cand.argumentShape=built.shape;
   if(cand.argumentShape==='unmodeled')cand.reasons.push('argument shape not modeled; review the request details');
@@ -584,6 +599,8 @@ export interface MediaRouterOptions {
  outcomes?:MediaOutcomes;
  /** `call_kind` values the SDK gate runs (Prime config `media.gateCallKinds`). */
  callKinds?:readonly string[];
+ /** Call kinds never offered (Prime config `media.denyCallKinds`). */
+ denyCallKinds?:readonly string[];
  models?:ModelRouter;now?:()=>number;probeTimeoutMs?:number;probeCount?:number;classifierTimeoutMs?:number;searchTimeoutMs?:number;
 }
 const PROBE_CACHE_MS=60000;
@@ -680,7 +697,7 @@ export class MediaRouter {
   const base=mergeCatalog(this.options.catalog(),discovery.rows),listed=new Set(discovery.rows.map(c=>c.id));
   const liveHealth=new Set(discovery.rows.filter(c=>c.health!=='unknown').map(c=>c.id));
   const shapes=new Map<string,CapShape>();
-  const rankWith=(catalog:Capability[])=>rankCandidates(kind,catalog,{text,styles:classification.styles,aspect:classification.aspect,durationSeconds:classification.durationSeconds,live:listed,liveHealth,outcomes:this.options.outcomes,callKinds:this.options.callKinds,shapes});
+  const rankWith=(catalog:Capability[])=>rankCandidates(kind,catalog,{text,styles:classification.styles,aspect:classification.aspect,durationSeconds:classification.durationSeconds,live:listed,liveHealth,outcomes:this.options.outcomes,callKinds:this.options.callKinds,denyCallKinds:this.options.denyCallKinds,shapes});
   let ranked=rankWith(base);
   if(this.options.read&&data.probe!==false&&ranked.candidates.length){
    // The pick and the alternatives the Studio shows (seven) are read live: health, registration and argument shape.

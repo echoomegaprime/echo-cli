@@ -179,6 +179,13 @@ it('badges a snapshot-only pick under a live catalog honestly and marks a demote
  expect(w.find('data-media-alternative',alternative.id)!.textContent).toContain('last run: billing');
  expect(w.find('data-media-alternative',alternative.id)!.textContent).toContain('ranked lower: OpenRouter refused for billing');
 });
+it('labels a tool whose call kind the gate has not run as untested, never as a failed last run',async()=>{
+ const untested={category:'untested',reason:'its call kind together_image_generation is untested on this SDK gate'};
+ const w=await harness({route:()=>({...mediaResult(),picked:{...defaultPick,demoted:untested},alternatives:[{...alternative,demoted:untested}]})});
+ w.studio.open('auto','fox');await tick();
+ expect(w.find('data-media-auto')!.textContent).toContain('untested on this gate');expect(w.find('data-media-auto')!.textContent).not.toContain('last run: untested');
+ expect(w.find('data-media-alternative',alternative.id)!.textContent).toContain('untested on this gate');
+});
 it('applies the pick with its template and the length the route read from the brief',async()=>{
  const template={envelope:'llm',verb:'call',textKey:'prompt',fixed:{},duration:{key:'seconds',unit:'s-string',min:1,max:10},modeled:true,source:'family'};
  const w=await harness({route:()=>({...mediaResult(),classification:{kind:'video',confidence:1,styles:[],durationSeconds:5},picked:{...defaultPick,template}})});
