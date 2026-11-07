@@ -9,7 +9,7 @@
  const POLL_MS=3000,TICK_MS=1000,LIST_MS=30000,MAX_FAILURES=5,MAX_TEXT=12000,MAX_NAME=64,MAX_CAP=5,GROUP_MIN=2,GROUP_MAX=6,COOLDOWN_MS=5000,STORAGE='echo-prime-bot-v1';
  const HEX=/^[0-9a-f]{32}$/,STATUSES=['paused','idle','running','error'];
  let verdict={configured:false,available:false,reason:'echoBots status not loaded'},health=null,healthCheckedAt=null,bots=[],agents=null,agentsLoaded=false;
- let selected=null,pendingDelete=null,pane='none',noteText='',busy=false,generation=0,healthGeneration=0,failedAt=-Infinity,lastList=0;
+ let selected=null,pendingDelete=null,editing=null,pane='none',noteText='',busy=false,generation=0,healthGeneration=0,failedAt=-Infinity,lastList=0;
  let dialog=null,ui=null,navButton=null,chat=null,group=null,timer=null;
  const num=v=>typeof v==='number'&&Number.isFinite(v)?v:null;
  const str=(v,n)=>typeof v==='string'?(v.length>n?v.slice(0,n)+'…':v):'';
@@ -157,6 +157,7 @@
   controls.push(button(selected===bot.bot_id&&pane==='chat'?'Chat open':'Open chat',()=>select(bot.bot_id)));
   const paused=bot.status==='paused';
   controls.push(button(paused?'Resume':'Pause',()=>act(bot.bot_id,paused?'resume':'pause')));
+  controls.push(button('Stop',()=>act(bot.bot_id,'stop')),button('Edit',()=>edit(bot.bot_id)));
   if(pendingDelete===bot.bot_id)controls.push(button('Confirm delete',()=>act(bot.bot_id,'delete'),'quiet-button bots-danger'),button('Cancel',()=>{pendingDelete=null;note('');renderList();}));
   else controls.push(button('Delete',()=>{pendingDelete=bot.bot_id;note('Select Confirm delete on '+(str(bot.name,80)||'this bot')+' to remove it, or Cancel.');renderList();}));
   for(const b of controls)b.disabled=busy;
@@ -181,7 +182,7 @@
    publishSatellites();
    lastList=Date.now();
    if(pendingDelete&&!bots.some(b=>b.bot_id===pendingDelete))pendingDelete=null;
-   if(selected&&!bots.some(b=>b.bot_id===selected)){stopChat();selected=null;if(pane==='chat')pane='none';}
+   if(selected&&!bots.some(b=>b.bot_id===selected)){stopChat();selected=null;editing=null;if(pane==='chat'||pane==='edit')pane='none';}
    renderList();renderPane();debug('list',{bots:bots.length});
   }catch(error){if(gen!==generation)return;note('Bot list unavailable: '+(error instanceof Error?error.message:'request failed')+'. No automatic retry was made.');}
  }
@@ -202,9 +203,12 @@
   try{
    const result=await api(botId+'/'+action,{});
    if(gen!==generation)return;
-   if(action==='delete'){
+   if(action==='stop'){
+    bots=bots.map(b=>b.bot_id===botId?{...b,status:STATUSES.includes(result.status)?result.status:b.status}:b);
+    note('Stop requested for '+name+'. Active provider steps may still be running. Refresh to check before editing.');
+   }else if(action==='delete'){
     bots=bots.filter(b=>b.bot_id!==botId);pendingDelete=null;
-    if(selected===botId){stopChat();selected=null;if(pane==='chat')pane='none';try{localStorage.removeItem(STORAGE);}catch{}}
+    if(selected===botId){stopChat();selected=null;editing=null;if(pane==='chat'||pane==='edit')pane='none';try{localStorage.removeItem(STORAGE);}catch{}}
     note('Deleted '+name+' (confirmed by the service).');
    }else{
     bots=bots.map(b=>b.bot_id===botId?result:b);
@@ -212,17 +216,31 @@
    }
    publishSatellites();
    debug('action',{action,outcome:'returned'});
-  }catch(error){if(gen!==generation)return;note((action==='delete'?'Delete':action==='pause'?'Pause':'Resume')+' failed for '+name+': '+(error instanceof Error?error.message:'request failed')+'. No automatic retry was made.');debug('action',{action,outcome:'failed'});}
+  }catch(error){if(gen!==generation)return;note((action==='delete'?'Delete':action==='pause'?'Pause':action==='stop'?'Stop':'Resume')+' failed for '+name+': '+(error instanceof Error?error.message:'request failed')+'. No automatic retry was made.');debug('action',{action,outcome:'failed'});}
   finally{if(gen===generation){busy=false;renderList();renderPane();}}
+ }
+ async function edit(botId){
+  if(busy||!allowed()||!HEX.test(botId))return;
+  const gen=generation;busy=true;renderList();
+  try{
+   const bot=await api(botId);
+   if(gen!==generation)return;
+   if(bot.bot_id!==botId)throw new Error('the service answered for a different bot');
+   bots=bots.map(b=>b.bot_id===botId?bot:b);
+   if(bot.status!=='paused'||num(bot.inbox_depth)!==0){note('Pause the bot and stop pending work before editing. Stop requests cancellation; active steps may take time to finish.');return;}
+   stopChat();selected=botId;editing=bot;pane='edit';note('');renderPane(true);
+  }catch(error){if(gen===generation)note('Bot editor unavailable: '+(error instanceof Error?error.message:'request failed')+'.');}
+  finally{if(gen===generation){busy=false;renderList();}}
  }
  // ---- panes: create, chat, group -------------------------------------------
  function field(label,node){const l=el('label',undefined,'workspace-field');l.append(el('span',label),node);return l;}
- function createPane(){
+ function createPane(existing){
   const wrap=el('section',undefined,'bots-form');
-  wrap.append(el('h3','New bot'),el('p','Bots start paused. Resume one from its card when you are ready; a paused bot still accepts messages and answers when resumed.','bots-meta'));
+  wrap.append(el('h3',existing?'Edit bot':'New bot'),el('p',existing?'Editing requires a paused bot with no active or pending work. The service checks this again when saving. Saving leaves the bot paused.':'Bots start paused. Resume one from its card when you are ready; a paused bot still accepts messages and answers when resumed.','bots-meta'));
   const name=attr(el('input'),{maxlength:MAX_NAME,placeholder:'Bot name (up to 64 characters)',autocomplete:'off'});
   let agent;
-  if(agents&&agents.length){
+  if(existing){agent=attr(el('input'),{readonly:true,'aria-label':'Agent (cannot change)'});agent.value=existing.agent;agent.disabled=true;}
+  else if(agents&&agents.length){
    agent=el('select');
    for(const a of agents){const o=el('option',a.name+(typeof a.role==='string'&&a.role?' · '+str(a.role,60):''));o.value=a.name;agent.append(o);}
    agent.value=agents[0].name;
@@ -253,15 +271,26 @@
   const scopes=attr(el('input'),{placeholder:'Exact capability ids, comma-separated (optional; the agent default lease applies when empty)',autocomplete:'off'});
   const ttl=attr(el('input'),{type:'number',min:'1',step:'1'});ttl.value='3600';
   const uses=attr(el('input'),{type:'number',min:'1',step:'1'});uses.value='100';
+  if(existing){
+   name.value=existing.name;mode.value=existing.mode||'personal';instruction.value=typeof existing.instruction==='string'?existing.instruction:'';plugins.value=list(existing.plugins).join(', ');cap.value=String(existing.daily_cost_cap_usd);
+   const lease=existing.lease||{};scopes.value=list(lease.scopes).join(', ');ttl.value=num(lease.ttl_s)===null?'':String(lease.ttl_s);uses.value=num(lease.max_uses)===null?'':String(lease.max_uses);
+   scopes.setAttribute('placeholder','Exact capability ids; leave empty to revoke all capabilities');
+   if(existing.schedule){scheduled.checked=true;if(typeof existing.schedule.at==='string'){scheduleType.value='calendar';time.value=existing.schedule.at;timezone.value=existing.schedule.tz;days.forEach((day,i)=>{day.checked=Array.isArray(existing.schedule.weekdays)&&existing.schedule.weekdays.includes(i+1);});missed.value=existing.schedule.missed||'skip';}else minutes.value=String(existing.schedule.every_s/60);}
+   updateSchedule();
+  }
+  const scheduleDraft=()=>JSON.stringify([scheduled.checked,scheduleType.value,minutes.value,time.value,timezone.value,days.map(day=>day.checked),missed.value]);
+  const initial={name:name.value.trim(),mode:mode.value,instruction:instruction.value,plugins:plugins.value,cap:cap.value,scopes:scopes.value,ttl:ttl.value,uses:uses.value,schedule:scheduleDraft()};
   const scheduleRow=el('div',undefined,'bots-inline');scheduleRow.append(field('Run on a schedule',scheduled),field('Schedule type',scheduleType),minutesField);
   const leaseRow=el('div',undefined,'bots-inline');leaseRow.append(field('Lease TTL (seconds)',ttl),field('Lease max uses',uses));
-  const submit=button('Create bot (starts paused)',async()=>{
+  const submit=button(existing?'Save bot changes':'Create bot (starts paused)',async()=>{
    if(busy)return;
    const n=name.value.trim(),a=String(agent.value||'').trim();
    if(!n||n.length>MAX_NAME){note('Give the bot a name of 1 to '+MAX_NAME+' characters.');return;}
    if(!a){note('Name the Echo ADK agent this bot runs.');return;}
-   const body={name:n,agent:a,mode:mode.value};
-   if(scheduled.checked){
+   const body=existing?{}:{name:n,agent:a,mode:mode.value};
+   if(existing&&n!==initial.name)body.name=n;
+   if(existing&&mode.value!==initial.mode)body.mode=mode.value;
+   if((!existing||scheduleDraft()!==initial.schedule)&&scheduled.checked){
     if(scheduleType.value==='calendar'){
      if(!calendarReady){note('Calendar scheduling is not reported by this service.');return;}
      const tz=timezone.value.trim(),weekdays=days.flatMap((day,i)=>day.checked?[i+1]:[]);
@@ -269,37 +298,45 @@
      try{if(!tz)throw new Error();new Intl.DateTimeFormat('en',{timeZone:tz}).format();}catch{note('Enter a valid IANA timezone, such as America/Chicago or UTC.');return;}
      if(!weekdays.length){note('Choose at least one weekday.');return;}
      body.schedule={at:time.value,tz,weekdays,missed:missed.value};
-    }else{const m=Number(minutes.value);if(!Number.isSafeInteger(m)||m<1||m>10080){note('The schedule needs a whole number of minutes from 1 to 10080.');return;}body.schedule={every_s:m*60};}
+    }else{const m=Number(minutes.value);if(!Number.isSafeInteger(m)||m<1||m>10080){note('The schedule needs a whole number of minutes from 1 to 10080.');return;}body.schedule={every_s:m*60};if(existing&&existing.schedule&&existing.schedule.missed)body.schedule.missed=existing.schedule.missed;}
    }
-   if(instruction.value.trim())body.instruction=instruction.value;
-   const skills=plugins.value.split(',').map(s=>s.trim()).filter(Boolean);if(skills.length)body.plugins=skills;
-   const c=Number(cap.value);if(!Number.isFinite(c)||c<0||c>MAX_CAP){note('The daily cost cap must be between $0 and $'+MAX_CAP+'.');return;}body.daily_cost_cap_usd=Math.round(c*100)/100;
+   if(existing&&scheduleDraft()!==initial.schedule&&!scheduled.checked)body.schedule=null;
+   if(existing?instruction.value!==initial.instruction:instruction.value.trim())body.instruction=instruction.value.trim()?instruction.value:null;
+   const skills=plugins.value.split(',').map(s=>s.trim()).filter(Boolean);if(existing?plugins.value!==initial.plugins:skills.length)body.plugins=skills;
+   const c=Number(cap.value);if(!cap.value.trim()||!Number.isFinite(c)||c<0||c>MAX_CAP){note('The daily cost cap must be between $0 and $'+MAX_CAP+'.');return;}if(!existing||cap.value!==initial.cap)body.daily_cost_cap_usd=Math.round(c*100)/100;
    const ids=scopes.value.split(',').map(s=>s.trim()).filter(Boolean);
-   if(ids.length){const t=Number(ttl.value),u=Number(uses.value);if(!Number.isInteger(t)||t<1||!Number.isInteger(u)||u<1){note('Lease TTL and max uses must be whole numbers of at least 1.');return;}body.lease={scopes:ids,ttl_s:t,max_uses:u};}
-   const gen=generation;busy=true;submit.disabled=true;note('Creating '+n+'…');
+   if(existing){
+    const lease={};if(scopes.value!==initial.scopes)lease.scopes=ids;
+    for(const [key,node,previous] of [['ttl_s',ttl,initial.ttl],['max_uses',uses,initial.uses]])if(node.value!==previous){const value=Number(node.value);if(!Number.isSafeInteger(value)||value<1){note('Lease TTL and max uses must be whole numbers of at least 1.');return;}lease[key]=value;}
+    if(Object.keys(lease).length)body.lease=lease;
+    if(!Object.keys(body).length){note('No changes to save.');return;}
+   }else if(ids.length){const t=Number(ttl.value),u=Number(uses.value);if(!Number.isInteger(t)||t<1||!Number.isInteger(u)||u<1){note('Lease TTL and max uses must be whole numbers of at least 1.');return;}body.lease={scopes:ids,ttl_s:t,max_uses:u};}
+   const gen=generation;busy=true;submit.disabled=true;note((existing?'Saving ':'Creating ')+n+'…');
    try{
-    const bot=await api('create',body);
+    const bot=await api(existing?existing.bot_id+'/update':'create',body);
     if(gen!==generation)return;
     if(!bot||!HEX.test(String(bot.bot_id)))throw new Error('the service returned no bot id');
+    if(existing&&bot.bot_id!==existing.bot_id)throw new Error('the service answered for a different bot');
     bots=[...bots.filter(b=>b.bot_id!==bot.bot_id),bot];
     publishSatellites();
-    note('Created '+str(bot.name,80)+': status '+(STATUSES.includes(bot.status)?bot.status:'not reported')+(bot.status==='paused'?' (resume it from its card when ready)':'')+'.');
-    debug('create',{outcome:'returned',status:bot.status});
-    if(window.EchoPrimeAutoagents&&typeof window.EchoPrimeAutoagents.satellites==='function')window.EchoPrimeAutoagents.satellites({source:'bots',action:'created',botId:bot.bot_id,status:bot.status});// the orb listens for echo-orb-satellites
+    note((existing?'Updated ':'Created ')+str(bot.name,80)+': status '+(STATUSES.includes(bot.status)?bot.status:'not reported')+(bot.status==='paused'?' (resume it from its card when ready)':'')+'.');
+    debug(existing?'update':'create',{outcome:'returned',status:bot.status});
+    if(window.EchoPrimeAutoagents&&typeof window.EchoPrimeAutoagents.satellites==='function')window.EchoPrimeAutoagents.satellites({source:'bots',action:existing?'updated':'created',botId:bot.bot_id,status:bot.status});// the orb listens for echo-orb-satellites
     select(bot.bot_id);
-   }catch(error){if(gen!==generation)return;note('Bot not created: '+(error instanceof Error?error.message:'request failed')+'. No automatic retry was made.');debug('create',{outcome:'failed'});}
+   }catch(error){if(gen!==generation)return;note((existing?'Bot not updated: ':'Bot not created: ')+(error instanceof Error?error.message:'request failed')+'. No automatic retry was made.');debug(existing?'update':'create',{outcome:'failed'});}
    finally{if(gen===generation){busy=false;submit.disabled=false;renderList();}}
   },'new-chat bots-submit');
   wrap.append(field('Name',name),field('Agent',agent),field('Mode',mode),scheduleRow,calendarFields);
   if(!calendarReady)wrap.append(el('p','Calendar scheduling is not reported by the connected service.','bots-meta'));
   wrap.append(field('Instruction',instruction),field('Plugins',plugins),field('Daily cost cap (USD, at most '+MAX_CAP+')',cap),field('Lease scopes',scopes),leaseRow,submit);
+  if(existing)wrap.append(button('Cancel edit',()=>select(existing.bot_id)));
   return wrap;
  }
  function roleLabel(message,bot){return message.role==='user'?'You':message.role==='bot'?(bot?str(bot.name,80):'Bot'):message.role==='system'?'System':str(message.role,20)||'Message';}
  function runLink(runId){
-  const b=button('run '+shortId(runId),()=>{
+  const b=button('run '+shortId(runId),async()=>{
    const view=window.EchoPrimeAgents;
-   if(view&&typeof view.openRun==='function')view.openRun(runId);else note('Run '+runId+'. Open it in the Agents view once that view is installed.');
+   try{if(view&&typeof view.openRun==='function'){await view.openRun(runId);return;}if(view&&typeof view.open==='function'&&typeof view.watch==='function'){await view.open();view.watch(runId);return;}note('Run '+runId+'. Open it in the Agents view once that view is installed.');}catch(error){note('Run view unavailable: '+(error instanceof Error?error.message:'request failed')+'.');}
   },'quiet-button bots-run');
   attr(b,{'data-run-id':runId,title:'Run '+runId});return b;
  }
@@ -470,7 +507,7 @@
  // ---- view ----------------------------------------------------------------------
  function select(botId){
   if(!HEX.test(String(botId))||!bots.some(b=>b.bot_id===botId))return;
-  selected=botId;pane='chat';try{localStorage.setItem(STORAGE,botId);}catch{}
+  selected=botId;editing=null;pane='chat';try{localStorage.setItem(STORAGE,botId);}catch{}
   if(!chat||chat.botId!==botId)startChat(botId);
   renderList();renderPane();
  }
@@ -478,6 +515,7 @@
  function paneKey(){
   if(pane==='chat'){const b=bots.find(x=>x.bot_id===selected);return 'chat:'+selected+':'+(b?b.status:'');}
   if(pane==='create')return 'create:'+(agents&&agents.length?'select':'text');
+  if(pane==='edit')return 'edit:'+(editing?editing.bot_id:'none');
   if(pane==='group')return 'group:'+(group?group.groupId+':'+(group.done?'done':'live'):'none')+':'+bots.length;
   return pane;
  }
@@ -488,7 +526,7 @@
   const key=paneKey();
   if(!force&&key===ui.paneKey){if(pane==='chat')renderTranscript();else if(pane==='group')renderGroup();return;}
   ui.paneKey=key;
-  ui.pane.replaceChildren(pane==='create'?createPane():pane==='chat'?chatPane():pane==='group'?groupPane():el('p','Open a bot\u2019s chat, create a new bot or start a group chat.','bots-meta'));
+  ui.pane.replaceChildren(pane==='create'?createPane():pane==='edit'&&editing?createPane(editing):pane==='chat'?chatPane():pane==='group'?groupPane():el('p','Open a bot\u2019s chat, create a new bot or start a group chat.','bots-meta'));
  }
  function ensureDialog(){
   if(dialog)return;
@@ -525,7 +563,7 @@
   ensureTimer();
  }
  function reset(){
-  generation++;stopChat();stopGroup();bots=[];selected=null;pendingDelete=null;pane='none';busy=false;agents=null;agentsLoaded=false;health=null;healthCheckedAt=null;lastList=0;
+  generation++;stopChat();stopGroup();bots=[];selected=null;pendingDelete=null;editing=null;pane='none';busy=false;agents=null;agentsLoaded=false;health=null;healthCheckedAt=null;lastList=0;
   publishSatellites();
   if(dialog&&dialog.open)dialog.close();
   note('');
@@ -546,6 +584,6 @@
  if(typeof doc.addEventListener==='function')doc.addEventListener('echo-orb-open',async event=>{try{const d=event&&event.detail;if(!d||d.kind!=='bot'||typeof d.id!=='string'||!/^bot:[0-9a-f]{32}$/.test(d.id))return;const botId=d.id.slice(4);await open();select(botId);}catch{}});
  window.addEventListener('echo-account-changed',()=>{reset();void refreshHealth();});
  window.addEventListener('pagehide',()=>{stopChat();stopGroup();});
- window.EchoPrimeBots={ready:refreshHealth(),refresh:refreshHealth,open,close(){if(dialog&&dialog.open)dialog.close();},admission,
+ window.EchoPrimeBots={ready:refreshHealth(),refresh:refreshHealth,open,async openBot(botId){if(!HEX.test(String(botId)))return;await open();select(botId);},close(){if(dialog&&dialog.open)dialog.close();},admission,
   state(){return {verdict,selected,pane,pendingDelete,polling:!!chat,group:group?{groupId:group.groupId,done:group.done}:null,bots:bots.length};}};
 })();

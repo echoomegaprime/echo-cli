@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { StdioMcp } from '../src/prime/stdio.js';
 import { sdkBroker } from '../src/prime/sdk.js';
+import { sdkToolInvoke } from '../src/prime/tools-bridge.js';
 import { unwrap, type Json } from '../src/prime/hub.js';
 
 const BRIDGE = fileURLToPath(new URL('../src/bridge/sdk-stdio.ts', import.meta.url));
@@ -15,10 +16,13 @@ const FAKE_KEY = 'fake-test-key-do-not-use';
 
 interface Recorded { apiKey: string; capability: string; params: Json; context: Json }
 let lastRequest: Recorded | undefined;
+const requests: Recorded[] = [];
+let redirectedRequests = 0, oversizedBodyFinished = false;
 
 function obj(v: unknown): Json { return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Json) : {}; }
 
 function gateHandler(req: IncomingMessage, res: ServerResponse): void {
+  if (req.url === '/redirect-target') { redirectedRequests++; res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ status: 'ok', result: { status_code: 200, body: { ok: true } } })); return; }
   const chunks: Buffer[] = [];
   req.on('data', (c: Buffer) => { chunks.push(c); });
   req.on('end', () => {
@@ -27,13 +31,18 @@ function gateHandler(req: IncomingMessage, res: ServerResponse): void {
     const params = obj(envelope.params);
     const options = obj(params.options);
     lastRequest = { apiKey: String(req.headers['x-echo-api-key'] ?? ''), capability, params, context: obj(envelope.context) };
+    requests.push(lastRequest);
     const okEnvelope = (body: unknown, statusCode = 200): string =>
-      JSON.stringify({ run_id: 'r1', status: 'ok', result: { status_code: statusCode, body }, trace: {}, warnings: [] });
+      JSON.stringify({ run_id: 'r1', status: 'ok', result: { status_code: statusCode, body }, trace: { why_link: '/routing/r1' }, warnings: [] });
     const send = (code: number, text: string): void => { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(text); };
 
     if (capability === 'echo.caps.search') {
       const q = String(options.q ?? '');
       if (q === 'HUGE') { send(200, okEnvelope({ ok: true, query: q, count: 1, caps: [{ id: 'echo.big.one', description: 'x'.repeat(1_200_000), tier: 0, scope: 'tier:0' }] })); return; }
+      if (q === 'DOMAIN_FAIL') { send(200, okEnvelope({ ok: false, error: 'catalog denied' })); return; }
+      if (q === 'BAD_SEARCH') { send(200, okEnvelope({ ok: true, caps: null })); return; }
+      if (q === 'UNKNOWN_TIERS') { send(200, okEnvelope({ ok: true, caps: [undefined, null, '', '0', false, -1, 1.5].map((tier, index) => ({ id: 'echo.unknown.t' + index, tier, scope: 'tier:unknown' })) })); return; }
+      if (q === 'echo.searchfail.one') { send(503, JSON.stringify({ error: 'active registry unavailable' })); return; }
       const caps = [
         { id: 'echo.alpha.one', namespace: 'alpha', description: 'first', tier: 0, method: 'POST', scope: 'tier:0' },
         { id: 'echo.beta.two', namespace: 'beta', description: 'second', tier: 2, method: 'POST', scope: 'tier:2' },
@@ -45,11 +54,22 @@ function gateHandler(req: IncomingMessage, res: ServerResponse): void {
     }
     if (capability === 'echo.caps.detail') {
       const id = String(options.capability ?? '');
+      if (id === 'echo.domainfail.one') { send(200, okEnvelope({ ok: false, error: 'detail denied' })); return; }
+      if (id === 'echo.mismatch.one') { send(200, okEnvelope({ ok: true, cap: { id: 'echo.other.one', tier: 0 } })); return; }
       send(200, okEnvelope({ ok: true, cap: { id, namespace: 'alpha', description: 'first cap', tier: 0, tier_name: 'open', scope: 'tier:0', method: 'POST', health: 'green', verb: 'one', params: [{ name: 'question', type: 'string', required: true }] } }));
       return;
     }
     if (capability === 'echo.test.ok') { send(200, okEnvelope({ ok: true, answer: 42 })); return; }
+    if (capability === 'echo.test.strict') { const valid = params.command === 'lookup' && params.question === 'ready?' && Object.keys(params).every(key => ['command', 'question'].includes(key)); send(200, okEnvelope(valid ? { ok: true, answer: 'ready' } : { ok: false, error: 'strict flat parameter contract rejected' }, valid ? 200 : 422)); return; }
     if (capability === 'echo.test.slow') { setTimeout(() => send(200, okEnvelope({ ok: true, slow: true })), 1500); return; }
+    if (capability === 'echo.test.redirect') { res.writeHead(302, { location: '/redirect-target' }); res.end(); return; }
+    if (capability === 'echo.test.slowbody') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.flushHeaders(); res.write(' '); const timer = setTimeout(() => res.end(okEnvelope({ ok: true })), 1500); res.once('close', () => clearTimeout(timer)); return; }
+    if (capability === 'echo.test.chunkedhuge') { oversizedBodyFinished = false; res.writeHead(200, { 'Content-Type': 'application/json' }); res.write(' '.repeat(1_048_577)); const timer = setTimeout(() => { oversizedBodyFinished = true; res.end(okEnvelope({ ok: true })); }, 1500); res.once('close', () => clearTimeout(timer)); return; }
+    if (capability === 'echo.test.badresult') { send(200, JSON.stringify({ status: 'ok', result: { body: { ok: true } } })); return; }
+    if (capability === 'echo.test.badbody') { send(200, okEnvelope(['not an object'])); return; }
+    if (capability === 'echo.test.badflags') { send(200, okEnvelope({ ok: 'true' })); return; }
+    if (capability === 'echo.test.outerfailure') { send(200, JSON.stringify({ status: 'ok', success: false, error: 'outer failed', result: { status_code: 200, body: { ok: true } } })); return; }
+    if (capability === 'echo.test.domainrun') { send(200, okEnvelope({ ok: true, run_id: 'domain-run-id', trace: { domain: true } })); return; }
     if (capability === 'echo.test.denied') { send(200, okEnvelope({ ok: false, error: 'scope forbidden', required: 'tier:2' }, 403)); return; }
     if (capability === 'echo.test.failbody') { send(200, okEnvelope({ ok: false, error: 'domain said no' }, 200)); return; }
     if (capability === 'echo.test.statusfail') { send(200, JSON.stringify({ run_id: 'r1', status: 'failed', warnings: ['the run failed'] })); return; }
@@ -118,6 +138,17 @@ describe('prime sdk bridge', () => {
     expect(typeof rows[0].health).toBe('string');
   }, 20000);
 
+  it('keeps absent or invalid danger tiers explicitly unknown instead of claiming tier zero', async () => {
+    const rows = await broker.search('UNKNOWN_TIERS');
+    expect(rows).toHaveLength(7); expect(rows.every(row => row.tier === null)).toBe(true);
+  }, 20000);
+
+  it('refuses negative domain catalog results and malformed search shapes', async () => {
+    await expect(broker.search('DOMAIN_FAIL')).rejects.toThrow(/catalog denied/);
+    await expect(broker.search('BAD_SEARCH')).rejects.toThrow(/catalog|search|recogniz/i);
+    await expect(broker.read('echo.domainfail.one')).rejects.toThrow(/detail denied/);
+  }, 20000);
+
   it('search throws when the gate reports the catalog truncated', async () => {
     await expect(broker.search('TRUNCATE')).rejects.toThrow(/truncat/i);
   }, 20000);
@@ -137,12 +168,22 @@ describe('prime sdk bridge', () => {
     expect(record.registration_state).toBe('registered');
     expect(record.health_status).toBe('green');
     expect(cap.required_scope).toBe('tier:0');
+    expect(record.sdk_gate).toMatchObject({ run_id: 'r1', trace: { why_link: '/routing/r1' } });
   }, 20000);
 
-  it('read sends the exact gate capability and {command,options}', async () => {
+  it('read requests detail and verifies the exact id in the active catalog', async () => {
+    const before = requests.length;
     await broker.read('echo.alpha.one');
-    expect(lastRequest?.capability).toBe('echo.caps.detail');
-    expect(lastRequest?.params).toEqual({ command: 'detail', options: { capability: 'echo.alpha.one' } });
+    expect(requests.slice(before).map(row => ({ capability: row.capability, params: row.params }))).toEqual([
+      { capability: 'echo.caps.detail', params: { command: 'detail', options: { capability: 'echo.alpha.one' } } },
+      { capability: 'echo.caps.search', params: { command: 'search', options: { q: 'echo.alpha.one', limit: 200 } } },
+    ]);
+  }, 20000);
+
+  it('does not claim registration when detail exists but active search cannot verify the exact id', async () => {
+    expect(obj(await broker.read('echo.inactive.one')).registration_state).toBe('unknown');
+    expect(obj(await broker.read('echo.searchfail.one')).registration_state).toBe('unknown');
+    await expect(broker.read('echo.mismatch.one')).rejects.toThrow(/identity|different|mismatch/i);
   }, 20000);
 
   it('read rejects a non-echo capability id', async () => {
@@ -151,7 +192,7 @@ describe('prime sdk bridge', () => {
 
   it('invoke unwraps to the gate capability body', async () => {
     const raw = await broker.invoke({ capability: 'echo.test.ok', params: { command: 'go', options: {} }, reason: 'because', idempotency_key: 'k1' });
-    expect(unwrap(raw)).toEqual({ ok: true, answer: 42 });
+    expect(unwrap(raw)).toMatchObject({ ok: true, answer: 42, sdk_gate: { run_id: 'r1', trace: { why_link: '/routing/r1' } } });
   }, 20000);
 
   it('invoke forwards params and binds reason, idempotency and the fixed account into context', async () => {
@@ -159,6 +200,11 @@ describe('prime sdk bridge', () => {
     expect(lastRequest?.capability).toBe('echo.test.ok');
     expect(lastRequest?.params).toEqual({ command: 'go', options: { x: 1 } });
     expect(lastRequest?.context).toMatchObject({ reason: 'because', idempotency_key: 'k1', link_id: 'fixture-account' });
+  }, 20000);
+
+  it('sends live-tool options as canonical flat SDK fields accepted by a strict handler', async () => {
+    expect(await sdkToolInvoke(broker)('echo.test.strict', 'lookup', { question: 'ready?' })).toMatchObject({ ok: true, answer: 'ready' });
+    expect(lastRequest?.params).toEqual({ command: 'lookup', question: 'ready?' });
   }, 20000);
 
   it('invoke applies the caller timeout_ms to the gate call and never forwards it to the gate', async () => {
@@ -171,7 +217,36 @@ describe('prime sdk bridge', () => {
 
   it('invoke returns a slow call that finishes within the caller wait', async () => {
     const raw = await broker.invoke({ capability: 'echo.test.slow', params: {}, reason: 'r', idempotency_key: 'k11' }, { timeoutMs: 5000 });
-    expect(unwrap(raw)).toEqual({ ok: true, slow: true });
+    expect(unwrap(raw)).toMatchObject({ ok: true, slow: true });
+  }, 20000);
+
+  it('does not follow gate redirects or forward the key to their destination', async () => {
+    const before = redirectedRequests;
+    const raw = await broker.invoke({ capability: 'echo.test.redirect', params: {}, reason: 'r', idempotency_key: 'redirect' });
+    expect(() => unwrap(raw)).toThrow(/redirect|unreachable/i); expect(redirectedRequests).toBe(before);
+  }, 20000);
+
+  it('keeps the call deadline active while a response body is still arriving', async () => {
+    const raw = await broker.invoke({ capability: 'echo.test.slowbody', params: {}, reason: 'r', idempotency_key: 'slowbody' }, { timeoutMs: 1000 });
+    expect(() => unwrap(raw)).toThrow(/timed out; outcome unknown/i);
+  }, 20000);
+
+  it('cancels an oversized chunked body before the sender finishes it', async () => {
+    const raw = await broker.invoke({ capability: 'echo.test.chunkedhuge', params: {}, reason: 'r', idempotency_key: 'chunkedhuge' });
+    expect(() => unwrap(raw)).toThrow(/bounded limit/i); expect(oversizedBodyFinished).toBe(false);
+  }, 20000);
+
+  it('refuses malformed nested results and explicit outer failure even over HTTP 200', async () => {
+    for (const name of ['badresult', 'badbody', 'badflags', 'outerfailure']) {
+      const raw = await broker.invoke({ capability: 'echo.test.' + name, params: {}, reason: 'r', idempotency_key: name });
+      expect(() => unwrap(raw)).toThrow();
+    }
+  }, 20000);
+
+  it('retains routing evidence separately from the capability own run and trace fields', async () => {
+    const raw = await broker.invoke({ capability: 'echo.test.domainrun', params: { command: 'literal shell command', field: 'flat' }, reason: 'r', idempotency_key: 'domainrun' });
+    expect(lastRequest?.params).toEqual({ command: 'literal shell command', field: 'flat' });
+    expect(unwrap(raw)).toMatchObject({ run_id: 'domain-run-id', trace: { domain: true }, sdk_gate: { run_id: 'r1', trace: { why_link: '/routing/r1' } } });
   }, 20000);
 
   it('invoke sets bypass_reason when the reason is long enough for a tiered cap', async () => {
@@ -218,6 +293,12 @@ describe('prime sdk bridge', () => {
 describe('prime sdk bridge startup refusals', () => {
   it('refuses a non-loopback gate url', async () => {
     await expect(StdioMcp.connect({ command: process.execPath, args: ['--import', 'tsx', BRIDGE], cwd: REPO, env: { ECHO_GATE_URL: 'http://8.8.8.8:8000/sdk/invoke', ECHO_PRIME_SDK_KEY_FILE: keyFile } }, 8000)).rejects.toThrow();
+  }, 20000);
+
+  it('refuses credentials or fragments in the configured gate URL before startup logging', async () => {
+    for (const url of [gateUrl.replace('http://', 'http://fixture:secret@'), gateUrl + '#secret', gateUrl + '?key=secret']) {
+      await expect(StdioMcp.connect({ command: process.execPath, args: ['--import', 'tsx', BRIDGE], cwd: REPO, env: { ECHO_GATE_URL: url, ECHO_PRIME_SDK_KEY_FILE: keyFile } }, 8000)).rejects.toThrow();
+    }
   }, 20000);
 
   it('refuses when the key file is missing', async () => {

@@ -9,6 +9,7 @@
  // resuming a bot dispatches `echo-orb-satellites` so the orb can show the new satellite. Nothing here retries or falls back.
  const doc=document;
  const HEX=/^[0-9a-f]{32}$/,NAME=/^[a-z0-9][a-z0-9-]{1,62}$/,STATUSES=['paused','idle','running','error'],ORB_EVENT='echo-orb-satellites',BOT_STORAGE='echo-prime-bot-v1';
+ const TASK_STATUSES=['queued','running','gated','done','failed','unavailable'];
  const num=v=>typeof v==='number'&&Number.isFinite(v)?v:null;
  const str=(v,n)=>typeof v==='string'?(v.length>n?v.slice(0,n)+'…':v):'';
  function el(tag,text,cls){const e=doc.createElement(tag);if(text!==undefined&&text!==null)e.textContent=String(text);if(cls)e.className=cls;return e;}
@@ -26,7 +27,7 @@
  }
  async function request(url,body){
   const owner=admission()==='owner';
-  const response=await fetch(url,{method:'POST',credentials:'same-origin',headers:{'x-prime-request':'1',...await headers(),'content-type':'application/json'},body:JSON.stringify(body||{})});
+  const response=await fetch(url,{method:body===undefined?'GET':'POST',credentials:'same-origin',headers:{'x-prime-request':'1',...await headers(),...(body===undefined?{}:{'content-type':'application/json'})},...(body===undefined?{}:{body:JSON.stringify(body)})});
   let data=null;try{data=await response.json();}catch{}
   if(!response.ok){
    const ws=workspace();
@@ -46,9 +47,9 @@
   return origin&&origin.by==='echo'?attr(el('span','Echo-made from your prompt','autoagent-badge'),{title:'Echo created this definition from a chat prompt'+(typeof origin.prompt_sha256==='string'?' (prompt '+origin.prompt_sha256.slice(0,12)+'…)':'')}):null;
  }
  function tierText(c){const t=num(c&&c.tier);return t===null?'tier unknown':'tier '+t;}
- function cadence(s){const e=s&&typeof s==='object'?num(s.every_s):null;return e===null?'on message only':e%60===0?'every '+(e/60)+' min':'every '+e+' s';}
+ function cadence(s){if(s&&typeof s.at==='string'&&typeof s.tz==='string'){const days=Array.isArray(s.weekdays)?s.weekdays.map(day=>['','Mon','Tue','Wed','Thu','Fri','Sat','Sun'][day]).filter(Boolean).join(', '):'days not reported';return str(s.at,5)+' '+str(s.tz,100)+' · '+days+' · '+(s.missed==='once'?'catch up once':'skip missed');}const e=s&&typeof s==='object'?num(s.every_s):null;return e===null?'on message only':e%60===0?'every '+(e/60)+' min':'every '+e+' s';}
  function row(label,value){const p=el('p',undefined,'autoagent-row');p.append(el('span',label,'autoagent-label'),typeof value==='string'?el('span',value):value);return p;}
- function statusBadge(status){const s=STATUSES.includes(status)?status:'unknown';return el('span',s==='unknown'?'status not reported':s,'autoagent-status autoagent-status-'+s);}
+ function statusBadge(status,values=STATUSES){const s=values.includes(status)?status:'unknown';return el('span',s==='unknown'?'status not reported':s,'autoagent-status autoagent-status-'+s);}
  function explain(){
   const art=el('article',undefined,'chat-message assistant autoagent-card autoagent-explain');
   art.append(el('strong','Agents and bots are owner-only'),el('p','Echo builds agents and bots only for the primary owner. Nothing was created for your account; ask the owner to create this agent and bot, or to share the result with you.'));
@@ -59,6 +60,51 @@
   const a=built.agent;if(!a||typeof a!=='object'||!NAME.test(String(a.name)))return false;
   if(built.bot!==undefined&&(!built.bot||typeof built.bot!=='object'||!HEX.test(String(built.bot.bot_id||built.bot.botId))))return false;
   return true;
+ }
+ function validTask(task){
+  if(!task||typeof task!=='object'||task.kind!=='delegated_task'||typeof task.agent!=='string'||!task.agent||!TASK_STATUSES.includes(task.status))return false;
+  if(task.botId!==undefined&&!HEX.test(String(task.botId)))return false;
+  if(task.status==='gated'&&task.approval&&task.approval.required===true&&task.runId===undefined)return true;
+  return HEX.test(String(task.botId))&&HEX.test(String(task.runId))&&HEX.test(String(task.messageId))&&typeof task.eventId==='string'&&!!task.eventId;
+ }
+ function taskCard(task){
+  let state={...task},busy=false,noteText='';
+  const art=attr(el('article',undefined,'chat-message assistant autoagent-card autoagent-task'),{'data-task-key':str(task.taskKey,160)});
+  if(HEX.test(String(task.runId)))attr(art,{'data-run-id':task.runId});
+  async function openRun(){const view=window.EchoPrimeAgents;try{if(view&&typeof view.openRun==='function'){await view.openRun(state.runId);return;}if(view&&typeof view.open==='function'&&typeof view.watch==='function'){await view.open();view.watch(state.runId);return;}noteText='Run '+state.runId+'. Open it in the Agents view once that view is installed.';}catch(error){noteText='Run view unavailable: '+(error instanceof Error?error.message:'request failed')+'.';}render();}
+  function openBot(){const view=window.EchoPrimeBots;if(view&&typeof view.openBot==='function'){void view.openBot(state.botId);return;}try{localStorage.setItem(BOT_STORAGE,state.botId);}catch{}if(view&&typeof view.open==='function')void view.open();else{noteText='Bot '+state.botId+'. Open it in the echoBots view once that view is installed.';render();}}
+  async function refresh(){
+   if(busy||!HEX.test(String(state.runId)))return;
+   if(!['owner','open'].includes(admission())){noteText='Primary owner access is required to refresh a delegated run.';render();return;}
+   busy=true;render();
+   try{
+    const run=await request('/api/prime/adk/runs/'+state.runId);
+    if(run.runId!==state.runId||!TASK_STATUSES.includes(run.status))throw new Error('Prime returned an invalid run receipt');
+    let output;for(const step of Array.isArray(run.steps)?run.steps:[])if(step&&step.kind==='final'&&step.data&&typeof step.data.text==='string')output=step.data.text;
+    state={...state,status:run.status,done:run.done===true,output,proof:run.proof,error:run.error};noteText='Run status refreshed. No work was resubmitted.';
+   }catch(error){noteText='Run status unavailable: '+(error instanceof Error?error.message:'request failed')+'. No automatic retry was made.';}
+   finally{busy=false;render();}
+  }
+  function render(){
+   const nodes=[],head=el('div',undefined,'autoagent-head');
+   head.append(el('strong',state.status==='done'?'Delegated task finished':state.status==='failed'?'Delegated task failed':state.status==='gated'?'Delegated task needs approval':'Delegated task'),statusBadge(state.status,TASK_STATUSES));nodes.push(head);
+   nodes.push(row('Agent',str(state.agent,120)),row('Task',str(state.task,10000)||'not reported'));
+   if(state.botStatus==='paused'&&state.status==='queued')nodes.push(el('p','Queued for a paused bot. Resume it in echoBots when ready.','autoagent-meta'));
+   else if(state.status==='queued'||state.status==='running')nodes.push(el('p','This is the latest returned status. Refresh the result or open the run to follow progress.','autoagent-meta'));
+   if(state.approval&&state.approval.required===true){const box=el('div',undefined,'autoagent-approval');box.append(el('strong','Approval required'));for(const reason of Array.isArray(state.approval.reasons)?state.approval.reasons.slice(0,20):[])if(typeof reason==='string')box.append(el('p',str(reason,600)));if(!state.runId)box.append(el('p','No run was admitted.'));nodes.push(box);}
+   if(typeof state.output==='string'&&state.output.trim()){const result=el('section',undefined,'autoagent-section');result.append(el('h3','Returned output'),el('p',str(state.output,12000),'autoagent-result'));nodes.push(result);}
+   if(state.error&&typeof state.error==='object')nodes.push(el('p',(typeof state.error.code==='string'?str(state.error.code,80)+': ':'')+(str(state.error.message,1000)||'The run reported an error.'),'autoagent-note'));
+   const receipt=el('details',undefined,'autoagent-section');receipt.append(el('summary','Run receipt'+(state.duplicate===true?' · existing event':'')));
+   if(state.runId)receipt.append(row('Run',state.runId));if(state.messageId)receipt.append(row('Message',state.messageId));if(state.eventId)receipt.append(row('Event',str(state.eventId,160)));if(state.botId)receipt.append(row('Bot',state.botId));
+   if(state.proof&&typeof state.proof==='object'){const proof=state.proof;receipt.append(row('Proof verdict',['PASS','FAIL','UNKNOWN'].includes(proof.verdict)?proof.verdict:'not reported'));if(typeof proof.events_sha256==='string')receipt.append(row('Events SHA-256',str(proof.events_sha256,64)));receipt.append(el('pre',str(JSON.stringify(proof,null,2),8000),'autoagent-proof'));}
+   nodes.push(receipt);
+   const actions=el('div',undefined,'autoagent-actions');
+   if(HEX.test(String(state.runId))){const refreshButton=button(busy?'Refreshing…':'Refresh result',refresh);refreshButton.disabled=busy;actions.append(button('Open run',openRun),refreshButton);}
+   if(HEX.test(String(state.botId)))actions.append(button('Open in echoBots',openBot));nodes.push(actions);
+   nodes.push(attr(el('p',noteText,'autoagent-note'),{role:'status'}),el('small','Delegated output and receipts are returned data. Inspect the run evidence before relying on the result.','autoagent-meta'));
+   art.replaceChildren(...nodes);
+  }
+  render();return art;
  }
  function card(built){
   const state={agent:{...built.agent},bot:built.bot?{...built.bot,botId:String(built.bot.botId||built.bot.bot_id)}:null,hadBot:!!built.bot,pendingDelete:false,busy:false,note:'',deleted:false};
@@ -91,6 +137,7 @@
    if(!state.bot)return;
    try{localStorage.setItem(BOT_STORAGE,state.bot.botId);}catch{}
    const view=window.EchoPrimeBots;
+   if(view&&typeof view.openBot==='function'){void view.openBot(state.bot.botId);return;}
    if(view&&typeof view.open==='function'){void view.open();return;}
    note('Bot '+state.bot.botId+'. Open it in the echoBots view once that view is installed.');
   }
@@ -147,7 +194,7 @@
     else controls.push(button('Delete',()=>{state.pendingDelete=true;note('Select Confirm delete to remove '+(b?'the bot and ':'')+'agent '+a.name+', or Cancel.');}));
     for(const c of controls)c.disabled=state.busy;
     actions.append(...controls);
-    if(state.pendingDelete)actions.append(el('small',(b?'The bot is deleted first (its lease and memory scope go with it), then the agent definition. ':'The agent definition is deleted. ')+'The service confirms each step; nothing else is touched.','autoagent-meta'));
+    if(state.pendingDelete)actions.append(el('small',(b?'The bot is deleted first, then the agent definition. ':'The agent definition is deleted. ')+'Run records and backups may remain. The service confirms each step.','autoagent-meta'));
     nodes.push(actions);
    }
    nodes.push(attr(el('p',state.note,'autoagent-note'),{role:'status'}));
@@ -160,17 +207,19 @@
  /** Called by chat.js with the turn result. Appends one card per valid `autoagents` entry (or one explanation for a non-owner) to the chat log. */
  function render(result){
   const log=doc.querySelector('#chat-log');
-  const items=result&&typeof result==='object'&&Array.isArray(result.autoagents)?result.autoagents.filter(valid):[];
+  const incoming=result&&typeof result==='object'?[...(Array.isArray(result.autoagents)?result.autoagents:[]),...(Array.isArray(result.delegatedTasks)?result.delegatedTasks:[])]:[];
+  const items=[],taskPositions=new Map();
+  for(const item of incoming){if(valid(item))items.push(item);else if(validTask(item)){const key=item.runId||item.taskKey||item.agent+':'+item.task;if(taskPositions.has(key))items[taskPositions.get(key)]=item;else{taskPositions.set(key,items.length);items.push(item);}}}
   if(!log||!items.length)return [];
   const access=admission();
   if(access==='member'||access==='signin'){const n=explain();log.append(n);log.hidden=false;debug('render',{outcome:'owner_only'});return [n];}
   const nodes=[];
   for(const built of items){
-   const n=card(built);log.append(n);nodes.push(n);
+   const n=built.kind==='delegated_task'?taskCard(built):card(built);log.append(n);nodes.push(n);
    if(built.bot&&built.bot.existing!==true)satellites({source:'autoagents',action:'created',botId:String(built.bot.botId||built.bot.bot_id),status:str(built.bot.status,20)});
   }
   log.hidden=false;debug('render',{outcome:'returned',cards:nodes.length});
   return nodes;
  }
- window.EchoPrimeAutoagents={render,card,badge,explain,admission,satellites,ORB_EVENT};
+ window.EchoPrimeAutoagents={render,card,taskCard,badge,explain,admission,satellites,ORB_EVENT};
 })();

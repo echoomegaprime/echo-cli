@@ -20,7 +20,12 @@
 .autoagent-approval{display:grid;gap:4px;padding:8px 10px;border:1px solid #a8742f;border-radius:8px;background:#2c2010;color:#f0cf9c;font-size:12px}
 .autoagent-approval ul{margin:0;padding-left:18px}.autoagent-approval li{overflow-wrap:anywhere}
 .autoagent-actions{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
-.autoagent-actions .quiet-button{min-height:36px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;font-size:11px;color:#9fc5b5}
+.autoagent-actions .quiet-button{display:inline-flex;align-items:center;justify-content:center;min-height:36px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;font-size:11px;color:#9fc5b5}
+.autoagent-result{white-space:pre-wrap;overflow-wrap:anywhere}
+.autoagent-proof{white-space:pre-wrap;overflow-wrap:anywhere;max-height:260px;overflow:auto;font-size:11px}
+.autoagent-status-done{border-color:#3f8a64;color:var(--green)}
+.autoagent-status-gated,.autoagent-status-queued{border-color:#a8742f;color:#f0cf9c}
+.autoagent-status-failed,.autoagent-status-unavailable{border-color:#a8504b;color:#f0a09b}
 .autoagent-actions .quiet-button:hover{border-color:#5a8f77;color:#e4eeeb}
 .autoagent-primary{border-color:#3f8a64!important;color:var(--green)!important}.autoagent-danger{border-color:#a8504b!important;color:#f0a09b!important}
 .autoagent-note{min-height:18px;margin:0;color:var(--mint);font-size:12px;overflow-wrap:anywhere}

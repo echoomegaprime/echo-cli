@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PrimeHub } from '../src/prime/hub.js';
 import { startPrimeServer } from '../src/prime/server.js';
-import { BotsClient, BotsError, DEFAULT_BOTS, clampBotsBudget, parseBotCreate, parseBotsConfig, parseGroupCreate } from '../src/prime/bots.js';
+import { BotsClient, BotsError, DEFAULT_BOTS, clampBotsBudget, parseBotCreate, parseBotUpdate, parseBotsConfig, parseGroupCreate } from '../src/prime/bots.js';
 
 // Stand-in for the loopback echo-adk-api service: the echoBots and groups routes of docs/echo-code/ECHO_ADK_API_CONTRACT.md,
 // with every request recorded. No real service, agent or model is ever called.
@@ -81,6 +81,13 @@ const reply = (status: number, body: unknown, headers: Record<string, string> = 
 const clientFor = async (h?: Handler) => { const w = await fakeService(h); return { client: new BotsClient({ ...DEFAULT_BOTS, baseUrl: w.url }), seen: w.seen, url: w.url }; };
 
 describe('bots config, budget and request validation', () => {
+  it('validates partial bot updates without adding defaults or widening a lease', () => {
+    expect(parseBotUpdate({ instruction: null, schedule: null, plugins: [], lease: { scopes: [] } })).toEqual({ instruction: null, schedule: null, plugins: [], lease: { scopes: [] } });
+    expect(parseBotUpdate({ name: ' Renamed ', lease: { ttl_s: 30 }, daily_cost_cap_usd: 0 })).toEqual({ name: 'Renamed', lease: { ttl_s: 30 }, daily_cost_cap_usd: 0 });
+    for (const patch of [{}, { agent: 'other' }, { bot_id: BOT }, { memory: {} }, { origin: {} }, { status: 'idle' }, { lease: {} }, { lease: { token: 'x' } }, { plugins: ['x'.repeat(65)] }, { instruction: 5 }, { mode: null }])
+      expect(() => parseBotUpdate(patch)).toThrow(BotsError);
+    expect(parseBotCreate({ name: 'Reasoning', agent: 'reasoner', lease: { scopes: [], ttl_s: 30, max_uses: 1 } }, 0).lease?.scopes).toEqual([]);
+  });
   it('accepts calendar schedules with an explicit timezone and rejects ambiguous or malformed schedules', () => {
     const calendar = { at: '09:00', tz: 'America/Chicago', weekdays: [1, 2, 3, 4, 5], missed: 'skip' };
     expect(parseBotCreate({ name: 'Morning', agent: 'scout', schedule: calendar }, 0).schedule).toEqual(calendar);
@@ -130,6 +137,20 @@ describe('bots config, budget and request validation', () => {
 });
 
 describe('BotsClient against a stand-in service', () => {
+  it('updates with PUT and preserves an active-work conflict without an automatic stop or retry', async () => {
+    const accepted = await clientFor(reply(200, bot({ name: 'New name' })));
+    expect(await accepted.client.update(BOT, { name: 'New name' })).toMatchObject({ bot_id: BOT, name: 'New name' });
+    expect(accepted.seen).toEqual([{ method: 'PUT', url: `/v2/bots/${BOT}`, body: JSON.stringify({ name: 'New name' }) }]);
+    const active = await clientFor(reply(409, { error: 'conflict', message: 'Pause and stop pending work before editing' }));
+    await expect(active.client.update(BOT, { lease: { scopes: [] } })).rejects.toMatchObject({ status: 409, code: 'conflict' }); expect(active.seen).toHaveLength(1);
+  });
+  it('requests a stop and accepts an asynchronously stopping status without claiming completion', async () => {
+    const stopped = await clientFor(reply(200, { bot_id: BOT, status: 'running', stop_requested: true, run_ids: [RUN] }));
+    expect(await stopped.client.stop(BOT)).toEqual({ botId: BOT, status: 'running', stopRequested: true, runIds: [RUN] });
+    expect(stopped.seen.map(s => `${s.method} ${s.url}`)).toEqual([`POST /v2/bots/${BOT}/stop`]);
+    const invalid = await clientFor(reply(200, { bot_id: BOT2, status: 'paused', stop_requested: true, run_ids: [RUN] }));
+    await expect(invalid.client.stop(BOT)).rejects.toMatchObject({ status: 502 });
+  });
   it('requires v2 health and never retries a calendar mutation against legacy routes', async () => {
     const legacy = await clientFor(reply(404, { error: 'not_found', message: 'unknown route' }));
     await expect(legacy.client.health()).rejects.toMatchObject({ code: 'unsupported_contract', message: /API v2 is unavailable/ });

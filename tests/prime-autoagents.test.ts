@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PrimeHub, type SdkBroker } from '../src/prime/hub.js';
 import { startPrimeServer } from '../src/prime/server.js';
+import { OwnerBotTools } from '../src/prime/bot-tools.js';
 import { AdkClient, AdkError, DEFAULT_ADK, parseAgentDefinition } from '../src/prime/agents.js';
 import { BotsClient, DEFAULT_BOTS } from '../src/prime/bots.js';
 import { AUTOAGENTS_PROMPT_FRAGMENT, AutoAgents, AutoagentError, FLEET_ROLES, autoagentTools, brokerCapabilityLookup, promptSha256, slugName, type CapabilityLookup, type ResolvedCapability } from '../src/code/tools/autoagents.js';
@@ -93,6 +94,24 @@ async function service(options: { agents?: Agent[]; bots?: Bot[]; caps?: Record<
 const PROMPT = 'Every morning at 7 check the FORGE build queue and  summarise what is stuck.';
 const makeAgentArgs = { name: 'Queue Scout!', role: 'observer', purpose: 'Watch the FORGE build queue each morning', capabilities: ['echo.knowledge.search', 'echo.context.recall'], skills: ['echo-observer-power'], schedule: 60, instruction: 'Report stuck builds only.', max_steps: 50, budget: { max_cost_usd: 40 } };
 
+describe('owner bot creation recovery', () => {
+  it('can create the missing agent and retry the same bot admission in one parent request', async () => {
+    const { auto, fake } = await service({ agents: [] });
+    const tools = new OwnerBotTools(auto, { owner: true, prompt: 'Create my queue scout', sessionId: 'recovery-session', requestId: 'recovery-request' });
+    const bot = { action: 'tool' as const, tool: 'make_bot', args: { agent: 'queue-scout', task_key: 'queue-scout' } };
+    expect((await tools.execute(bot)).result).toMatchObject({ ok: false });
+    expect(fake.bots).toHaveLength(0);
+    await tools.execute({ action: 'tool', tool: 'make_agent', args: { name: 'queue-scout', role: 'observer', purpose: 'Inspect the queue', capabilities: [], task_key: 'queue-scout' } });
+    expect(fake.agents.map(a => a.name)).toEqual(['queue-scout']);
+    const recovered = await tools.execute(bot);
+    expect(recovered.result).toMatchObject({ kind: 'autoagent', tool: 'make_bot', bot: { agent: 'queue-scout', status: 'idle' } });
+    expect(fake.bots).toHaveLength(1);
+    expect((await tools.execute(bot)).result).toMatchObject({ deduplicated: true });
+    expect(fake.bots).toHaveLength(1);
+    expect(fake.seen.filter(r => r.method === 'POST' && r.url === '/v2/bots')).toHaveLength(1);
+  });
+});
+
 describe('agent definition validation (client)', () => {
   it('fills the lane defaults, clamps budget and max_steps, and stamps an owner origin', () => {
     const def = parseAgentDefinition({ name: 'queue-scout', role: 'observer', capabilities: ['echo.knowledge.search'], max_steps: 99, lane: { budget: { max_cost_usd: 40 } } });
@@ -105,7 +124,8 @@ describe('agent definition validation (client)', () => {
   });
   it('refuses bad names, non-echo capability ids, unknown keys and malformed origins before any request', () => {
     for (const name of ['Queue', 'a', '-x', 'a.b', 'a b', 'x'.repeat(64), '', 7]) expect(() => parseAgentDefinition({ name, role: 'r', capabilities: ['echo.a'] })).toThrow(/Invalid agent name/);
-    for (const capabilities of [['echo.Shell'], ['shell.run'], [], 'echo.a', ['echo.a/../b'], ['echo.a?x=1']]) expect(() => parseAgentDefinition({ name: 'ok-name', role: 'r', capabilities })).toThrow(AdkError);
+    for (const capabilities of [['echo.Shell'], ['shell.run'], 'echo.a', ['echo.a/../b'], ['echo.a?x=1']]) expect(() => parseAgentDefinition({ name: 'ok-name', role: 'r', capabilities })).toThrow(AdkError);
+    expect(parseAgentDefinition({ name: 'reason-only', role: 'researcher', capabilities: [] }).capabilities).toEqual([]);
     expect(() => parseAgentDefinition({ name: 'ok-name', role: 'r', capabilities: ['echo.a'], source: 'x' })).toThrow(/unknown field source/);
     expect(() => parseAgentDefinition({ name: 'ok-name', role: 'r', capabilities: ['echo.a'], lane: { token: 'x' } })).toThrow(/lane has an unknown field/);
     expect(() => parseAgentDefinition({ name: 'ok-name', role: 'r', capabilities: ['echo.a'], origin: { by: 'model' } })).toThrow(/origin.by/);
@@ -126,7 +146,7 @@ describe('AdkClient create / update / delete against the stand-in', () => {
     expect(fake.seen[0]).toMatchObject({ method: 'POST', url: '/agents' });
     expect(fake.seen[0].body).toEqual({ name: 'queue-scout', role: 'observer', skills: [], capabilities: ['echo.knowledge.search'], lane: { node: 'forge', model: 'qwen-local', budget: { max_calls: 40, max_cost_usd: 0, max_wall_s: 900 } }, max_steps: 12, origin: { by: 'echo', prompt_sha256: SHA } });
     expect(made.origin).toEqual({ by: 'echo', prompt_sha256: SHA, created_at: NOW });
-    await expect(client.createAgent({ name: 'queue-scout', role: 'observer', capabilities: ['echo.knowledge.search'] })).rejects.toSatisfy((e: AdkError) => e.status === 400 && e.code === 'invalid' && e.detail.http === 409 && /agent exists/.test(e.message));
+    await expect(client.createAgent({ name: 'queue-scout', role: 'observer', capabilities: ['echo.knowledge.search'] })).rejects.toSatisfy((e: AdkError) => e.status === 409 && e.code === 'invalid' && e.detail.http === 409 && /agent exists/.test(e.message));
     await expect(client.createAgent({ name: 'Bad Name', role: 'observer', capabilities: ['echo.knowledge.search'] })).rejects.toMatchObject({ status: 400 });
     expect(fake.seen).toHaveLength(2);
     fake.fail['POST /agents'] = { status: 201, body: { ...OWNER_AGENT, name: 'other' } };
@@ -141,7 +161,7 @@ describe('AdkClient create / update / delete against the stand-in', () => {
     await expect(client.updateAgent('../x', { name: 'researcher', role: 'r', capabilities: ['echo.a'] })).rejects.toMatchObject({ status: 400 });
     await expect(client.updateAgent('missing-one', { name: 'missing-one', role: 'r', capabilities: ['echo.a'] })).rejects.toMatchObject({ status: 404, code: 'not_found' });
     expect(fake.agents.map(a => a.name)).toEqual(['researcher']); // PUT never created anything
-    await expect(client.deleteAgent('researcher')).rejects.toSatisfy((e: AdkError) => e.status === 400 && e.code === 'invalid' && e.detail.http === 409 && /a bot references this agent/.test(e.message));
+    await expect(client.deleteAgent('researcher')).rejects.toSatisfy((e: AdkError) => e.status === 409 && e.code === 'invalid' && e.detail.http === 409 && /a bot references this agent/.test(e.message));
     fake.bots = [];
     expect(await client.deleteAgent('researcher')).toEqual({ name: 'researcher', deleted: true });
     expect(fake.seen.at(-1)).toMatchObject({ method: 'DELETE', url: '/agents/researcher' });
@@ -204,7 +224,7 @@ describe('Prime routes for agent definitions', () => {
 describe('AutoAgents: tools, status and prompt guidance', () => {
   it('offers find_capabilities, make_agent and make_bot as owner-only tools with schemas; the hub offers none when the feature is off', async () => {
     const s = await service(); const tools = s.auto.tools();
-    expect(tools.map(t => t.name)).toEqual(['find_capabilities', 'make_agent', 'make_bot']);
+    expect(tools.map(t => t.name)).toEqual(['find_capabilities', 'make_agent', 'make_bot', 'bots_status', 'list_bots', 'get_bot', 'update_bot', 'pause_bot', 'resume_bot', 'stop_bot', 'delete_bot', 'message_bot', 'deliver_bot_event', 'bot_messages', 'bot_run_status', 'stop_bot_run', 'create_bot_group', 'bot_group_status', 'delegate_task']);
     expect(tools.every(t => t.ownerOnly === true && typeof t.description === 'string' && t.description.length > 40)).toBe(true);
     const makeAgent = tools.find(t => t.name === 'make_agent')!;
     expect(makeAgent.inputSchema).toMatchObject({ type: 'object', additionalProperties: false, required: ['name', 'role', 'purpose', 'capabilities'] });
@@ -212,15 +232,16 @@ describe('AutoAgents: tools, status and prompt guidance', () => {
     expect(autoagentTools(s.auto).map(t => t.name)).toEqual(tools.map(t => t.name));
     expect(new PrimeHub({ capabilities: [] }).autoagentTools()).toEqual([]);
     expect(new PrimeHub({ capabilities: [] }).autoagentsStatus()).toMatchObject({ configured: false, reason: /adk, bots and sdk/ });
-    expect(new PrimeHub({ capabilities: [], autoagents: s.auto }).autoagentTools()).toHaveLength(3);
+    expect(new PrimeHub({ capabilities: [], autoagents: s.auto }).autoagentTools()).toHaveLength(tools.length);
     expect(s.auto.status()).toEqual({ configured: true });
     expect(new AutoAgents({ adk: s.adk }).status()).toEqual({ configured: false, reason: 'Autonomous agents are off: the Prime config needs bots, sdk configured' });
     await expect(new AutoAgents({ adk: s.adk }).makeAgent(makeAgentArgs, owner(PROMPT))).rejects.toMatchObject({ status: 503, code: 'off' });
   });
   it('ships a short, testable system-prompt fragment', () => {
-    expect(AUTOAGENTS_PROMPT_FRAGMENT.length).toBeLessThan(1600);
-    for (const phrase of ['make_agent', 'make_bot', 'find_capabilities', 'one-shot', 'never invent', 'summarising what you built', 'owner only', 'start paused', 'do not retry'])
+    expect(AUTOAGENTS_PROMPT_FRAGMENT.length).toBeLessThan(2500);
+    for (const phrase of ['make_agent', 'make_bot', 'find_capabilities', 'delegate_task', 'task_key', 'at most six', 'bot_run_status', 'untrusted data', 'paused bots stay paused'])
       expect(AUTOAGENTS_PROMPT_FRAGMENT).toContain(phrase);
+    expect(AUTOAGENTS_PROMPT_FRAGMENT).not.toContain('Never use make_agent or make_bot for a one-shot');
   });
   it('normalises names to the contract slug and hashes the normalised prompt', () => {
     expect(slugName('Queue Scout!')).toBe('queue-scout'); expect(slugName('  Release--Watcher  ')).toBe('release-watcher'); expect(slugName('x')).toBeUndefined(); expect(slugName('!!!')).toBeUndefined(); expect(slugName(5)).toBeUndefined();
@@ -261,7 +282,7 @@ describe('make_agent', () => {
     await expect(s.auto.makeAgent({ ...makeAgentArgs, capabilities: ['echo.knowledge.search', 'echo.made.up'] }, owner(PROMPT))).rejects.toSatisfy((e: AutoagentError) => e.status === 400 && e.code === 'unknown_capability' && e.message === 'Unknown capability id: echo.made.up. Only ids present in the live catalog can be granted; nothing was created.');
     expect(s.cat.resolved).toEqual(['echo.knowledge.search', 'echo.made.up']); expect(s.posts('POST', '/agents')).toHaveLength(0);
     expect(s.events.at(-1)).toMatchObject({ event: 'prime_autoagent_refused', reason: 'unknown_capability', ids: ['echo.made.up'] });
-    for (const capabilities of [['echo.Shell.run'], ['shell.run'], ['echo.a b'], [], 'echo.knowledge.search', ['echo.knowledge.search', 7]])
+    for (const capabilities of [['echo.Shell.run'], ['shell.run'], ['echo.a b'], 'echo.knowledge.search', ['echo.knowledge.search', 7]])
       await expect(s.auto.makeAgent({ ...makeAgentArgs, capabilities }, owner(PROMPT))).rejects.toMatchObject({ status: 400, code: 'invalid' });
     expect(s.cat.resolved).toHaveLength(2); expect(s.posts('POST', '/agents')).toHaveLength(0);
     const cheat = catalog({ 'echo.knowledge.search': 0 }); cheat.lookup.resolve = async () => ({ id: 'echo.knowledge.searchx', tier: 0 });
@@ -372,7 +393,6 @@ describe('make_bot and the auto-resume gate', () => {
     await expect(s.auto.makeBot({ agent: 'ghost-agent' }, owner(PROMPT))).rejects.toSatisfy((e: AutoagentError) => e.status === 404 && e.code === 'agent_not_found' && /create it with make_agent first/.test(e.message));
     await expect(s.auto.makeBot({}, owner(PROMPT))).rejects.toMatchObject({ message: /agent must name an agent created with make_agent/ });
     await expect(s.auto.makeBot({ agent: 'Researcher' }, owner(PROMPT))).rejects.toMatchObject({ code: 'invalid' });
-    await expect(s.auto.makeBot({ agent: 'empty-agent' }, owner(PROMPT))).rejects.toMatchObject({ message: /lists no capabilities/ });
     await expect(s.auto.makeBot({ agent: 'researcher', schedule: { every_s: 10 } }, owner(PROMPT))).rejects.toMatchObject({ message: /at least 60/ });
     await expect(s.auto.makeBot({ agent: 'researcher', schedule: 0 }, owner(PROMPT))).rejects.toMatchObject({ message: /minutes must be at least 1/ });
     await expect(s.auto.makeBot({ agent: 'researcher', mode: 'shared' }, owner(PROMPT))).rejects.toMatchObject({ message: /mode must be personal or team/ });

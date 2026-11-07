@@ -21,7 +21,7 @@ const MIN:BotsBudget={max_calls:1,max_cost_usd:0,max_wall_s:30};
 const KEYS=Object.keys(BOTS_MAX) as (keyof BotsBudget)[];
 const HEX=/^[0-9a-f]{32}$/;
 const AGENT=/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/;
-const PLUGIN=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
+const PLUGIN=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 const CAPABILITY=/^echo\.[A-Za-z0-9_.-]{1,180}$/;
 const MODES=['personal','team'] as const;
 const debug=debuglog('echo-prime');
@@ -83,6 +83,49 @@ export function parseBotsConfig(value:unknown):BotsConfig{
 export interface BotLease {scopes:string[];ttl_s:number;max_uses:number}
 export type BotSchedule={every_s:number;missed?:'skip'|'once'}|{at:string;tz:string;weekdays:number[];missed:'skip'|'once'};
 export interface BotCreateBody {name:string;agent:string;mode?:'personal'|'team';schedule?:BotSchedule|null;instruction?:string;plugins?:string[];lease?:BotLease;daily_cost_cap_usd:number}
+export type BotUpdateBody=Partial<Omit<BotCreateBody,'agent'|'instruction'|'lease'>> & {instruction?:string|null;lease?:Partial<BotLease>};
+export function parseBotSchedule(value:unknown):BotSchedule|null{
+ if(value===null)return null;
+ const schedule=record(value,'bot schedule');
+ if(schedule.missed!==undefined&&schedule.missed!=='skip'&&schedule.missed!=='once')throw new BotsError(400,'Invalid bot schedule: missed must be skip or once');
+ if('every_s' in schedule){
+  onlyKeys(schedule,['every_s','missed'],'bot schedule');
+  if(typeof schedule.every_s!=='number'||!Number.isSafeInteger(schedule.every_s)||schedule.every_s<BOTS_LIMITS.everyS||schedule.every_s>BOTS_LIMITS.maxEveryS)throw new BotsError(400,'Invalid bot schedule: every_s must be an integer of at least '+BOTS_LIMITS.everyS+' and at most '+BOTS_LIMITS.maxEveryS);
+  return {every_s:schedule.every_s,...(schedule.missed===undefined?{}:{missed:schedule.missed as 'skip'|'once'})};
+ }
+ onlyKeys(schedule,['at','tz','weekdays','missed'],'bot schedule');
+ if(typeof schedule.at!=='string'||!/^([01]\d|2[0-3]):[0-5]\d$/.test(schedule.at))throw new BotsError(400,'Invalid bot schedule: at must be HH:mm');
+ if(typeof schedule.tz!=='string'||!schedule.tz||schedule.tz.length>100)throw new BotsError(400,'Invalid bot schedule: timezone required');
+ try{new Intl.DateTimeFormat('en',{timeZone:schedule.tz}).format();}catch{throw new BotsError(400,'Invalid bot schedule: unknown timezone');}
+ if(!Array.isArray(schedule.weekdays)||!schedule.weekdays.length||schedule.weekdays.length>7||schedule.weekdays.some(d=>!Number.isInteger(d)||d<1||d>7)||new Set(schedule.weekdays).size!==schedule.weekdays.length)throw new BotsError(400,'Invalid bot schedule: weekdays must be distinct ISO days 1 to 7');
+ return {at:schedule.at,tz:schedule.tz,weekdays:schedule.weekdays as number[],missed:schedule.missed===undefined?'skip':schedule.missed as 'skip'|'once'};
+}
+/** Partial owner edit: omitted fields are never defaulted and identities cannot be changed. */
+export function parseBotUpdate(input:unknown):BotUpdateBody{
+ const data=record(input,'bot update');
+ onlyKeys(data,['name','mode','schedule','instruction','plugins','daily_cost_cap_usd','lease'],'bot update');
+ if(!Object.keys(data).length||Object.values(data).some(value=>value===undefined))throw new BotsError(400,'Invalid bot update: at least one defined field is required');
+ const body:BotUpdateBody={};
+ if('name' in data)body.name=requiredText(data.name,'bot name',BOTS_LIMITS.name).trim();
+ if('mode' in data){if(!(MODES as readonly unknown[]).includes(data.mode))throw new BotsError(400,'Invalid bot mode');body.mode=data.mode as 'personal'|'team';}
+ if('schedule' in data)body.schedule=parseBotSchedule(data.schedule);
+ if('instruction' in data)body.instruction=data.instruction===null?null:optionalText(data.instruction,'instruction',BOTS_LIMITS.text);
+ if('plugins' in data){
+  if(!Array.isArray(data.plugins)||data.plugins.length>BOTS_LIMITS.plugins||data.plugins.some(p=>typeof p!=='string'||!PLUGIN.test(p)))throw new BotsError(400,'Invalid bot plugins');
+  body.plugins=[...new Set(data.plugins as string[])];
+ }
+ if('daily_cost_cap_usd' in data){const cap=data.daily_cost_cap_usd;if(typeof cap!=='number'||!Number.isFinite(cap)||cap<0||cap>BOTS_LIMITS.dailyCapUsd)throw new BotsError(400,'Invalid daily cost cap: 0 to '+BOTS_LIMITS.dailyCapUsd+' USD');body.daily_cost_cap_usd=Math.round(cap*100)/100;}
+ if('lease' in data){
+  const lease=record(data.lease,'bot lease');onlyKeys(lease,['scopes','ttl_s','max_uses'],'bot lease');
+  if(!Object.keys(lease).length)throw new BotsError(400,'Invalid bot lease: at least one field is required');
+  const patch:Partial<BotLease>={};
+  if('scopes' in lease){if(!Array.isArray(lease.scopes)||lease.scopes.length>BOTS_LIMITS.scopes||lease.scopes.some(s=>typeof s!=='string'||!CAPABILITY.test(s)))throw new BotsError(400,'Invalid bot lease: scopes must be exact capability ids');patch.scopes=[...new Set(lease.scopes as string[])];}
+  if('ttl_s' in lease)patch.ttl_s=positiveInteger(lease.ttl_s,'bot lease ttl_s');
+  if('max_uses' in lease)patch.max_uses=positiveInteger(lease.max_uses,'bot lease max_uses');
+  body.lease=patch;
+ }
+ return body;
+}
 /** Validates a create request from the browser into the exact contract body. Limits are refused, not clamped: nothing is guessed on the owner's behalf. */
 export function parseBotCreate(input:unknown,defaultCapUsd:number):BotCreateBody{
  const data=record(input,'bot request');
@@ -91,24 +134,7 @@ export function parseBotCreate(input:unknown,defaultCapUsd:number):BotCreateBody
  if(typeof data.agent!=='string'||!AGENT.test(data.agent))throw new BotsError(400,'Invalid agent name');
  const body:BotCreateBody={name,agent:data.agent,daily_cost_cap_usd:defaultCapUsd};
  if(data.mode!==undefined){if(!(MODES as readonly unknown[]).includes(data.mode))throw new BotsError(400,'Invalid bot mode');body.mode=data.mode as 'personal'|'team';}
- if(data.schedule===null)body.schedule=null;
- else if(data.schedule!==undefined){
-  const schedule=record(data.schedule,'bot schedule');
-  if(schedule.missed!==undefined&&schedule.missed!=='skip'&&schedule.missed!=='once')throw new BotsError(400,'Invalid bot schedule: missed must be skip or once');
-  if('every_s' in schedule){
-   onlyKeys(schedule,['every_s','missed'],'bot schedule');
-   if(typeof schedule.every_s!=='number'||!Number.isSafeInteger(schedule.every_s)||schedule.every_s<BOTS_LIMITS.everyS||schedule.every_s>BOTS_LIMITS.maxEveryS)throw new BotsError(400,'Invalid bot schedule: every_s must be an integer of at least '+BOTS_LIMITS.everyS+' and at most '+BOTS_LIMITS.maxEveryS);
-   body.schedule={every_s:schedule.every_s,...(schedule.missed===undefined?{}:{missed:schedule.missed as 'skip'|'once'})};
-  }else{
-   onlyKeys(schedule,['at','tz','weekdays','missed'],'bot schedule');
-   if(typeof schedule.at!=='string'||!/^([01]\d|2[0-3]):[0-5]\d$/.test(schedule.at))throw new BotsError(400,'Invalid bot schedule: at must be HH:mm');
-   if(typeof schedule.tz!=='string'||!schedule.tz||schedule.tz.length>100)throw new BotsError(400,'Invalid bot schedule: timezone required');
-   try{new Intl.DateTimeFormat('en',{timeZone:schedule.tz}).format();}catch{throw new BotsError(400,'Invalid bot schedule: unknown timezone');}
-   if(!Array.isArray(schedule.weekdays)||!schedule.weekdays.length||schedule.weekdays.length>7||schedule.weekdays.some(d=>!Number.isInteger(d)||d<1||d>7)||new Set(schedule.weekdays).size!==schedule.weekdays.length)throw new BotsError(400,'Invalid bot schedule: weekdays must be distinct ISO days 1 to 7');
-   const missed=schedule.missed===undefined?'skip':schedule.missed as 'skip'|'once';
-   body.schedule={at:schedule.at,tz:schedule.tz,weekdays:schedule.weekdays as number[],missed};
-  }
- }
+ if(data.schedule!==undefined)body.schedule=parseBotSchedule(data.schedule);
  const instruction=optionalText(data.instruction,'instruction',BOTS_LIMITS.text);if(instruction!==undefined)body.instruction=instruction;
  if(data.plugins!==undefined){
   if(!Array.isArray(data.plugins)||data.plugins.length>BOTS_LIMITS.plugins||data.plugins.some(p=>typeof p!=='string'||!PLUGIN.test(p)))throw new BotsError(400,'Invalid bot plugins');
@@ -116,7 +142,7 @@ export function parseBotCreate(input:unknown,defaultCapUsd:number):BotCreateBody
  }
  if(data.lease!==undefined){
   const lease=record(data.lease,'bot lease');onlyKeys(lease,['scopes','ttl_s','max_uses'],'bot lease');
-  if(!Array.isArray(lease.scopes)||!lease.scopes.length||lease.scopes.length>BOTS_LIMITS.scopes||lease.scopes.some(s=>typeof s!=='string'||!CAPABILITY.test(s)))throw new BotsError(400,'Invalid bot lease: scopes must be exact capability ids');
+  if(!Array.isArray(lease.scopes)||lease.scopes.length>BOTS_LIMITS.scopes||lease.scopes.some(s=>typeof s!=='string'||!CAPABILITY.test(s)))throw new BotsError(400,'Invalid bot lease: scopes must be exact capability ids');
   body.lease={scopes:[...new Set(lease.scopes as string[])],ttl_s:positiveInteger(lease.ttl_s,'bot lease ttl_s'),max_uses:positiveInteger(lease.max_uses,'bot lease max_uses')};
  }
  if(data.daily_cost_cap_usd!==undefined){
@@ -137,7 +163,7 @@ export function parseGroupCreate(input:unknown):BotGroupBody{
  if(new Set(bots).size!==bots.length)throw new BotsError(400,'A group cannot list the same bot twice');
  return {name,bots,prompt:requiredText(data.prompt,'group prompt',BOTS_LIMITS.text)};
 }
-interface RequestInit {method?:'GET'|'POST'|'DELETE';body?:unknown;query?:Record<string,string|undefined>}
+interface RequestInit {method?:'GET'|'POST'|'PUT'|'DELETE';body?:unknown;query?:Record<string,string|undefined>}
 export class BotsClient {
  readonly config:BotsConfig;private origin:URL;
  constructor(config:BotsConfig=DEFAULT_BOTS,private timeouts={health:5000,mutate:15000,poll:10000}){
@@ -179,7 +205,7 @@ export class BotsClient {
     if(needs)detail+=' (needs: '+needs+')';
     if(typeof body.how==='string')detail+=' (how: '+redact(body.how).slice(0,200)+')';
    }
-   throw new BotsError(response.status===404?404:response.status<500?400:502,'echoBots service answered HTTP '+response.status+(code?': '+code:'')+detail,code);
+   throw new BotsError(response.status===404||response.status===409?response.status:response.status<500?400:502,'echoBots service answered HTTP '+response.status+(code?': '+code:'')+detail,code);
   }
   if(!parsed||typeof parsed!=='object'||Array.isArray(parsed))throw new BotsError(502,'echoBots service returned an unrecognized response');
   return parsed as Record<string,unknown>;
@@ -216,6 +242,16 @@ export class BotsClient {
   const bot=this.bot(await this.request('/v2/bots',this.timeouts.mutate,{method:'POST',body},signal));
   debug('%j',{event:'prime_bots_create_accepted',botId:bot.bot_id,status:bot.status});
   return bot;
+ }
+ async update(botId:string,input:unknown,signal?:AbortSignal){
+  const id=hexId(botId,'bot'),body=parseBotUpdate(input);
+  return this.bot(await this.request('/v2/bots/'+id,this.timeouts.mutate,{method:'PUT',body},signal),id);
+ }
+ /** Pauses future work and requests cancellation; an active provider step may still be running. */
+ async stop(botId:string,signal?:AbortSignal){
+  const id=hexId(botId,'bot'),reply=await this.request('/v2/bots/'+id+'/stop',this.timeouts.mutate,{method:'POST'},signal);
+  if(reply.bot_id!==id||reply.stop_requested!==true||typeof reply.status!=='string'||!['paused','idle','running','error'].includes(reply.status)||!Array.isArray(reply.run_ids)||reply.run_ids.some(run=>typeof run!=='string'||!HEX.test(run)))throw new BotsError(502,'echoBots service returned an invalid stop receipt');
+  return {botId:id,status:reply.status,stopRequested:true as const,runIds:reply.run_ids as string[]};
  }
  private async transition(botId:string,action:'pause'|'resume',signal?:AbortSignal){
   const id=hexId(botId,'bot');

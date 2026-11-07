@@ -76,7 +76,8 @@ export function parseBuildConfig(value: unknown): BuildConfig {
 export function redactBuild(text: string): string {
  return redact(text.replace(/\b(?:authorization|proxy-authorization|cookie|set-cookie)["']?\s*[=:][^\r\n]*/gi,'[REDACTED HEADER]')
   .replace(/\bBearer\s+[^\s"']+/gi,'Bearer [REDACTED]')
-  .replace(/((?:[a-z0-9_]*token|[a-z0-9_]*secret|[a-z0-9_]*password|[a-z0-9_]*api_key)["']?\s*[:=]\s*["']?)[^\s"',;}]+/gi,'$1[REDACTED]')
+  // Start at the key boundary so long ordinary words do not retry the greedy prefix at every character.
+  .replace(/\b((?:[a-z0-9_]*token|[a-z0-9_]*secret|[a-z0-9_]*password|[a-z0-9_]*api_key)["']?\s*[:=]\s*["']?)[^\s"',;}]+/gi,'$1[REDACTED]')
   .replace(/https?:\/\/[^\s/@]+:[^\s/@]+@/gi,'https://[REDACTED]@'));
 }
 /** The credential check Echo Build `create` and `turn` apply to a title or prompt. Exported so Enhance (build mode) can prove its brief passes it. */

@@ -62,6 +62,11 @@ export class ToolKit {
 }
 interface CallOutcome { tool: string; sha256: string; result: unknown; status: ToolEventStatus; cacheHit: boolean; deduplicated: boolean; durationMs: number }
 export interface ExecuteOutcome { result: unknown; stop: boolean }
+/** Public turn contract also implemented by host-bound owner tools. */
+export interface TurnExecutor {
+ readonly used:number;readonly budgetExhausted:boolean;readonly events:ToolEvent[];readonly sources:string[];
+ instructions():string;execute(action:ToolAction,onEvent?:(event:ToolEvent)=>void,signal?:AbortSignal):Promise<ExecuteOutcome>;summary():string;
+}
 /** Per-turn tool execution: catalogue text, budget, dedupe, cache, parallel calls, events and the honest summary. */
 export class TurnTools {
   readonly events: ToolEvent[] = []; readonly sources: string[] = [];

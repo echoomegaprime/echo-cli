@@ -31,7 +31,7 @@ const debugOwnerResponse=debuglog('echo-prime');
 export type Json=Record<string,unknown>;
 export interface Tool {name:string;description?:string;inputSchema:Json}
 export interface McpConnection {listTools():Promise<Tool[]>;call(name:string,args:Json,options?:{timeoutMs?:number}):Promise<unknown>}
-export interface Capability {id:string;registered:boolean;health:string;scope?:string;tier?:number;category:string;description:string}
+export interface Capability {id:string;registered:boolean;health:string;scope?:string;tier?:number|null;category:string;description:string}
 export interface SdkBroker {
  search(query:string):Promise<Capability[]>;
  read(capability:string):Promise<unknown>;
@@ -294,10 +294,12 @@ export class PrimeHub {
  async botsList(signal?:AbortSignal){return this.botsClient().list(signal);}
  async botsGet(botId:string,signal?:AbortSignal){return this.botsClient().get(botId,signal);}
  async botsCreate(input:unknown,signal?:AbortSignal){return this.botsClient().create(input,signal);}
+ async botsUpdate(botId:string,input:unknown,signal?:AbortSignal){return this.botsClient().update(botId,input,signal);}
  async botsAction(botId:string,action:string,signal?:AbortSignal){
   const bots=this.botsClient();
   if(action==='pause')return bots.pause(botId,signal);
   if(action==='resume')return bots.resume(botId,signal);
+  if(action==='stop')return bots.stop(botId,signal);
   if(action==='delete')return bots.remove(botId,signal);
   throw new BotsError(404,'Unknown echoBots action');
  }

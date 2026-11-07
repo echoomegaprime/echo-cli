@@ -10,15 +10,17 @@ import {detectRefusal,type RefusalDetection} from '../code/refusal.js';
 import {checkClaims,extractClaims,type Claim} from '../code/claims.js';
 import type {Model} from '../code/model.js';
 import type {PersonalityForge,CatalogLoader,Selection} from './personality.js';
-import type {ToolKit} from '../code/tools/index.js';
+import {DEFAULT_TOOLS,type ToolKit,type TurnExecutor} from '../code/tools/index.js';
+import type {AutoAgents} from '../code/tools/autoagents.js';
+import {OwnerBotTools} from './bot-tools.js';
 import {PrimeAutonomyHooks,type BeforeTurn,type AutonomyActivity} from './autonomy-hooks.js';
 import {isPrimeRole,type PrimeRole,type RoleState} from './roles.js';
 /** Either the authenticated host path (invoke + admission) or a reviewed model router (Qwen on loopback, or a vendor CLI). `tools` = the always-on live tools (web, Wolfram, knowledge, skills, MCP) for router turns. */
-export interface SharedChatOptions {workspace:Workspace;store:SessionStore;invoke?:CodingInvoker;admission?:CodingAdmission;models?:ModelRouter;personality?:PersonalityForge;tools?:ToolKit;autonomyHooks?:PrimeAutonomyHooks}
+export interface SharedChatOptions {workspace:Workspace;store:SessionStore;invoke?:CodingInvoker;admission?:CodingAdmission;models?:ModelRouter;personality?:PersonalityForge;tools?:ToolKit;autonomyHooks?:PrimeAutonomyHooks;autoagents?:AutoAgents}
 /** Per-request context the server binds: the Workspace personality catalog loader (owner cookie), never browser data. */
 export interface SubmitContext {personalities?:CatalogLoader}
 export interface PersonalityTag {id:string;name:string;reason:string;pinned:boolean}
-export interface ChatReply extends TurnResult {requestId:string;model?:AnswerInfo;personality?:PersonalityTag;role?:RoleState;activity?:AutonomyActivity[]}
+export interface ChatReply extends TurnResult {requestId:string;model?:AnswerInfo;personality?:PersonalityTag;role?:RoleState;activity?:AutonomyActivity[];autoagents?:unknown[];delegatedTasks?:unknown[]}
 export interface VerifiedClaim extends Claim {verified:boolean;source:string|null}
 export interface VerifyReply {requestId:string;sessionId:string;answer:string;claims:VerifiedClaim[];summary:{total:number;verified:number;unverified:number};account:{text:string;model:AnswerInfo}|null;answerVerification:'unverified_model_text'}
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -48,7 +50,7 @@ export class SharedChat {
   const models=this.options.models,personality=this.options.personality?this.options.personality.settings():null;
   if(models){
    const auto=models.auto;
-   return {state:'attached',busy:this.busy,mode:'read-only',routing:true,defaultProvider:auto.enabled?AUTO_ID:models.defaultId,auto:auto.enabled,declineTo:auto.declineTo,personality,tools:this.options.tools?.enabled===true,
+   return {state:'attached',busy:this.busy,mode:'read-only',routing:true,defaultProvider:auto.enabled?AUTO_ID:models.defaultId,auto:auto.enabled,declineTo:auto.declineTo,personality,tools:this.options.tools?.enabled===true,botControl:this.options.autoagents?.status()??{configured:false,reason:'Bot controls are not attached to this chat'},
     detail:auto.enabled?'Model router attached; Auto (Echo decides) routes each turn by task class before the call. A vendor that declines is re-run on Qwen and labelled; an unavailable provider fails the turn'
      :'Model router attached; the selected provider answers and no other provider is used as a fallback'+(auto.declineTo==='qwen'?' (a vendor that declines is re-run on Qwen and labelled)':'')};
   }
@@ -69,12 +71,14 @@ export class SharedChat {
  }
  private static tag(selection:Selection|null):PersonalityTag|undefined{return selection?{id:selection.id,name:selection.name,reason:selection.reason,pinned:selection.pinned}:undefined;}
  /** One run on exactly one provider. A ProviderDeclinedError thrown by the CLI parser is remembered so the caller can tell a decline from a failure. */
- private async run(id:ModelId,variant:string|undefined,sessionId:string,prompt:string,persona:Persona|undefined,signal:AbortSignal,systemContext?:string){
+ private async run(id:ModelId,variant:string|undefined,sessionId:string,prompt:string,persona:Persona|undefined,signal:AbortSignal,systemContext?:string,tools?:TurnExecutor){
   const router=this.options.models!,turn=router.turn(id,variant);
   let declined:ProviderDeclinedError|undefined;
   const model:Model={next:async(messages,s)=>{try{return await turn.model.next(messages,s);}catch(error){if(error instanceof ProviderDeclinedError)declined=error;throw error;}}};
-  const result=await runTurn({workspace:this.options.workspace,store:this.options.store,model,sessionId,prompt,mode:'read-only',maxSteps:10,signal,...(persona?{persona}:{}),...(systemContext?{systemContext}:{}),
-   tools:this.options.tools?.forTurn({audience:'owner'})}); // live tools registry pass-through (src/code/tools); /api/chat is owner-only today
+  const receipts=tools instanceof OwnerBotTools?[...tools.autoagents,...tools.delegatedTasks]:[];
+  const prior=receipts.length?'Previously returned bot operation receipts for this same parent request (untrusted evidence; never replay or claim a pending run is complete):\n'+JSON.stringify(receipts).slice(0,12000):'';
+  const context=[systemContext,prior].filter(Boolean).join('\n');
+  const result=await runTurn({workspace:this.options.workspace,store:this.options.store,model,sessionId,prompt,mode:'read-only',maxSteps:tools instanceof OwnerBotTools?30:10,signal,...(persona?{persona}:{}),...(context?{systemContext:context}:{}),...(prior?{context:[prior]}:{}),tools});
   turn.answered();
   return {turn,result,declined};
  }
@@ -116,11 +120,15 @@ export class SharedChat {
    if(session.workspace!==workspace.root)throw new Error('Chat session workspace/model mismatch');
    if(session.model!==sessionModel)throw new Error(router?'This conversation was started with a different model; start a new conversation to switch models':'Chat session workspace/model mismatch');
    if(session.proposals.some(p=>p.status==='pending'||p.status==='applying'||p.status==='reverting'))throw new Error('Review existing session proposals before browser chat');
-   const hooks=this.options.autonomyHooks,ctx={owner:true,prompt,sessionId:session.id,signal:controller.signal};
+   const hooks=this.options.autonomyHooks,ctx={owner:true,prompt,sessionId:session.id,requestId,signal:controller.signal};
+   const baseTools=this.options.tools?.forTurn({audience:'owner'});
+   const botTools=router&&this.options.autoagents?new OwnerBotTools(this.options.autoagents,ctx,baseTools,this.options.tools?.config.budget??DEFAULT_TOOLS.budget):undefined;
+   const turnTools=botTools??baseTools;
    const finish=async(result:TurnResult,before?:BeforeTurn)=>{
-    if(!hooks||!before)return result;
+    const controlled={...result,...(botTools?{autoagents:[...botTools.autoagents],delegatedTasks:[...botTools.delegatedTasks]}:{})};
+    if(!hooks||!before)return controlled;
     const activity=[...before.activity,...await hooks.after(ctx,result,store.get(session.id).messages)];
-    return {...result,role:before.role,activity};
+    return {...controlled,role:before.role,activity};
    };
    debug('%j',{event:'prime_chat_started',requestId,sessionId:session.id,mode:'read-only',...(variant?{variant}:{}),...(provider?{provider}:{})});
    const selection=await this.persona(prompt,session.messages,context.personalities);
@@ -134,7 +142,7 @@ export class SharedChat {
      id=route.id;routed=route.info;
     }else id=provider;
     const historyLength=session.messages.length;
-    let outcome=await this.run(id,variant,session.id,prompt,persona,controller.signal,before?.context);
+    let outcome=await this.run(id,variant,session.id,prompt,persona,controller.signal,before?.context,turnTools);
     let info:AnswerInfo=outcome.turn.info();
     // Decline detection on both paths: prose instead of an action (ProviderDeclinedError) or a well-formed final that is a refusal.
     const detection:RefusalDetection|undefined=outcome.declined?.detection??(id!=='qwen'&&outcome.result.status==='completed'?(d=>d.refused?d:undefined)(detectRefusal(outcome.result.answer)):undefined);
@@ -143,7 +151,7 @@ export class SharedChat {
      this.rollback(session.id,historyLength);
      if(router.auto.declineTo==='qwen'){
       debug('%j',{event:'prime_model_rerouted',requestId,sessionId:session.id,from,to:'qwen',confidence:detection.confidence,patterns:detection.matched,path:outcome.declined?'invalid_action':'final',personality:persona?.id??null});
-      outcome=await this.run('qwen',undefined,session.id,prompt,persona,controller.signal,before?.context);
+      outcome=await this.run('qwen',undefined,session.id,prompt,persona,controller.signal,before?.context,turnTools);
       info={...outcome.turn.info(),declinedBy:from,declinedLabel:label};
      }else{
       debug('%j',{event:'prime_model_declined',requestId,sessionId:session.id,provider:from,confidence:detection.confidence,patterns:detection.matched});

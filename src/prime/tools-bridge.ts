@@ -2,11 +2,12 @@ import {randomUUID} from 'node:crypto';
 import {type McpConnection,type SdkBroker,object,unwrap} from './hub.js';
 import type {McpGateway,SdkInvoke} from '../code/tools/index.js';
 
-/** Live tools reach vendors through the authenticated SDK broker (`{command, options}` envelope, result unwrapped to the gate body). Prime never holds the vendor key. */
+/** Live tools reach vendors through the authenticated SDK broker (canonical flat command plus options fields). Prime never holds the vendor key. */
 export function sdkToolInvoke(broker:SdkBroker):SdkInvoke{
  return async(capability,command,options)=>{
   if(!/^echo\.[A-Za-z0-9_.-]{1,180}$/.test(capability))throw new Error('Invalid capability ID');
-  const raw=await broker.invoke({capability,params:{command,options},reason:'ECHO Prime live tool call for the current chat turn (read-only knowledge lookup)',idempotency_key:randomUUID()});
+  if(Object.prototype.hasOwnProperty.call(options,'command'))throw new Error('SDK options cannot override command');
+  const raw=await broker.invoke({capability,params:{command,...options},reason:'ECHO Prime live tool call for the current chat turn (read-only knowledge lookup)',idempotency_key:randomUUID()});
   return unwrap(raw);
  };
 }

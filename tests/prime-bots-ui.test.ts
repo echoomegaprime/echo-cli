@@ -48,7 +48,8 @@ const json = (status: number, body: unknown) => ({ ok: status < 400, status, jso
 const healthy = () => ({ configured: true, available: true, defaultBudget: { max_calls: 80, max_cost_usd: 0, max_wall_s: 1800 }, service: { service: 'echo-adk-api', version: '0.1.0', profile: 'ECHO_ADK', agents: 2, bots: 2, runsActive: 0, contract_version: 2, features: { calendar_schedules: true, idempotent_events: true, memory_recall: true }, budgets: { daily_cap_usd: 200, spent_today_usd: 1, reserved_usd: 2, available_usd: 197 }, connections: { memory: { provider: 'local', recall: true, durable: true, shared: false }, browser: { available: false, reason: 'No isolated browser provider is configured' } } } });
 
 interface Opts { health?: unknown; healthStatus?: number; bots?: Record<string, unknown>[]; agents?: unknown; agentsStatus?: number; workspace?: ReturnType<typeof workspaceStub>; stored?: string | null;
-  messages?: (poll: number, since: string | null) => unknown; group?: (poll: number) => unknown; agentsView?: { openRun: ReturnType<typeof vi.fn> } }
+  updateStatus?: number; stopStatus?: string;
+  messages?: (poll: number, since: string | null) => unknown; group?: (poll: number) => unknown; agentsView?: { openRun?: ReturnType<typeof vi.fn>; open?: ReturnType<typeof vi.fn>; watch?: ReturnType<typeof vi.fn> } }
 function boot(opts: Opts = {}) {
   const created: Node[] = [], nav = new Node('nav'), sidebar = new Node('aside'), body = new Node('body');
   const documentEvents: Record<string, ((e: any) => unknown)[]> = {}, windowEvents: Record<string, ((e: any) => unknown)[]> = {};
@@ -68,6 +69,12 @@ function boot(opts: Opts = {}) {
     if (url === '/api/prime/adk/agents') return json(opts.agentsStatus ?? (opts.agents ? 200 : 405), opts.agents ?? { error: 'JSON POST required' });
     if (url === '/api/prime/bots/create') { const made = bot({ bot_id: BOT3, name: parsed.name, agent: parsed.agent, mode: parsed.mode ?? 'personal', status: 'paused', schedule: parsed.schedule ?? null, plugins: parsed.plugins ?? [], daily_cost_cap_usd: parsed.daily_cost_cap_usd, spent_today_usd: 0, inbox_depth: 0, last_run_at: undefined, last_error: null }); bots.push(made); return json(201, made); }
     let m: RegExpExecArray | null;
+    if ((m = /^\/api\/prime\/bots\/([0-9a-f]{32})$/.exec(url))) return json(200, bots.find(b => b.bot_id === m![1]));
+    if ((m = /^\/api\/prime\/bots\/([0-9a-f]{32})\/update$/.exec(url))) {
+      if (opts.updateStatus) return json(opts.updateStatus, { error: 'Pause and stop pending work before editing' });
+      const row = bots.find(b => b.bot_id === m![1])!; Object.assign(row, { ...parsed, ...(parsed.lease ? { lease: { ...row.lease, ...parsed.lease } } : {}) }); return json(200, row);
+    }
+    if ((m = /^\/api\/prime\/bots\/([0-9a-f]{32})\/stop$/.exec(url))) return json(200, { botId: m[1], status: opts.stopStatus ?? 'running', stopRequested: true, runIds: [RUN] });
     if ((m = /^\/api\/prime\/bots\/([0-9a-f]{32})\/(pause|resume|delete)$/.exec(url))) {
       const row = bots.find(b => b.bot_id === m![1]); if (!row) return json(404, { error: 'echoBots service answered HTTP 404: not_found' });
       if (m[2] === 'delete') { bots = bots.filter(b => b.bot_id !== m![1]); return json(200, { botId: m[1], deleted: true }); }
@@ -185,6 +192,11 @@ describe('owner-only routes before sign-in (the 2026-11-04 401 request storm)', 
 });
 
 describe('bot cards', () => {
+  it('requests stop once and does not label an in-flight provider step as stopped', async () => {
+    const s = await opened({ bots: [bot({ status: 'running' })] }); await find(s.cards()[0], 'Stop')!.fire('click'); await settle();
+    expect(s.calls.filter(c => c.url.endsWith('/stop'))).toEqual([{ url: `/api/prime/bots/${BOT}/stop`, method: 'POST', body: {} }]);
+    expect(text(s.cards()[0])).toContain('running'); expect(s.noteLine()).toContain('Active provider steps may still be running');
+  });
   it('uses the service ledger for reserved funds, converts next run timestamps to UTC, and opens reported run evidence', async () => {
     const agentsView = { openRun: vi.fn() };
     const s = await opened({ agentsView, bots: [bot({ status: 'idle', schedule: { at: '09:00', tz: 'America/Chicago', weekdays: [1, 5], missed: 'skip' }, next_run_at: '2026-11-09T09:00:00-06:00', last_run_id: RUN, budget: { daily_cap_usd: 1, spent_today_usd: 0.2, reserved_usd: 0.3, available_usd: 0.5, uncertain_charged_today_usd: 0.1 } })] });
@@ -231,6 +243,33 @@ describe('bot cards', () => {
 });
 
 describe('create form', () => {
+  it('loads a fresh paused bot for editing and sends only changed values, including explicit clearing and scope revocation', async () => {
+    const s = await opened({ bots: [bot({ inbox_depth: 0 })] }); await find(s.cards()[0], 'Edit')!.fire('click'); await settle();
+    const form = s.pane(); expect(text(form)).toContain('Saving leaves the bot paused');
+    expect(inputs(form).find(n => n.attributes['aria-label'] === 'Agent (cannot change)')!.disabled).toBe(true);
+    await find(form, 'Save bot changes')!.fire('click'); expect(s.noteLine()).toBe('No changes to save.');
+    byPlaceholder(form, 'Bot name').value = 'Updated scout'; byPlaceholder(form, 'Standing instruction').value = ''; byPlaceholder(form, 'Skill names').value = ''; byPlaceholder(form, 'Exact capability ids').value = '';
+    const scheduled = inputs(form).find(n => n.attributes.type === 'checkbox')!; scheduled.checked = false; await scheduled.fire('change');
+    await find(form, 'Save bot changes')!.fire('click'); await settle();
+    expect(s.calls.filter(c => c.url.endsWith('/update'))).toEqual([{ url: `/api/prime/bots/${BOT}/update`, method: 'POST', body: { name: 'Updated scout', schedule: null, instruction: null, plugins: [], lease: { scopes: [] } } }]);
+    expect(s.calls.some(c => c.url.endsWith('/resume'))).toBe(false); expect(s.noteLine()).toContain('Updated Updated scout: status paused');
+  });
+  it('requires pause and an empty inbox, keeps an editing draft on a backend conflict, and never stops work automatically', async () => {
+    const active = await opened({ bots: [bot({ status: 'running' })] }); await find(active.cards()[0], 'Edit')!.fire('click'); await settle();
+    expect(active.noteLine()).toContain('Pause the bot and stop pending work'); expect(find(active.pane(), 'Save bot changes')).toBeUndefined(); expect(active.calls.some(c => c.url.endsWith('/stop'))).toBe(false);
+    const s = await opened({ bots: [bot({ inbox_depth: 0, schedule: { every_s: 90, missed: 'skip' } })], updateStatus: 409 }); await find(s.cards()[0], 'Edit')!.fire('click'); await settle();
+    const form = s.pane(); byPlaceholder(form, 'Bot name').value = 'Draft survives'; await find(form, 'Save bot changes')!.fire('click'); await settle();
+    expect(s.calls.find(c => c.url.endsWith('/update'))?.body).toEqual({ name: 'Draft survives' }); expect(byPlaceholder(s.pane(), 'Bot name').value).toBe('Draft survives');
+    expect(s.noteLine()).toContain('Bot not updated'); expect(s.calls.filter(c => c.url.endsWith('/update'))).toHaveLength(1);
+    await find(s.pane(), 'Cancel edit')!.fire('click'); expect(s.api.state().pane).toBe('chat');
+  });
+  it('closes the editor when a refreshed list confirms that the bot was removed elsewhere', async () => {
+    const s = await opened({ bots: [bot({ inbox_depth: 0 })] }); await find(s.cards()[0], 'Edit')!.fire('click'); await settle();
+    byPlaceholder(s.pane(), 'Bot name').value = 'Unsaved draft';
+    s.serverBots.set([]); await find(s.dialog(), 'Refresh')!.fire('click'); await settle();
+    expect(s.api.state().selected).toBeNull(); expect(s.api.state().pane).toBe('none');
+    expect(find(s.pane(), 'Save bot changes')).toBeUndefined(); expect(s.calls.some(c => c.url.endsWith('/update'))).toBe(false);
+  });
   it('creates a calendar schedule with explicit timezone, selected ISO weekdays and missed-run policy', async () => {
     const s = await opened(); await find(s.dialog(), 'New bot')!.fire('click'); await settle();
     const form = s.pane(); byPlaceholder(form, 'Bot name').value = 'Morning scout'; byPlaceholder(form, 'Echo ADK agent name').value = 'scout';
@@ -315,8 +354,8 @@ describe('bot chat', () => {
     s.api.close(); const n = s.messagePolls(); await vi.advanceTimersByTimeAsync(10000); expect(s.messagePolls()).toBe(n); expect(s.api.state().polling).toBe(false);
   });
   it('sends a message as a 202 run, clears the box and hands a run id to the Agents view when one is installed', async () => {
-    const openRun = vi.fn();
-    const s = await opened({ agentsView: { openRun } });
+    const open = vi.fn(async () => undefined), watch = vi.fn();
+    const s = await opened({ agentsView: { open, watch } });
     await find(s.cards()[1], 'Open chat')!.fire('click'); await settle();
     const box = inputs(s.pane()).find(n => n.tagName === 'TEXTAREA')!;
     await find(s.pane(), 'Send')!.fire('click'); await settle();
@@ -326,7 +365,7 @@ describe('bot chat', () => {
     expect(s.calls.find(c => c.url.endsWith('/message'))).toEqual({ url: `/api/prime/bots/${BOT2}/message`, method: 'POST', body: { text: 'What is left?' } });
     expect(box.value).toBe(''); expect(s.noteLine()).toBe('Queued for Docs bot as run ffffffff….');
     await all(s.pane()).find(n => n.attributes['data-run-id'] === RUN)!.fire('click');
-    expect(openRun).toHaveBeenCalledWith(RUN);
+    expect(open).toHaveBeenCalledOnce(); expect(watch).toHaveBeenCalledWith(RUN); expect(open.mock.invocationCallOrder[0]).toBeLessThan(watch.mock.invocationCallOrder[0]);
   });
   it('reopens on the remembered bot and keeps the chat draft when the card status changes', async () => {
     const s = await opened({ stored: BOT2 });

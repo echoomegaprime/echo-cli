@@ -99,7 +99,6 @@ export function parseAgentDefinition(input:unknown,defaults:AdkBudget=DEFAULT_AD
  if(typeof data.name!=='string'||!ADK_CREATE_NAME.test(data.name))throw new AdkError(400,'Invalid agent name: use 2 to 63 lowercase letters, digits or hyphens');
  if(typeof data.role!=='string'||!data.role.trim()||data.role.length>80)throw new AdkError(400,'Invalid agent definition: role');
  const capabilities=stringList(data.capabilities,'capabilities must be exact echo.* ids',ADK_DEFINITION_LIMITS.capabilities,ADK_CAPABILITY_ID);
- if(!capabilities.length)throw new AdkError(400,'Invalid agent definition: at least one capability id is required');
  const skills=stringList(data.skills,'skills',ADK_DEFINITION_LIMITS.skills,ADK_SKILL);
  const lane=obj(data.lane);
  if(data.lane!==undefined&&(!data.lane||typeof data.lane!=='object'||Array.isArray(data.lane)))throw new AdkError(400,'Invalid agent definition: lane');
@@ -184,7 +183,7 @@ export class AdkClient {
   let detail='Echo ADK answered HTTP '+status+(code?' ('+code+')':'')+(message?': '+message:'');
   if(code==='gated')detail+=(needs?.length?'. Needs: '+needs.join(', '):'')+(how?'. How: '+how:'');
   if(code==='unavailable')detail+='. Provider '+(provider??'(not named)')+' is unavailable; no fallback was used';
-  const mapped=status===404||code==='not_found'?404:status<500&&code!=='unavailable'?400:502;
+  const mapped=status===404||code==='not_found'?404:status===409?409:status<500&&code!=='unavailable'?400:502;
   debug('%j',{event:'prime_adk_refused',status,code:code??null});
   return new AdkError(mapped,detail,code,{...(needs?{needs}:{}),...(how?{how}:{}),...(provider?{provider}:{}),http:status});
  }

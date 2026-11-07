@@ -19,7 +19,7 @@ import {AutoAgents,brokerCapabilityLookup} from '../code/tools/autoagents.js';
 import {UploadStore,parseUploadsConfig} from './uploads.js';
 import {BuildRunner,parseBuildConfig} from './build.js';
 import {StdioMcp,type StdioConfig} from './stdio.js';
-import {sdkBroker,type SdkTools} from './sdk.js';
+import {sdkBroker,sdkConnectionConfig,type SdkTools} from './sdk.js';
 import {startPrimeServer} from './server.js';
 import {connectSteward,type StewardOwner,type StewardTools} from './steward.js';
 import type {WorkspaceConfig} from './workspace.js';
@@ -56,7 +56,7 @@ export function registerPrimeCommands(code:Command){
    const ui=fileURLToPath(new URL('../../ui/echo-prime/',import.meta.url));
    const snapshot=JSON.parse(await readFile(new URL('../../ui/echo-prime/catalog.json',import.meta.url),'utf8')) as {capabilities:Capability[]};
    const esh=config.esh?await StdioMcp.connect(config.esh):undefined;if(esh)connections.push(esh);
-   const sdk=config.sdk?await StdioMcp.connect(config.sdk):undefined;if(sdk)connections.push(sdk);
+   const sdk=config.sdk?await StdioMcp.connect(sdkConnectionConfig(config.sdk)):undefined;if(sdk)connections.push(sdk);
    const broker=sdk&&config.sdk?await sdkBroker(sdk,config.sdk.tools,config.sdk.fixedArguments):undefined;
    const ecf=new EcfTools(new ContinuityClient(broker?request=>broker.invoke({capability:request.capability,params:{...request.params},reason:request.reason,idempotency_key:request.idempotencyKey??randomUUID()}):undefined));
    const autonomyHooks=new PrimeAutonomyHooks(ecf,rolesConfig?new FleetRoles(rolesConfig):undefined);
@@ -74,15 +74,15 @@ export function registerPrimeCommands(code:Command){
    // (families, budget, skill roots, MCP allow-list) or turns them off; vendor keys stay on the SDK gate, never in Prime.
    const toolsConfig=parseToolsConfig(config.tools);
    const tools=router&&toolsConfig.enabled?new ToolKit(toolsConfig,{sdk:broker?sdkToolInvoke(broker):undefined,mcp:connectionGateway({esh,sdk})},TOOL_MODULES):undefined;
+   const adk=config.adk!==undefined?new AdkClient(parseAdkConfig(config.adk)):undefined,bots=config.bots!==undefined?new BotsClient(parseBotsConfig(config.bots)):undefined;
+   const autoagents=adk&&bots&&broker?new AutoAgents({adk,bots,caps:brokerCapabilityLookup(broker)}):undefined;
    let chat:SharedChat|undefined;
    // Personality Forge settings (off switch, pinned profile) are an owner setting kept beside the code sessions.
-   if(router){const store=new SessionStore(opts.codeStateDir);chat=new SharedChat({workspace:new Workspace(opts.codeWorkspace,[store.directory]),store,models:router,tools,personality:new PersonalityForge({file:join(store.directory,'personality-settings.json')}),autonomyHooks});}
+   if(router){const store=new SessionStore(opts.codeStateDir);chat=new SharedChat({workspace:new Workspace(opts.codeWorkspace,[store.directory]),store,models:router,tools,personality:new PersonalityForge({file:join(store.directory,'personality-settings.json')}),autonomyHooks,autoagents:toolsConfig.enabled?autoagents:undefined});}
    builds=config.build!==undefined?new BuildRunner(parseBuildConfig(config.build)):undefined;
    const uploads=config.uploads!==undefined?new UploadStore(parseUploadsConfig(config.uploads)):undefined;
    // The reviewed `adk` section (loopback echo-adk-api, default 127.0.0.1:8378) is opt-in like `swarm`: absent = Agents view says it is off.
-   const adk=config.adk!==undefined?new AdkClient(parseAdkConfig(config.adk)):undefined,bots=config.bots!==undefined?new BotsClient(parseBotsConfig(config.bots)):undefined;
    // Autonomous agent/bot creation from chat needs all three: the ADK service, echoBots and the live catalog (to verify capability ids).
-   const autoagents=adk&&bots&&broker?new AutoAgents({adk,bots,caps:brokerCapabilityLookup(broker)}):undefined;
    const hub=new PrimeHub({capabilities:snapshot.capabilities,esh,steward,models:router,chat,tools,build:builds,autonomy,ecf,swarm:config.swarm!==undefined?new SwarmClient(parseSwarmConfig(config.swarm)):undefined,voice:config.voice!==undefined?new VoiceClient(parseVoiceConfig(config.voice)):undefined,adk,bots,uploads,uploadsOwner:config.workspace?.ownerUid??'local',browser:config.browser!==undefined?new BrowserClient(parseBrowserConfig(config.browser)):undefined,sdk:broker,autoagents,mediaConfig,outcomes});
    const server=await startPrimeServer(hub,ui,Number(opts.port),{workspace:config.workspace,publicOrigin:config.publicOrigin,uploads});
    process.stdout.write(JSON.stringify({url:server.url,publicOrigin:config.publicOrigin??null,esh:!!esh,sdk:!!sdk,steward:!!steward,media:{localRoots:mediaConfig.localRoots.length,origins:mediaConfig.origins.length,warnings:media.warnings.length},scope:'loopback host; public ingress requires configured TLS proxy and release evidence'})+'\n');

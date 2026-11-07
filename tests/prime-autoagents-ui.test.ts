@@ -8,7 +8,7 @@ import { runInNewContext } from 'node:vm';
 const source = readFileSync(new URL('../ui/echo-prime/autoagents.js', import.meta.url), 'utf8');
 const agentsSource = readFileSync(new URL('../ui/echo-prime/agents.js', import.meta.url), 'utf8');
 const botsSource = readFileSync(new URL('../ui/echo-prime/bots.js', import.meta.url), 'utf8');
-const BOT = 'a'.repeat(32), SHA = 'c'.repeat(64);
+const BOT = 'a'.repeat(32), SHA = 'c'.repeat(64), RUN = 'd'.repeat(32), MESSAGE = 'e'.repeat(32);
 
 class Node {
   tagName: string; textContent = ''; className = ''; hidden = false; disabled = false; open = false; value = ''; checked = false;
@@ -40,6 +40,7 @@ const agent = (over: Record<string, unknown> = {}) => ({ name: 'queue-scout', ro
   lane: { node: 'forge', model: 'qwen-local', budget: { max_calls: 40, max_cost_usd: 0, max_wall_s: 900 } }, maxSteps: 12, schedule: { every_s: 3600 }, origin: { by: 'echo', prompt_sha256: SHA, created_at: '2026-11-04T21:00:00Z' }, existing: false, ...over });
 const bot = (over: Record<string, unknown> = {}) => ({ botId: BOT, name: 'Queue scout', agent: 'queue-scout', mode: 'personal', status: 'idle', schedule: { every_s: 3600 }, dailyCostCapUsd: 0, existing: false, autoResumed: true, approval: { required: false, reasons: [] }, ...over });
 const built = (over: Record<string, unknown> = {}) => ({ kind: 'autoagent', tool: 'make_bot', promptSha256: SHA, agent: agent(), bot: bot(), summary: 'Created.', ...over });
+const delegated = (over: Record<string, unknown> = {}) => ({ kind: 'delegated_task', tool: 'delegate_task', taskKey: 'release-check', task: 'Summarize release readiness', agent: 'queue-scout', botId: BOT, runId: RUN, messageId: MESSAGE, eventId: 'task:release-check', status: 'running', done: false, duplicate: false, untrusted: true, ...over });
 const json = (status: number, body: unknown) => ({ ok: status < 400, status, json: async () => body });
 
 interface Opts { workspace?: ReturnType<typeof workspaceStub>; responses?: Record<string, { status: number; body: unknown }>; bots?: boolean; agents?: boolean; customEvent?: boolean }
@@ -60,14 +61,14 @@ function boot(opts: Opts = {}) {
   const dispatched: { type: string; detail: unknown }[] = [];
   const storage: Record<string, string> = {};
   const localStorage = { getItem: (k: string) => storage[k] ?? null, setItem: vi.fn((k: string, v: string) => { storage[k] = v; }), removeItem: (k: string) => { delete storage[k]; } };
-  const openBots = vi.fn(async () => undefined), openAgents = vi.fn(async () => undefined);
+  const openBots = vi.fn(async () => undefined), openAgents = vi.fn(async () => undefined), openRun = vi.fn(async () => undefined);
   const window: Record<string, unknown> = { addEventListener: vi.fn(), dispatchEvent: vi.fn((e: { type: string; detail: unknown }) => { dispatched.push({ type: e.type, detail: e.detail }); return true; }),
-    ...(opts.workspace ? { EchoPrimeWorkspace: opts.workspace } : {}), ...(opts.bots === false ? {} : { EchoPrimeBots: { open: openBots } }), ...(opts.agents === false ? {} : { EchoPrimeAgents: { open: openAgents } }) };
+    ...(opts.workspace ? { EchoPrimeWorkspace: opts.workspace } : {}), ...(opts.bots === false ? {} : { EchoPrimeBots: { open: openBots } }), ...(opts.agents === false ? {} : { EchoPrimeAgents: { open: openAgents, watch: openRun } }) };
   const context: Record<string, unknown> = { window, document, fetch, localStorage, Date, Error, Map, Set, Number, Math, String, Array, Object, Promise, JSON, encodeURIComponent, Event: FakeEvent, console: { debug: vi.fn(), log: console.log } };
   if (opts.customEvent !== false) context.CustomEvent = FakeEvent;
   runInNewContext(source, context);
   const api = window.EchoPrimeAutoagents as { render(result: unknown): Node[]; card(b: unknown): Node; badge(r: unknown): Node | null; explain(): Node; admission(): string; satellites(d: unknown): void; ORB_EVENT: string };
-  return { api, log, calls, dispatched, localStorage, openBots, openAgents, created, window, document, ws: opts.workspace };
+  return { api, log, calls, dispatched, localStorage, openBots, openAgents, openRun, created, window, document, ws: opts.workspace };
 }
 const settle = async () => { for (let i = 0; i < 6; i++) await Promise.resolve(); };
 async function click(root: Node, label: string) { const b = find(root, label); if (!b) throw new Error('no button ' + label + ' in: ' + buttons(root).map(x => x.textContent).join(', ')); await b.fire('click'); await settle(); }
@@ -75,6 +76,34 @@ const note = (card: Node) => all(card).find(n => n.attributes.role === 'status')
 
 beforeEach(() => { vi.useFakeTimers(); });
 afterEach(() => { vi.useRealTimers(); });
+
+describe('delegated task receipts', () => {
+  it('renders running work, refreshes the original run into a result and proof, and opens the existing run and bot controls', async () => {
+    const s = boot({ workspace: workspaceStub(owner()), responses: { [`/api/prime/adk/runs/${RUN}`]: { status: 200, body: { runId: RUN, status: 'done', done: true, steps: [{ kind: 'final', data: { text: 'Release checks passed. <script>untrusted()</script>' } }], proof: { verdict: 'PASS', events_sha256: SHA, receipts: [{ audit_id: 'audit-1' }] } } } } });
+    const [card] = s.api.render({ autoagents: [], delegatedTasks: [delegated()] });
+    expect(text(card)).toContain('Delegated task running'); expect(text(card)).toContain('Summarize release readiness'); expect(s.calls).toHaveLength(0);
+    await click(card, 'Refresh result'); expect(s.calls).toHaveLength(1); expect(s.calls[0]).toMatchObject({ url: `/api/prime/adk/runs/${RUN}`, method: 'GET', body: undefined, headers: { 'x-echo-csrf': 'csrf-owner' } });
+    expect(text(card)).toContain('Delegated task finished'); expect(text(card)).toContain('Release checks passed. <script>untrusted()</script>'); expect(text(card)).toContain('Proof verdict PASS'); expect(text(card)).toContain('No work was resubmitted');
+    await click(card, 'Open run'); expect(s.openRun).toHaveBeenCalledWith(RUN);
+    await click(card, 'Open in echoBots'); expect(s.openBots).toHaveBeenCalledOnce(); expect(s.localStorage.setItem).toHaveBeenCalledWith('echo-prime-bot-v1', BOT);
+  });
+  it('shows a gated task without inventing a run and explains queued work for an already paused bot', () => {
+    const s = boot(); const [gated] = s.api.render({ autoagents: [delegated({ status: 'gated', done: true, runId: undefined, messageId: undefined, eventId: undefined, approval: { required: true, reasons: ['A capability needs owner approval'] } })] });
+    expect(text(gated)).toContain('No run was admitted'); expect(text(gated)).toContain('A capability needs owner approval'); expect(find(gated, 'Open run')).toBeUndefined(); expect(find(gated, 'Refresh result')).toBeUndefined();
+    const [queued] = s.api.render({ autoagents: [delegated({ status: 'queued', botStatus: 'paused', duplicate: true })] }); expect(text(queued)).toContain('Queued for a paused bot'); expect(text(queued)).toContain('existing event'); expect(s.calls).toHaveLength(0);
+  });
+  it('merges distinct task arrays and renders the latest receipt once per run', () => {
+    const s = boot(); const cards = s.api.render({ autoagents: [built()], delegatedTasks: [delegated(), delegated({ status: 'done', done: true, output: 'Final receipt' })] });
+    expect(cards).toHaveLength(2); expect(text(cards[1])).toContain('Final receipt'); expect(text(cards[1])).toContain('Delegated task finished');
+  });
+  it('rejects malformed receipt IDs, respects owner access, and does not retry a failed refresh', async () => {
+    const s = boot({ responses: { [`/api/prime/adk/runs/${RUN}`]: { status: 503, body: { error: 'Service unavailable' } } } });
+    expect(s.api.render({ autoagents: [delegated({ runId: '../other' })] })).toEqual([]);
+    const [card] = s.api.render({ autoagents: [delegated()] }); await click(card, 'Refresh result'); expect(s.calls).toHaveLength(1); expect(text(card)).toContain('No automatic retry was made');
+    const ws = workspaceStub(owner()), owned = boot({ workspace: ws }), [ownedCard] = owned.api.render({ autoagents: [delegated()] }); ws.session = member(); await click(ownedCard, 'Refresh result'); expect(owned.calls).toHaveLength(0); expect(text(ownedCard)).toContain('Primary owner access is required');
+    const denied = boot({ workspace: workspaceStub(member()) }); expect(text(denied.api.render({ autoagents: [delegated()] })[0])).toContain('owner-only'); expect(denied.calls).toHaveLength(0);
+  });
+});
 
 describe('the chat card', () => {
   it('renders "Echo built an agent and a bot for this" with name, role, purpose, capabilities and tiers, lane, budget, steps, schedule, bot status and the origin badge', () => {
