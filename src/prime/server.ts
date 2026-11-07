@@ -260,7 +260,7 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
      return;
     }
     // Delete is a JSON POST on purpose: the Origin check above applies to POST only, so a DELETE verb would skip it.
-    const botsAction=/^\/api\/prime\/bots\/([^/]{1,80})\/(pause|resume|delete|message)$/.exec(path);
+    const botsAction=/^\/api\/prime\/bots\/([^/]{1,80})\/(pause|resume|delete|message|events)$/.exec(path);
     if(path==='/api/search')send(200,{capabilities:await hub.refresh(String(data.query??''))});
     else if(path==='/api/prepare')send(200,await hub.prepare(data as unknown as PrimeRequest));
     else if(path==='/api/execute')send(200,await hub.execute(String(data.id??''),String(data.digest??'')));
@@ -280,6 +280,7 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     else if(adkAgentAction)send(200,await hub.adkDeleteAgent(decodeURIComponent(adkAgentAction[1]),abort.signal));
     else if(path==='/api/prime/bots/create')send(201,await hub.botsCreate(data,abort.signal));
     else if(path==='/api/prime/bots/groups/create')send(202,await hub.botsGroupCreate(data,abort.signal));
+    else if(botsAction&&botsAction[2]==='events')send(202,await hub.botsEvent(decodeURIComponent(botsAction[1]),data,abort.signal));
     else if(botsAction&&botsAction[2]==='message')send(202,await hub.botsMessage(decodeURIComponent(botsAction[1]),data,abort.signal));
     else if(botsAction)send(200,await hub.botsAction(decodeURIComponent(botsAction[1]),botsAction[2],abort.signal));
     else if(path==='/api/prime/browser/act')send(200,await hub.browserAct(data,abort.signal));

@@ -1,5 +1,6 @@
 /* echoBots view (bots.js): bot cards, create form, bot chat and group chat inside the shared panel dialog. */
 .bots-dialog{width:min(1100px,calc(100vw - 32px))}
+.bots-dialog .quiet-button{display:inline-flex;align-items:center;justify-content:center}
 .bots-note{margin:4px 0 12px;border:1px solid #3d6b57;border-radius:8px;background:#0f2a22;color:#b6e8d3;font-size:12px;line-height:1.55;padding:8px 12px}
 .bots-note summary{cursor:pointer;color:var(--mint);min-height:28px;display:flex;align-items:center}
 .bots-note p{margin:6px 0 2px;overflow-wrap:anywhere}
@@ -25,8 +26,16 @@
 .bots-row{margin:0;font-size:12px;color:#a8c5b7;overflow-wrap:anywhere}
 .bots-label{color:#78948f;margin-right:5px}
 .bots-meter-wrap{display:grid;gap:4px}
-.bots-meter{height:6px;border-radius:4px;background:#13241e;border:1px solid #2f4a3f;overflow:hidden}
+.bots-meter{display:flex;height:6px;border-radius:4px;background:#13241e;border:1px solid #2f4a3f;overflow:hidden}
 .bots-meter-fill{display:block;height:100%;background:var(--green);border-radius:4px}
+.bots-meter-reserved{display:block;height:100%;background:#e6dc9c}
+.bots-readiness{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;margin:0 0 12px}
+.bots-readiness p{margin:0}
+.bots-readiness[hidden],.bots-calendar[hidden],.bots-form [hidden]{display:none}
+.bots-calendar{display:grid;gap:10px;padding:10px;border:1px solid #345343;border-radius:8px}
+.bots-weekdays{display:flex;flex-wrap:wrap;gap:8px 12px;border:0;padding:0;margin:0;min-width:0}
+.bots-weekdays legend{font-size:12px;color:var(--muted);margin-bottom:6px}
+.bots-weekdays input{width:auto}
 .bots-meter-full{background:#e5645e}
 .bots-meta{display:block;color:var(--muted);font-size:12px;line-height:1.5;overflow-wrap:anywhere}
 .bots-error{margin:0;color:#f0b3a8;font-size:12px;overflow-wrap:anywhere}
@@ -50,4 +59,4 @@
 .bots-pick{display:flex;align-items:center;gap:8px;font-size:12px}
 .bots-summary{display:grid;gap:4px;padding:10px;border:1px solid #3d6b57;border-radius:8px;background:#0f2a22}
 .bots-summary p{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
-@media(max-width:860px){.bots-body{grid-template-columns:1fr}.bots-inline{grid-template-columns:1fr}.bots-composer{grid-template-columns:1fr}}
+@media(max-width:860px){.bots-dialog .quiet-button{min-height:44px}.bots-body{grid-template-columns:1fr}.bots-inline,.bots-readiness{grid-template-columns:1fr}.bots-composer{grid-template-columns:1fr}}

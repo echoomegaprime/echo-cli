@@ -11,6 +11,7 @@ import { BotsClient, BotsError, DEFAULT_BOTS, clampBotsBudget, parseBotCreate, p
 // Stand-in for the loopback echo-adk-api service: the echoBots and groups routes of docs/echo-code/ECHO_ADK_API_CONTRACT.md,
 // with every request recorded. No real service, agent or model is ever called.
 const BOT = 'a'.repeat(32), BOT2 = 'b'.repeat(32), BOT3 = 'c'.repeat(32), GROUP = 'd'.repeat(32), MSG = 'e'.repeat(32), RUN = 'f'.repeat(32);
+const automationHealth = { contract_version: 2, features: { calendar_schedules: true, idempotent_events: true, memory_recall: true }, budgets: { daily_cap_usd: 200, spent_today_usd: 1, reserved_usd: 2, available_usd: 197 }, connections: { memory: { provider: 'local', recall: true, durable: true, shared: false }, browser: { available: false, reason: 'No isolated browser provider is configured' } } };
 type Seen = { method: string; url: string; body: string };
 type Handler = (req: IncomingMessage, res: ServerResponse, seen: Seen) => void;
 const servers: Server[] = [];
@@ -36,10 +37,10 @@ async function fakeService(handler?: Handler) {
       if (handler) { handler(req, res, entry); return; }
       const json = (status: number, body: unknown) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
       const fail = (status: number, error: string, message: string) => json(status, { error, message });
-      const url = new URL(entry.url, 'http://x'), path = url.pathname, m = entry.method;
+      const url = new URL(entry.url, 'http://x'), path = url.pathname.replace(/^\/v2\//, '/'), m = entry.method;
       const parsed = entry.body ? JSON.parse(entry.body) as Record<string, unknown> : {};
       let match: RegExpExecArray | null;
-      if (m === 'GET' && path === '/health') return json(200, { ok: true, service: 'echo-adk-api', profile: 'ECHO_ADK', version: '0.1.0', agents: 2, bots: bots.size, runs_active: 0 });
+      if (m === 'GET' && path === '/health') return json(200, { ok: true, service: 'echo-adk-api', profile: 'ECHO_ADK', version: '0.1.0', agents: 2, bots: bots.size, runs_active: 0, ...automationHealth });
       if (m === 'GET' && path === '/bots') return json(200, { bots: [...bots.values()] });
       if (m === 'POST' && path === '/bots') {
         if (typeof parsed.name !== 'string' || parsed.name.length > 64) return fail(422, 'invalid', 'name');
@@ -80,6 +81,14 @@ const reply = (status: number, body: unknown, headers: Record<string, string> = 
 const clientFor = async (h?: Handler) => { const w = await fakeService(h); return { client: new BotsClient({ ...DEFAULT_BOTS, baseUrl: w.url }), seen: w.seen, url: w.url }; };
 
 describe('bots config, budget and request validation', () => {
+  it('accepts calendar schedules with an explicit timezone and rejects ambiguous or malformed schedules', () => {
+    const calendar = { at: '09:00', tz: 'America/Chicago', weekdays: [1, 2, 3, 4, 5], missed: 'skip' };
+    expect(parseBotCreate({ name: 'Morning', agent: 'scout', schedule: calendar }, 0).schedule).toEqual(calendar);
+    expect(parseBotCreate({ name: 'Morning', agent: 'scout', schedule: { at: '09:00', tz: 'UTC', weekdays: [7] } }, 0).schedule).toEqual({ at: '09:00', tz: 'UTC', weekdays: [7], missed: 'skip' });
+    for (const schedule of [{ ...calendar, every_s: 60 }, { ...calendar, at: '24:00' }, { ...calendar, tz: 'Not/AZone' }, { ...calendar, weekdays: [] }, { ...calendar, weekdays: [0, 1] }, { ...calendar, weekdays: [1, 1] }, { ...calendar, missed: 'all' }, { ...calendar, missed: null }, { every_s: 604801 }])
+      expect(() => parseBotCreate({ name: 'Morning', agent: 'scout', schedule }, 0)).toThrow(BotsError);
+    expect(parseBotCreate({ name: 'Morning', agent: 'scout', schedule: { every_s: 604800, missed: 'once' } }, 0).schedule).toEqual({ every_s: 604800, missed: 'once' });
+  });
   it('defaults to the loopback service on 8378 and refuses anything else', () => {
     expect(parseBotsConfig({})).toEqual({ baseUrl: 'http://127.0.0.1:8378', defaultBudget: DEFAULT_BOTS.defaultBudget });
     expect(parseBotsConfig({ baseUrl: 'http://localhost:9000' }).baseUrl).toBe('http://localhost:9000');
@@ -121,9 +130,39 @@ describe('bots config, budget and request validation', () => {
 });
 
 describe('BotsClient against a stand-in service', () => {
+  it('requires v2 health and never retries a calendar mutation against legacy routes', async () => {
+    const legacy = await clientFor(reply(404, { error: 'not_found', message: 'unknown route' }));
+    await expect(legacy.client.health()).rejects.toMatchObject({ code: 'unsupported_contract', message: /API v2 is unavailable/ });
+    await expect(legacy.client.create({ name: 'Morning', agent: 'scout', schedule: { at: '09:00', tz: 'UTC', weekdays: [1] } })).rejects.toMatchObject({ status: 404 });
+    expect(legacy.seen.map(s => `${s.method} ${s.url}`)).toEqual(['GET /v2/health', 'POST /v2/bots']);
+    await expect((await clientFor(reply(200, { ok: true, profile: 'ECHO_ADK', contract_version: 1 }))).client.health()).rejects.toMatchObject({ code: 'unsupported_contract' });
+  });
+  it('validates idempotent event identifiers and receipts without a preliminary request or retry', async () => {
+    const event = { event_id: 'github:push/123', source: 'github', text: 'Review this change' };
+    const accepted = await clientFor(reply(202, { event_id: event.event_id, message_id: MSG, run_id: RUN, duplicate: true, status: 'queued' }));
+    expect(await accepted.client.event(BOT, event)).toEqual({ botId: BOT, eventId: event.event_id, messageId: MSG, runId: RUN, duplicate: true, status: 'queued' });
+    expect(accepted.seen).toHaveLength(1); expect(accepted.seen[0].url).toBe(`/v2/bots/${BOT}/events`); expect(JSON.parse(accepted.seen[0].body)).toEqual(event);
+    for (const bad of [{ ...event, event_id: 'x'.repeat(129) }, { ...event, source: 'GitHub' }, { ...event, source: '../x' }, { ...event, text: '' }, { ...event, resume: true }])
+      await expect(accepted.client.event(BOT, bad)).rejects.toMatchObject({ status: 400 });
+    expect(accepted.seen).toHaveLength(1);
+    const wrong = await clientFor(reply(202, { event_id: 'different', message_id: MSG, run_id: RUN, duplicate: false, status: 'queued' }));
+    await expect(wrong.client.event(BOT, event)).rejects.toMatchObject({ status: 502, message: /invalid event receipt/ }); expect(wrong.seen).toHaveLength(1);
+  });
+  it('returns the original completed run for a duplicate event and rejects invented receipt states', async () => {
+    const event = { event_id: 'push-1', source: 'github', text: 'Review' };
+    for (const status of ['queued', 'running', 'gated', 'done', 'failed', 'unavailable']) {
+      const duplicate = await clientFor(reply(202, { event_id: event.event_id, message_id: MSG, run_id: RUN, duplicate: true, status }));
+      expect(await duplicate.client.event(BOT, event)).toEqual({ botId: BOT, eventId: event.event_id, messageId: MSG, runId: RUN, duplicate: true, status });
+      expect(duplicate.seen).toHaveLength(1);
+    }
+    for (const receipt of [{ duplicate: true, status: 'cancelled' }, { duplicate: false, status: 'done' }]) {
+      const wrong = await clientFor(reply(202, { event_id: event.event_id, message_id: MSG, run_id: RUN, ...receipt }));
+      await expect(wrong.client.event(BOT, event)).rejects.toMatchObject({ status: 502, message: /invalid event receipt/ });
+    }
+  });
   it('reads health and refuses a service that is unhealthy, another profile, not JSON, redirecting, oversized, down or stalled', async () => {
     const { client } = await clientFor();
-    expect(await client.health()).toEqual({ service: 'echo-adk-api', version: '0.1.0', profile: 'ECHO_ADK', agents: 2, bots: 2, runsActive: 0 });
+    expect(await client.health()).toEqual({ service: 'echo-adk-api', version: '0.1.0', profile: 'ECHO_ADK', agents: 2, bots: 2, runsActive: 0, ...automationHealth });
     await expect((await clientFor(reply(200, { ok: true, profile: 'MAXIMALIST_RECONSTRUCTED' }))).client.health()).rejects.toMatchObject({ status: 502, message: /unexpected profile/ });
     await expect((await clientFor(reply(200, { ok: false, profile: 'ECHO_ADK' }))).client.health()).rejects.toMatchObject({ message: /not healthy/ });
     await expect((await clientFor(reply(200, 'not json'))).client.health()).rejects.toMatchObject({ status: 502, message: /unrecognized/ });
@@ -151,7 +190,7 @@ describe('BotsClient against a stand-in service', () => {
     expect(all.messages).toHaveLength(2); expect(all.messages[1]).toMatchObject({ message_id: MSG, role: 'bot', run_id: RUN });
     expect((await client.messages(BOT, { since: '1'.repeat(32) })).messages).toHaveLength(1);
     expect(await client.remove(BOT3)).toEqual({ botId: BOT3, deleted: true });
-    expect(seen.map(s => `${s.method} ${s.url}`)).toEqual(['GET /bots', 'POST /bots', `GET /bots/${BOT}`, `POST /bots/${BOT2}/pause`, `POST /bots/${BOT2}/resume`, `POST /bots/${BOT}/message`,
+    expect(seen.map(s => `${s.method} ${s.url}`)).toEqual(['GET /v2/bots', 'POST /v2/bots', `GET /v2/bots/${BOT}`, `POST /v2/bots/${BOT2}/pause`, `POST /v2/bots/${BOT2}/resume`, `POST /bots/${BOT}/message`,
       `GET /bots/${BOT}/messages?limit=50`, `GET /bots/${BOT}/messages?since=${'1'.repeat(32)}`, `DELETE /bots/${BOT3}`]);
     expect(seen.every(s => s.method !== 'POST' || s.body === '' || s.body.startsWith('{'))).toBe(true);
   });
@@ -211,7 +250,7 @@ describe('BotsClient against a stand-in service', () => {
     const { client } = await clientFor((_q, res) => {
       res.setHeader('content-type', 'application/json');
       const url = _q.url ?? '';
-      if (url === '/bots') res.end(JSON.stringify({ bots: [bot({ instruction: leak, last_error: leak })] }));
+      if (url === '/v2/bots') res.end(JSON.stringify({ bots: [bot({ instruction: leak, last_error: leak })] }));
       else if (url.startsWith(`/bots/${BOT}/messages`)) res.end(JSON.stringify({ messages: [{ message_id: MSG, role: 'bot', text: leak, run_id: RUN }] }));
       else res.end(JSON.stringify({ group_id: GROUP, status: 'done', messages: [{ bot_id: BOT, text: leak }], summary: leak }));
     });

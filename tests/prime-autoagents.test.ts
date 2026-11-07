@@ -34,7 +34,7 @@ async function fakeAdk(options: { agents?: Agent[]; bots?: Bot[] } = {}): Promis
     const chunks: Buffer[] = []; req.on('data', c => chunks.push(c));
     req.on('end', () => {
       const raw = Buffer.concat(chunks).toString('utf8'); let body: unknown; try { body = raw ? JSON.parse(raw) : undefined; } catch { body = raw; }
-      const method = req.method ?? '', path = (req.url ?? '').split('?')[0]; fake.seen.push({ method, url: req.url ?? '', body });
+      const method = req.method ?? '', path = (req.url ?? '').split('?')[0].replace(/^\/v2\//, '/'); fake.seen.push({ method, url: req.url ?? '', body });
       res.setHeader('content-type', 'application/json');
       const reply = (status: number, value: unknown) => { res.statusCode = status; res.end(JSON.stringify(value)); };
       const key = method + ' ' + path; const forced = fake.fail[key] ?? fake.fail[method + ' ' + path.replace(/\/[0-9a-f]{32}\//, '/:id/')];
@@ -319,7 +319,7 @@ describe('make_bot and the auto-resume gate', () => {
     const s = await service();
     await s.auto.makeAgent(makeAgentArgs, owner(PROMPT));
     const built = await s.auto.makeBot({ agent: 'queue-scout', name: 'Queue scout', schedule: 60, instruction: 'Post a short summary.' }, owner(PROMPT));
-    const create = s.posts('POST', '/bots'); expect(create).toHaveLength(1);
+    const create = s.posts('POST', '/v2/bots'); expect(create).toHaveLength(1);
     expect(create[0].body).toEqual({ name: 'Queue scout', agent: 'queue-scout', mode: 'personal', schedule: { every_s: 3600 }, daily_cost_cap_usd: 0, lease: { scopes: ['echo.knowledge.search', 'echo.context.recall'], ttl_s: 3600, max_uses: 100 }, instruction: 'Post a short summary.' });
     expect(s.posts('POST', /\/bots\/[0-9a-f]{32}\/resume$/)).toHaveLength(1);
     expect(built).toMatchObject({ kind: 'autoagent', tool: 'make_bot', promptSha256: promptSha256(PROMPT), agent: { name: 'queue-scout', purpose: 'Watch the FORGE build queue each morning', capabilities: [{ id: 'echo.knowledge.search', tier: 0 }, { id: 'echo.context.recall', tier: 1 }], existing: true },
@@ -346,7 +346,7 @@ describe('make_bot and the auto-resume gate', () => {
     await s.auto.makeAgent(makeAgentArgs, owner(PROMPT));
     const paid = await s.auto.makeBot({ agent: 'queue-scout', daily_cost_cap_usd: 1.5 }, owner(PROMPT));
     expect(paid.bot).toMatchObject({ status: 'paused', dailyCostCapUsd: 1.5, approval: { required: true, reasons: ['daily cost cap $1.50 exceeds the configured default of $0.00'] } });
-    expect(s.posts('POST', '/bots')[0].body).toMatchObject({ daily_cost_cap_usd: 1.5 }); expect(s.posts('POST', /\/resume$/)).toHaveLength(0);
+    expect(s.posts('POST', '/v2/bots')[0].body).toMatchObject({ daily_cost_cap_usd: 1.5 }); expect(s.posts('POST', /\/resume$/)).toHaveLength(0);
     const generous = await service({ botsCap: 2 });
     await generous.auto.makeAgent(makeAgentArgs, owner(PROMPT));
     const allowed = await generous.auto.makeBot({ agent: 'queue-scout', daily_cost_cap_usd: 1.5 }, owner(PROMPT));
@@ -358,13 +358,13 @@ describe('make_bot and the auto-resume gate', () => {
     await s.auto.makeAgent(makeAgentArgs, owner(PROMPT));
     const first = await s.auto.makeBot({}, owner(PROMPT));
     expect(first.bot).toMatchObject({ agent: 'queue-scout', name: 'queue-scout', schedule: { every_s: 3600 }, existing: false, autoResumed: true }); // the schedule make_agent was given carries over
-    expect(s.posts('POST', '/bots')[0].body).toMatchObject({ schedule: { every_s: 3600 } });
+    expect(s.posts('POST', '/v2/bots')[0].body).toMatchObject({ schedule: { every_s: 3600 } });
     const again = await s.auto.makeBot({ agent: 'queue-scout', name: 'Renamed' }, owner(PROMPT));
     expect(again.bot).toMatchObject({ botId: first.bot!.botId, existing: true, autoResumed: false, approval: { required: false } }); expect(again.summary).toMatch(/already exists for agent queue-scout/);
-    expect(s.posts('POST', '/bots')).toHaveLength(1); expect(s.posts('POST', /\/resume$/)).toHaveLength(1);
+    expect(s.posts('POST', '/v2/bots')).toHaveLength(1); expect(s.posts('POST', /\/resume$/)).toHaveLength(1);
     const fresh = new AutoAgents({ adk: s.adk, bots: s.bots, caps: s.cat.lookup });
     expect((await fresh.makeBot({ agent: 'queue-scout' }, owner('unrelated prompt'))).bot).toMatchObject({ botId: first.bot!.botId, existing: true });
-    expect(s.posts('POST', '/bots')).toHaveLength(1);
+    expect(s.posts('POST', '/v2/bots')).toHaveLength(1);
     expect(s.events.filter(e => e.event === 'prime_autoagent_bot_existing')).toHaveLength(1); // the fresh instance has no event sink
   });
   it('refuses an unknown agent, an agent without capabilities, bad schedules, modes and arguments before any bot is created', async () => {
@@ -378,10 +378,10 @@ describe('make_bot and the auto-resume gate', () => {
     await expect(s.auto.makeBot({ agent: 'researcher', mode: 'shared' }, owner(PROMPT))).rejects.toMatchObject({ message: /mode must be personal or team/ });
     await expect(s.auto.makeBot({ agent: 'researcher', lease: { scopes: ['echo.shell.run'] } }, owner(PROMPT))).rejects.toMatchObject({ message: /unknown argument lease/ });
     await expect(s.auto.makeBot({ agent: 'researcher', name: 'x'.repeat(65) }, owner(PROMPT))).rejects.toMatchObject({ message: /name exceeds 64/ });
-    expect(s.posts('POST', '/bots')).toHaveLength(0);
+    expect(s.posts('POST', '/v2/bots')).toHaveLength(0);
     const ok = await s.auto.makeBot({ agent: 'researcher', schedule: null, mode: 'team' }, owner(PROMPT));
     expect(ok.bot).toMatchObject({ mode: 'team', schedule: null, status: 'idle' }); expect(ok.agent).toMatchObject({ name: 'researcher', purpose: '', origin: { by: 'owner' } });
-    expect(s.posts('POST', '/bots')[0].body).toMatchObject({ schedule: null, mode: 'team', lease: { scopes: ['echo.knowledge.search'] } });
+    expect(s.posts('POST', '/v2/bots')[0].body).toMatchObject({ schedule: null, mode: 'team', lease: { scopes: ['echo.knowledge.search'] } });
   });
   it('when the service refuses the resume, the bot stays paused with that reason and nothing is retried', async () => {
     const s = await service(); s.fake.fail['POST /bots/:id/resume'] = { status: 503, body: { error: 'unavailable', message: 'scheduler down', provider: 'echo-adk-scheduler' } };

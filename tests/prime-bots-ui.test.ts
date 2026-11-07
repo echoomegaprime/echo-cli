@@ -45,7 +45,7 @@ const bot = (over: Record<string, unknown> = {}) => ({
   memory: { scope: 'bot:' + BOT }, lease: { scopes: ['echo.builds.recent'], max_uses: 50, ttl_s: 3600 }, daily_cost_cap_usd: 1, spent_today_usd: 0.12, inbox_depth: 2,
   last_run_at: '2026-11-04T10:00:00Z', last_error: 'provider qwen-local unavailable', created_at: '2026-11-04T09:00:00Z', ...over });
 const json = (status: number, body: unknown) => ({ ok: status < 400, status, json: async () => body });
-const healthy = () => ({ configured: true, available: true, defaultBudget: { max_calls: 80, max_cost_usd: 0, max_wall_s: 1800 }, service: { service: 'echo-adk-api', version: '0.1.0', profile: 'ECHO_ADK', agents: 2, bots: 2, runsActive: 0 } });
+const healthy = () => ({ configured: true, available: true, defaultBudget: { max_calls: 80, max_cost_usd: 0, max_wall_s: 1800 }, service: { service: 'echo-adk-api', version: '0.1.0', profile: 'ECHO_ADK', agents: 2, bots: 2, runsActive: 0, contract_version: 2, features: { calendar_schedules: true, idempotent_events: true, memory_recall: true }, budgets: { daily_cap_usd: 200, spent_today_usd: 1, reserved_usd: 2, available_usd: 197 }, connections: { memory: { provider: 'local', recall: true, durable: true, shared: false }, browser: { available: false, reason: 'No isolated browser provider is configured' } } } });
 
 interface Opts { health?: unknown; healthStatus?: number; bots?: Record<string, unknown>[]; agents?: unknown; agentsStatus?: number; workspace?: ReturnType<typeof workspaceStub>; stored?: string | null;
   messages?: (poll: number, since: string | null) => unknown; group?: (poll: number) => unknown; agentsView?: { openRun: ReturnType<typeof vi.fn> } }
@@ -119,18 +119,32 @@ describe('echoBots nav entry and off state', () => {
     expect(s.status()).toMatch(/echoBots is off: the reviewed Prime configuration has no bots section\. Add "bots": \{"baseUrl": "http:\/\/127\.0\.0\.1:8378"\}.*loopback origin only.*defaultBudget.*restart Prime\. Nothing is fetched while it is off/);
     expect(s.count('/api/prime/bots/health')).toBe(2); expect(s.count('/api/prime/bots/list')).toBe(0); expect(s.calls.some(c => c.url.includes('/adk/'))).toBe(false);
     expect(s.cards()).toHaveLength(0);
-    expect(text(s.dialog())).toContain('How echoBots differ from Grok Bots');
+    expect(text(s.dialog())).toContain('Bot controls and data scope');
   });
   it('shows a down service as unavailable with its reason and never substitutes anything', async () => {
     const s = await opened({ health: { configured: true, available: false, defaultBudget: { max_calls: 80, max_cost_usd: 0, max_wall_s: 1800 }, reason: 'echoBots service unreachable at http://127.0.0.1:8378' } });
-    expect(s.status()).toMatch(/echoBots service unavailable: echoBots service unreachable at http:\/\/127\.0\.0\.1:8378\. No bot runs until it answers; nothing else is used instead/);
+    expect(s.status()).toMatch(/echoBots service unavailable: echoBots service unreachable at http:\/\/127\.0\.0\.1:8378\. Run status cannot be verified from this view/);
     expect(s.count('/api/prime/bots/list')).toBe(0);
   });
-  it('states the Grok Bots differences: per-bot Lease, own memory scope, no shared computer or credentials, no tokens, daily cap, start paused', async () => {
+  it('reports capabilities and actual connections without claiming credential isolation or complete deletion', async () => {
     const s = await opened();
     const note = text(s.dialog());
-    for (const expected of ['not a security boundary', 'own Lease (exact capability ids, max_uses, ttl)', 'memory scope bot:<id>', 'never holds a token', 'deleting one leaves nothing behind', 'starts paused', 'daily cost cap (at most $5', 'budget_exceeded', '$200/day', 'exchange messages only, never state'])
+    for (const expected of ['Calendar scheduling: available', 'idempotent events available', 'Memory: local recall, durable, scoped per bot', 'Browser: No isolated browser provider is configured', '$1.00 used · $2.00 reserved · $197.00 available · $200.00 cap', 'Bots start paused', 'memory scope bot:<id>', 'does not establish separate computers or isolated credentials', 'does not guarantee removal of run records or backups'])
       expect(note).toContain(expected);
+    expect(note).not.toContain('nothing of it remains');
+    expect(note).not.toContain('never holds a token');
+  });
+  it('labels service budget totals as a dated snapshot until health is refreshed', async () => {
+    vi.setSystemTime(new Date('2026-11-07T23:59:50Z'));
+    const health = healthy(); Object.assign(health.service.budgets, { day: '2026-11-07' });
+    const s = await opened({ health });
+    expect(text(s.dialog())).toContain('Service budget snapshot for 2026-11-07 (UTC)');
+    expect(text(s.dialog())).toContain('Checked 2026-11-07 23:59:50 UTC. Refresh to update.');
+    vi.setSystemTime(new Date('2026-11-08T00:01:00Z'));
+    expect(text(s.dialog())).toContain('Checked 2026-11-07 23:59:50 UTC. Refresh to update.');
+    Object.assign(health.service.budgets, { day: '2026-11-08' }); await find(s.dialog(), 'Refresh')!.fire('click'); await settle();
+    expect(text(s.dialog())).toContain('Service budget snapshot for 2026-11-08 (UTC)');
+    expect(text(s.dialog())).toContain('Checked 2026-11-08 00:01:00 UTC. Refresh to update.');
   });
 });
 
@@ -171,16 +185,23 @@ describe('owner-only routes before sign-in (the 2026-11-04 401 request storm)', 
 });
 
 describe('bot cards', () => {
+  it('uses the service ledger for reserved funds, converts next run timestamps to UTC, and opens reported run evidence', async () => {
+    const agentsView = { openRun: vi.fn() };
+    const s = await opened({ agentsView, bots: [bot({ status: 'idle', schedule: { at: '09:00', tz: 'America/Chicago', weekdays: [1, 5], missed: 'skip' }, next_run_at: '2026-11-09T09:00:00-06:00', last_run_id: RUN, budget: { daily_cap_usd: 1, spent_today_usd: 0.2, reserved_usd: 0.3, available_usd: 0.5, uncertain_charged_today_usd: 0.1 } })] });
+    const shown = text(s.cards()[0]); expect(shown).toContain('$0.20 used · $0.30 reserved · $0.50 available of $1.00'); expect(shown).toContain('Next run 2026-11-09 15:00:00 UTC'); expect(shown).toContain('charged');
+    const meter = all(s.cards()[0]).find(n => n.attributes.role === 'meter')!; expect(meter.attributes['aria-valuenow']).toBe('0.5'); expect(meter.children[0].attributes.style).toBe('width:20%'); expect(meter.children[1].attributes.style).toBe('width:30%');
+    await buttons(s.cards()[0]).find(n => n.attributes['data-run-id'] === RUN)!.fire('click'); expect(agentsView.openRun).toHaveBeenCalledWith(RUN);
+  });
   it('renders name, agent, mode, status badge, schedule, plugins, the spent/cap meter, inbox depth, last run and last error', async () => {
     const s = await opened();
     expect(s.cards()).toHaveLength(2);
     const shown = text(s.cards()[0]);
-    for (const expected of ['Release scout', 'team', 'paused', 'Agent release-scout', 'Schedule every 15 min', 'Plugins git-status, changelog', '$0.12 of $1.00 today', 'Inbox 2 waiting', 'Last run 2026-11-04 10:00:00 UTC', 'Last error: provider qwen-local unavailable'])
+    for (const expected of ['Release scout', 'team', 'paused', 'Agent release-scout', 'Schedule every 15 min', 'Plugins git-status, changelog', '$0.12 used · not reported reserved · not reported available of $1.00 today (UTC)', 'Inbox 2 waiting', 'Next run paused', 'Last run 2026-11-04 10:00:00 UTC', 'Last error: provider qwen-local unavailable'])
       expect(shown).toContain(expected);
     const meter = all(s.cards()[0]).find(n => n.attributes.role === 'meter')!;
     expect(meter.attributes['aria-valuenow']).toBe('0.12'); expect(meter.attributes['aria-valuemax']).toBe('1'); expect(meter.children[0].attributes.style).toBe('width:12%');
     const second = text(s.cards()[1]);
-    for (const expected of ['Docs bot', 'personal', 'idle', 'Schedule on message only', 'Plugins none', '$0.00 of $0.50 today', 'Inbox 0 waiting', 'Last run never']) expect(second).toContain(expected);
+    for (const expected of ['Docs bot', 'personal', 'idle', 'Schedule on message only', 'Plugins none', '$0.00 used · not reported reserved · not reported available of $0.50 today (UTC)', 'Inbox 0 waiting', 'Last run never']) expect(second).toContain(expected);
     expect(second).not.toContain('Last error');
     expect(find(s.cards()[0], 'Resume')).toBeTruthy(); expect(find(s.cards()[1], 'Pause')).toBeTruthy();
     expect(s.status()).toContain('echo-adk-api 0.1.0 · 2 bots · 2 agents · 0 active runs. Default daily cap $0.00.');
@@ -199,7 +220,7 @@ describe('bot cards', () => {
     await find(s.cards()[0], 'Delete')!.fire('click'); await settle();
     expect(s.calls.some(c => c.url.endsWith('/delete'))).toBe(false);
     expect(find(s.cards()[0], 'Confirm delete')).toBeTruthy(); expect(find(s.cards()[0], 'Cancel')).toBeTruthy(); expect(s.cards()[0].className).toContain('bots-card-confirm');
-    expect(s.noteLine()).toContain('Select Confirm delete on Release scout'); expect(text(s.cards()[0])).toContain('nothing of it remains');
+    expect(s.noteLine()).toContain('Select Confirm delete on Release scout'); expect(text(s.cards()[0])).toContain('Run records and backups may remain');
     await find(s.cards()[0], 'Cancel')!.fire('click'); await settle();
     expect(find(s.cards()[0], 'Confirm delete')).toBeUndefined(); expect(s.calls.some(c => c.url.endsWith('/delete'))).toBe(false);
     await find(s.cards()[0], 'Delete')!.fire('click'); await settle();
@@ -210,6 +231,34 @@ describe('bot cards', () => {
 });
 
 describe('create form', () => {
+  it('creates a calendar schedule with explicit timezone, selected ISO weekdays and missed-run policy', async () => {
+    const s = await opened(); await find(s.dialog(), 'New bot')!.fire('click'); await settle();
+    const form = s.pane(); byPlaceholder(form, 'Bot name').value = 'Morning scout'; byPlaceholder(form, 'Echo ADK agent name').value = 'scout';
+    const scheduled = inputs(form).find(n => n.attributes.type === 'checkbox')!; scheduled.checked = true; await scheduled.fire('change');
+    const type = inputs(form).find(n => n.attributes['aria-label'] === 'Schedule type')!; expect(type.children[1].disabled).toBe(false); type.value = 'calendar'; await type.fire('change');
+    const at = inputs(form).find(n => n.attributes['aria-label'] === 'Local run time')!, zone = byPlaceholder(form, 'Timezone');
+    expect(at.disabled).toBe(false); at.value = '08:30'; zone.value = 'America/Chicago';
+    const missed = inputs(form).find(n => n.attributes['aria-label'] === 'Missed run policy')!; missed.value = 'once';
+    inputs(form).find(n => n.attributes['aria-label'] === 'Tue')!.checked = false;
+    await find(form, 'Create bot (starts paused)')!.fire('click'); await settle();
+    expect(s.calls.find(c => c.url.endsWith('/create'))?.body).toEqual({ name: 'Morning scout', agent: 'scout', mode: 'personal', schedule: { at: '08:30', tz: 'America/Chicago', weekdays: [1, 3, 4, 5], missed: 'once' }, daily_cost_cap_usd: 0 });
+    expect(text(s.cards()[2])).toContain('08:30 America/Chicago · Mon, Wed, Thu, Fri · catch up once');
+  });
+  it('rejects invalid timezones and empty weekdays without submitting, and disables unreported calendar support', async () => {
+    const s = await opened(); await find(s.dialog(), 'New bot')!.fire('click'); await settle();
+    const form = s.pane(); byPlaceholder(form, 'Bot name').value = 'Morning'; byPlaceholder(form, 'Echo ADK agent name').value = 'scout';
+    const scheduled = inputs(form).find(n => n.attributes.type === 'checkbox')!; scheduled.checked = true; await scheduled.fire('change');
+    const type = inputs(form).find(n => n.attributes['aria-label'] === 'Schedule type')!; type.value = 'calendar'; await type.fire('change');
+    byPlaceholder(form, 'Timezone').value = 'Not/AZone'; await find(form, 'Create bot (starts paused)')!.fire('click');
+    expect(s.noteLine()).toContain('valid IANA timezone');
+    byPlaceholder(form, 'Timezone').value = 'UTC'; for (const day of inputs(form).filter(n => ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].includes(n.attributes['aria-label']))) day.checked = false;
+    await find(form, 'Create bot (starts paused)')!.fire('click'); expect(s.noteLine()).toBe('Choose at least one weekday.');
+    expect(s.calls.some(c => c.url.endsWith('/create'))).toBe(false);
+    const missing = healthy(); missing.service.features.calendar_schedules = false;
+    const legacy = await opened({ health: missing }); await find(legacy.dialog(), 'New bot')!.fire('click'); await settle();
+    expect(inputs(legacy.pane()).find(n => n.attributes['aria-label'] === 'Schedule type')!.children[1].disabled).toBe(true);
+    expect(text(legacy.pane())).toContain('Calendar scheduling is not reported');
+  });
   it('uses a free-text agent field when the Agents route does not answer, states that bots start paused, posts the exact body and shows the new paused bot', async () => {
     const s = await opened();
     await find(s.dialog(), 'New bot')!.fire('click'); await settle();

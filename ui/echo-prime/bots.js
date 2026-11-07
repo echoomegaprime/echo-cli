@@ -8,7 +8,7 @@
  const doc=document;
  const POLL_MS=3000,TICK_MS=1000,LIST_MS=30000,MAX_FAILURES=5,MAX_TEXT=12000,MAX_NAME=64,MAX_CAP=5,GROUP_MIN=2,GROUP_MAX=6,COOLDOWN_MS=5000,STORAGE='echo-prime-bot-v1';
  const HEX=/^[0-9a-f]{32}$/,STATUSES=['paused','idle','running','error'];
- let verdict={configured:false,available:false,reason:'echoBots status not loaded'},health=null,bots=[],agents=null,agentsLoaded=false;
+ let verdict={configured:false,available:false,reason:'echoBots status not loaded'},health=null,healthCheckedAt=null,bots=[],agents=null,agentsLoaded=false;
  let selected=null,pendingDelete=null,pane='none',noteText='',busy=false,generation=0,healthGeneration=0,failedAt=-Infinity,lastList=0;
  let dialog=null,ui=null,navButton=null,chat=null,group=null,timer=null;
  const num=v=>typeof v==='number'&&Number.isFinite(v)?v:null;
@@ -17,8 +17,18 @@
  function el(tag,text,cls){const e=doc.createElement(tag);if(text!==undefined&&text!==null)e.textContent=String(text);if(cls)e.className=cls;return e;}
  function attr(node,attributes){for(const [k,v] of Object.entries(attributes))if(v!==undefined&&v!==false)node.setAttribute(k,String(v));return node;}
  function button(label,onClick,cls){const b=attr(el('button',label,cls||'quiet-button'),{type:'button'});b.addEventListener('click',onClick);return b;}
- function money(v){return '$'+(Math.round((num(v)||0)*100)/100).toFixed(2);}
- function when(v){return typeof v==='string'&&/^\d{4}-\d\d-\d\d[T ]\d\d:\d\d:\d\d/.test(v)?v.slice(0,10)+' '+v.slice(11,19)+' UTC':'';}
+ function money(v){return num(v)===null?'not reported':'$'+(Math.round(v*100)/100).toFixed(2);}
+ function when(v){if(typeof v!=='string'||!/^\d{4}-\d\d-\d\dT\d\d:\d\d/.test(v))return '';const date=new Date(v);return Number.isFinite(date.getTime())?date.toISOString().slice(0,19).replace('T',' ')+' UTC':'';}
+ function service(){return health&&health.service&&typeof health.service==='object'?health.service:{};}
+ function readiness(){
+  const s=service(),f=s.features||{},c=s.connections||{},memory=c.memory||{},browser=c.browser||{};
+  return [
+   'Calendar scheduling: '+(f.calendar_schedules===true?'available':'not reported'),
+   'Event delivery: '+(f.idempotent_events===true?'idempotent events available':'not reported'),
+   'Memory: '+(memory.recall===true?(memory.provider==='local'?'local recall':'recall available')+(memory.durable===true?', durable':'')+(memory.shared===false?', scoped per bot':''):'recall not reported'),
+   'Browser: '+(browser.available===true?'available':typeof browser.reason==='string'?str(browser.reason,200):'readiness not reported')
+  ];
+ }
  function shortId(id){return typeof id==='string'?id.slice(0,8)+'…':'';}
  function debug(event,detail){console.debug('[echo.bots]',{event,...(detail||{})});}
  function workspace(){const ws=window.EchoPrimeWorkspace;return ws&&typeof ws==='object'?ws:null;}
@@ -70,11 +80,11 @@
   try{
    const data=await api('health');
    if(mine!==healthGeneration)return verdict;
-   health=data;debug('health',{configured:data.configured===true,available:data.available===true});
+   health=data;healthCheckedAt=new Date().toISOString();debug('health',{configured:data.configured===true,available:data.available===true});
    return report({configured:data.configured===true,available:data.available===true,reason:data.available===true?'':typeof data.reason==='string'?data.reason:'unavailable'});
   }catch(error){
    if(mine!==healthGeneration)return verdict;
-   failedAt=Date.now();health=null;
+   failedAt=Date.now();health=null;healthCheckedAt=null;
    const message=error instanceof Error?error.message:'request failed';
    debug('health_failed',{status:error&&typeof error.status==='number'?error.status:null,message});
    return report({configured:false,available:false,reason:'echoBots status unavailable ('+message+')'});
@@ -94,16 +104,25 @@
    else if(/status unavailable/.test(reason))text=reason+'. Nothing was fetched from the service; no automatic retry was made.';
    else text='echoBots is off: the reviewed Prime configuration has no bots section. Add "bots": {"baseUrl": "http://127.0.0.1:8378"} (a loopback origin only; optional "defaultBudget" with max_calls, max_cost_usd, max_wall_s) to the --config file and restart Prime. Nothing is fetched while it is off.'+(reason?' ('+reason+')':'');
   }
-  else if(!verdict.available)text='echoBots service unavailable: '+(verdict.reason||'no reason given')+'. No bot runs until it answers; nothing else is used instead.';
+  else if(!verdict.available)text='echoBots service unavailable: '+(verdict.reason||'no reason given')+'. Run status cannot be verified from this view.';
   else{
-   const s=health&&health.service&&typeof health.service==='object'?health.service:{};
+   const s=service();
    text='echo-adk-api'+(typeof s.version==='string'?' '+str(s.version,20):'')+' · '+(num(s.bots)===null?'bots not counted':s.bots+' bot'+(s.bots===1?'':'s'))+' · '+(num(s.agents)===null?'agents not counted':s.agents+' agent'+(s.agents===1?'':'s'))+' · '+(num(s.runsActive)===null?'active runs not counted':s.runsActive+' active run'+(s.runsActive===1?'':'s'))+'. Default daily cap '+money(health.defaultBudget&&health.defaultBudget.max_cost_usd)+'.';
   }
   ui.status.textContent=text;
+  if(ui.readiness){
+   ui.readiness.replaceChildren();ui.readiness.hidden=!verdict.available;
+   if(verdict.available){
+    for(const line of readiness())ui.readiness.append(el('p',line,'bots-meta'));
+    const budget=service().budgets;
+    if(budget&&typeof budget==='object')ui.readiness.append(el('p','Service budget snapshot'+(typeof budget.day==='string'&&/^\d{4}-\d\d-\d\d$/.test(budget.day)?' for '+budget.day+' (UTC)':'')+': '+money(budget.spent_today_usd)+' used · '+money(budget.reserved_usd)+' reserved · '+money(budget.available_usd)+' available · '+money(budget.daily_cap_usd)+' cap. Checked '+(when(healthCheckedAt)||'at an unreported time')+'. Refresh to update.','bots-meta'));
+    else ui.readiness.append(el('p','Service budget accounting: not reported.','bots-meta'));
+   }
+  }
  }
  function comparison(){
-  const d=el('details',undefined,'bots-note');d.append(el('summary','How echoBots differ from Grok Bots'));
-  d.append(el('p','Grok Bots share one cloud computer per user: xAI\u2019s own docs say separate Bots are not a security boundary, and files, browser sessions and command-line credentials are shared across all of a user\u2019s Bots and can outlive a deleted Bot. Each echoBot instead runs on Echo\u2019s own nodes with its own Lease (exact capability ids, max_uses, ttl) and its own memory scope bot:<id>; it never holds a token and nothing is shared between bots, so deleting one leaves nothing behind. Every bot starts paused and has a per-bot daily cost cap (at most $5; the service refuses more with budget_exceeded) under a fleet-wide $200/day ceiling. Group chats of 2 to 6 bots exchange messages only, never state.'));
+  const d=el('details',undefined,'bots-note');d.append(el('summary','Bot controls and data scope'));
+  d.append(el('p','Bots start paused. Schedules and queued messages run after you resume them. Each bot has a capability lease and local memory scope bot:<id>; group chats exchange bot responses. Scoped memory does not establish separate computers or isolated credentials. Deleting a bot does not guarantee removal of run records or backups. Readiness and budget figures below are reported by the connected service.'));
   return d;
  }
  // ---- bot cards -------------------------------------------------------------
@@ -112,16 +131,18 @@
   return el('span',status==='unknown'?'status not reported':status,'bots-badge bots-status-'+status);
  }
  function meter(bot){
-  const spent=num(bot.spent_today_usd),cap=num(bot.daily_cost_cap_usd);
+  const budget=bot.budget&&typeof bot.budget==='object'?bot.budget:{},spent=num(budget.spent_today_usd)??num(bot.spent_today_usd),cap=num(budget.daily_cap_usd)??num(bot.daily_cost_cap_usd),reserved=num(budget.reserved_usd),available=num(budget.available_usd),used=(spent||0)+(reserved||0);
   const wrap=el('div',undefined,'bots-meter-wrap');
-  const bar=attr(el('div',undefined,'bots-meter'),{role:'meter','aria-label':'Spent today against the daily cost cap','aria-valuemin':'0','aria-valuemax':String(cap===null?0:cap),'aria-valuenow':String(spent===null?0:spent)});
+  const bar=attr(el('div',undefined,'bots-meter'),{role:'meter','aria-label':'Used and reserved today against the daily cost cap','aria-valuemin':'0','aria-valuemax':String(cap===null?0:cap),'aria-valuenow':String(cap===null?0:Math.min(cap,used)),'aria-valuetext':money(spent)+' used; '+money(reserved)+' reserved; '+money(available)+' available'});
   const pct=cap!==null&&cap>0?Math.min(100,Math.max(0,(spent||0)/cap*100)):(spent||0)>0?100:0;
-  bar.append(attr(el('span',undefined,'bots-meter-fill'+(pct>=100?' bots-meter-full':'')),{style:'width:'+Math.round(pct)+'%'}));
-  wrap.append(bar,el('small',(spent===null?'spend not reported':money(spent))+' of '+(cap===null?'cap not reported':money(cap))+' today','bots-meta'));
+  const heldPct=cap!==null&&cap>0?Math.min(100-pct,Math.max(0,(reserved||0)/cap*100)):0;
+  bar.append(attr(el('span',undefined,'bots-meter-fill'+(pct>=100?' bots-meter-full':'')),{style:'width:'+pct+'%'}),attr(el('span',undefined,'bots-meter-reserved'),{style:'width:'+heldPct+'%'}));
+  wrap.append(bar,el('small',money(spent)+' used · '+money(reserved)+' reserved · '+money(available)+' available of '+money(cap)+' today (UTC)','bots-meta'));
+  if(num(budget.uncertain_charged_today_usd)>0)wrap.append(el('small',money(budget.uncertain_charged_today_usd)+' charged conservatively because final cost was not reported.','bots-meta'));
   return wrap;
  }
  function row(label,value){const p=el('p',undefined,'bots-row');p.append(el('span',label,'bots-label'),el('span',value));return p;}
- function schedule(bot){const s=bot.schedule&&typeof bot.schedule==='object'?num(bot.schedule.every_s):null;return s===null?'on message only':s%60===0?'every '+(s/60)+' min':'every '+s+' s';}
+ function schedule(bot){const s=bot.schedule;if(!s||typeof s!=='object')return 'on message only';if(typeof s.at==='string'&&typeof s.tz==='string'){const days=Array.isArray(s.weekdays)?s.weekdays.map(d=>['','Mon','Tue','Wed','Thu','Fri','Sat','Sun'][d]).filter(Boolean).join(', '):'days not reported';return str(s.at,5)+' '+str(s.tz,100)+' · '+days+' · '+(s.missed==='once'?'catch up once':'skip missed');}const every=num(s.every_s);return every===null?'not reported':every%60===0?'every '+(every/60)+' min':'every '+every+' s';}
  function card(bot){
   const art=el('article',undefined,'bots-card'+(selected===bot.bot_id?' bots-card-selected':'')+(pendingDelete===bot.bot_id?' bots-card-confirm':''));
   attr(art,{'data-bot-id':bot.bot_id});
@@ -129,7 +150,8 @@
   head.append(el('h3',str(bot.name,80)||'(unnamed bot)'),el('span',str(bot.mode,20)||'personal','bots-badge bots-mode'),badge(bot));
   if(bot.origin&&typeof bot.origin==='object'&&bot.origin.by==='echo')head.append(el('span','Echo-made from your prompt','bots-badge autoagent-badge'));// created by Echo from a chat prompt (autoagents.js)
   art.append(head,row('Agent',str(bot.agent,80)||'not reported'),row('Schedule',schedule(bot)),row('Plugins',list(bot.plugins).length?list(bot.plugins).slice(0,12).map(p=>str(p,40)).join(', '):'none'),meter(bot),
-   row('Inbox',num(bot.inbox_depth)===null?'not reported':bot.inbox_depth+' waiting'),row('Last run',when(bot.last_run_at)||'never'));
+   row('Inbox',num(bot.inbox_depth)===null?'not reported':bot.inbox_depth+' waiting'),row('Next run',bot.status==='paused'?'paused':when(bot.next_run_at)||(bot.schedule?'not reported':'on message')),row('Last run',when(bot.last_run_at)||'never'));
+  if(typeof bot.last_run_id==='string'&&HEX.test(bot.last_run_id))art.append(runLink(bot.last_run_id));
   if(typeof bot.last_error==='string'&&bot.last_error)art.append(el('p','Last error: '+str(bot.last_error,300),'bots-error'));
   const actions=el('div',undefined,'bots-actions'),controls=[];
   controls.push(button(selected===bot.bot_id&&pane==='chat'?'Chat open':'Open chat',()=>select(bot.bot_id)));
@@ -139,7 +161,7 @@
   else controls.push(button('Delete',()=>{pendingDelete=bot.bot_id;note('Select Confirm delete on '+(str(bot.name,80)||'this bot')+' to remove it, or Cancel.');renderList();}));
   for(const b of controls)b.disabled=busy;
   actions.append(...controls);
-  if(pendingDelete===bot.bot_id)actions.append(el('small','Deleting removes the bot and its lease; the service confirms with deleted:true. Nothing is shared with other bots, so nothing of it remains.','bots-meta'));
+  if(pendingDelete===bot.bot_id)actions.append(el('small','Deleting removes this bot from the service. Run records and backups may remain.','bots-meta'));
   art.append(actions);
   return art;
  }
@@ -207,15 +229,31 @@
   }else agent=attr(el('input'),{maxlength:120,placeholder:'Echo ADK agent name (the Agents view did not answer; type the exact name)',autocomplete:'off'});
   const mode=el('select');for(const m of ['personal','team']){const o=el('option',m);o.value=m;mode.append(o);}mode.value='personal';
   const scheduled=attr(el('input'),{type:'checkbox'});
-  const minutes=attr(el('input'),{type:'number',min:'1',step:'1'});minutes.value='15';minutes.disabled=true;
-  scheduled.addEventListener('change',()=>{minutes.disabled=!scheduled.checked;});
+  const minutes=attr(el('input'),{type:'number',min:'1',max:'10080',step:'1'});minutes.value='15';minutes.disabled=true;
+  const scheduleType=attr(el('select'),{'aria-label':'Schedule type'});
+  for(const [value,label] of [['interval','Every N minutes'],['calendar','Calendar time']]){const option=el('option',label);option.value=value;scheduleType.append(option);}scheduleType.value='interval';
+  const calendarReady=service().features&&service().features.calendar_schedules===true;
+  scheduleType.children[1].disabled=!calendarReady;
+  const time=attr(el('input'),{type:'time','aria-label':'Local run time'});time.value='09:00';
+  const timezone=attr(el('input'),{maxlength:100,placeholder:'Timezone, e.g. America/Chicago','aria-label':'Schedule timezone',autocomplete:'off'});
+  try{timezone.value=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC';}catch{timezone.value='UTC';}
+  const dayGroup=attr(el('fieldset',undefined,'bots-weekdays'),{'aria-label':'Run on weekdays'});dayGroup.append(el('legend','Run on'));
+  const days=['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map((label,i)=>{const box=attr(el('input'),{type:'checkbox',value:String(i+1),'aria-label':label});box.checked=i<5;const pick=el('label',undefined,'bots-pick');pick.append(box,el('span',label));dayGroup.append(pick);return box;});
+  const missed=attr(el('select'),{'aria-label':'Missed run policy'});
+  for(const [value,label] of [['skip','Skip missed times'],['once','Catch up once after downtime']]){const option=el('option',label);option.value=value;missed.append(option);}missed.value='skip';
+  const calendarFields=el('div',undefined,'bots-calendar');
+  const clockRow=el('div',undefined,'bots-inline');clockRow.append(field('Local time',time),field('Timezone (IANA name)',timezone));
+  calendarFields.append(clockRow,dayGroup,field('If a scheduled time was missed',missed),el('p','Daylight saving: a skipped local time is skipped; a repeated time runs once. The next run is shown in UTC on the bot card.','bots-meta'));
+  const minutesField=field('Every N minutes (1 to 10080)',minutes);
+  function updateSchedule(){const calendar=scheduled.checked&&scheduleType.value==='calendar';scheduleType.disabled=!scheduled.checked;minutes.disabled=!scheduled.checked||calendar;minutesField.hidden=calendar;calendarFields.hidden=!calendar;for(const control of [time,timezone,missed,...days])control.disabled=!calendar;}
+  scheduled.addEventListener('change',updateSchedule);scheduleType.addEventListener('change',updateSchedule);updateSchedule();
   const instruction=attr(el('textarea'),{rows:'3',maxlength:MAX_TEXT,placeholder:'Standing instruction (optional, up to 12000 characters)'});
   const plugins=attr(el('input'),{placeholder:'Skill names, comma-separated (optional)',autocomplete:'off'});
   const cap=attr(el('input'),{type:'number',min:'0',max:String(MAX_CAP),step:'0.01'});cap.value=String(num(health&&health.defaultBudget&&health.defaultBudget.max_cost_usd)||0);
   const scopes=attr(el('input'),{placeholder:'Exact capability ids, comma-separated (optional; the agent default lease applies when empty)',autocomplete:'off'});
   const ttl=attr(el('input'),{type:'number',min:'1',step:'1'});ttl.value='3600';
   const uses=attr(el('input'),{type:'number',min:'1',step:'1'});uses.value='100';
-  const scheduleRow=el('div',undefined,'bots-inline');scheduleRow.append(field('Run on a schedule',scheduled),field('Every N minutes (at least 1)',minutes));
+  const scheduleRow=el('div',undefined,'bots-inline');scheduleRow.append(field('Run on a schedule',scheduled),field('Schedule type',scheduleType),minutesField);
   const leaseRow=el('div',undefined,'bots-inline');leaseRow.append(field('Lease TTL (seconds)',ttl),field('Lease max uses',uses));
   const submit=button('Create bot (starts paused)',async()=>{
    if(busy)return;
@@ -223,7 +261,16 @@
    if(!n||n.length>MAX_NAME){note('Give the bot a name of 1 to '+MAX_NAME+' characters.');return;}
    if(!a){note('Name the Echo ADK agent this bot runs.');return;}
    const body={name:n,agent:a,mode:mode.value};
-   if(scheduled.checked){const m=Number(minutes.value);if(!Number.isInteger(m)||m<1){note('The schedule needs a whole number of minutes, at least 1.');return;}body.schedule={every_s:m*60};}
+   if(scheduled.checked){
+    if(scheduleType.value==='calendar'){
+     if(!calendarReady){note('Calendar scheduling is not reported by this service.');return;}
+     const tz=timezone.value.trim(),weekdays=days.flatMap((day,i)=>day.checked?[i+1]:[]);
+     if(!/^([01]\d|2[0-3]):[0-5]\d$/.test(time.value)){note('Choose a local time in HH:mm format.');return;}
+     try{if(!tz)throw new Error();new Intl.DateTimeFormat('en',{timeZone:tz}).format();}catch{note('Enter a valid IANA timezone, such as America/Chicago or UTC.');return;}
+     if(!weekdays.length){note('Choose at least one weekday.');return;}
+     body.schedule={at:time.value,tz,weekdays,missed:missed.value};
+    }else{const m=Number(minutes.value);if(!Number.isSafeInteger(m)||m<1||m>10080){note('The schedule needs a whole number of minutes from 1 to 10080.');return;}body.schedule={every_s:m*60};}
+   }
    if(instruction.value.trim())body.instruction=instruction.value;
    const skills=plugins.value.split(',').map(s=>s.trim()).filter(Boolean);if(skills.length)body.plugins=skills;
    const c=Number(cap.value);if(!Number.isFinite(c)||c<0||c>MAX_CAP){note('The daily cost cap must be between $0 and $'+MAX_CAP+'.');return;}body.daily_cost_cap_usd=Math.round(c*100)/100;
@@ -243,7 +290,9 @@
    }catch(error){if(gen!==generation)return;note('Bot not created: '+(error instanceof Error?error.message:'request failed')+'. No automatic retry was made.');debug('create',{outcome:'failed'});}
    finally{if(gen===generation){busy=false;submit.disabled=false;renderList();}}
   },'new-chat bots-submit');
-  wrap.append(field('Name',name),field('Agent',agent),field('Mode',mode),scheduleRow,field('Instruction',instruction),field('Plugins',plugins),field('Daily cost cap (USD, at most '+MAX_CAP+')',cap),field('Lease scopes',scopes),leaseRow,submit);
+  wrap.append(field('Name',name),field('Agent',agent),field('Mode',mode),scheduleRow,calendarFields);
+  if(!calendarReady)wrap.append(el('p','Calendar scheduling is not reported by the connected service.','bots-meta'));
+  wrap.append(field('Instruction',instruction),field('Plugins',plugins),field('Daily cost cap (USD, at most '+MAX_CAP+')',cap),field('Lease scopes',scopes),leaseRow,submit);
   return wrap;
  }
  function roleLabel(message,bot){return message.role==='user'?'You':message.role==='bot'?(bot?str(bot.name,80):'Bot'):message.role==='system'?'System':str(message.role,20)||'Message';}
@@ -448,15 +497,16 @@
   const close=attr(el('button','×','icon-button close-dialog'),{type:'button','aria-label':'Close echoBots'});close.addEventListener('click',()=>dialog.close());
   title.append(heading,close);
   const status=attr(el('p',undefined,'dialog-description'),{id:'bots-status',role:'status','aria-live':'polite'});
+  const readinessNode=attr(el('section',undefined,'bots-readiness'),{'aria-label':'Service readiness'});
   const noteLine=attr(el('p',undefined,'bots-notice'),{id:'bots-note',role:'status'});
   const tools=el('div',undefined,'bots-toolbar');
-  tools.append(button('Refresh',()=>{lastList=0;void loadList();}),button('New bot',()=>{pane='create';renderPane();}),button('Group chat',()=>{pane='group';renderPane();}));
+  tools.append(button('Refresh',async()=>{lastList=0;await refreshHealth();await loadList();}),button('New bot',()=>{pane='create';renderPane();}),button('Group chat',()=>{pane='group';renderPane();}));
   const body=el('div',undefined,'bots-body'),listNode=attr(el('section',undefined,'bots-list'),{id:'bots-list','aria-label':'Your bots'}),paneNode=attr(el('section',undefined,'bots-pane'),{id:'bots-pane'});
   body.append(listNode,paneNode);
-  dialog.append(title,status,comparison(),tools,noteLine,body);
+  dialog.append(title,status,readinessNode,comparison(),tools,noteLine,body);
   dialog.addEventListener('close',()=>{stopChat();stopGroup();pane='none';debug('view',{outcome:'closed'});});
   doc.body.append(dialog);
-  ui={status,note:noteLine,tools,list:listNode,pane:paneNode,paneKey:''};
+  ui={status,readiness:readinessNode,note:noteLine,tools,list:listNode,pane:paneNode,paneKey:''};
  }
  async function open(){
   ensureDialog();
@@ -475,7 +525,7 @@
   ensureTimer();
  }
  function reset(){
-  generation++;stopChat();stopGroup();bots=[];selected=null;pendingDelete=null;pane='none';busy=false;agents=null;agentsLoaded=false;health=null;lastList=0;
+  generation++;stopChat();stopGroup();bots=[];selected=null;pendingDelete=null;pane='none';busy=false;agents=null;agentsLoaded=false;health=null;healthCheckedAt=null;lastList=0;
   publishSatellites();
   if(dialog&&dialog.open)dialog.close();
   note('');

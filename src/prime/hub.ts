@@ -302,6 +302,8 @@ export class PrimeHub {
   throw new BotsError(404,'Unknown echoBots action');
  }
  async botsMessage(botId:string,input:unknown,signal?:AbortSignal){return this.botsClient().message(botId,input,signal);}
+ /** An event is untrusted inbox data. The existing owner guard remains the authorization boundary. */
+ async botsEvent(botId:string,input:unknown,signal?:AbortSignal){return this.botsClient().event(botId,input,signal);}
  async botsMessages(botId:string,options:{since?:unknown;limit?:unknown},signal?:AbortSignal){return this.botsClient().messages(botId,options,signal);}
  async botsGroupCreate(input:unknown,signal?:AbortSignal){return this.botsClient().createGroup(input,signal);}
  async botsGroup(groupId:string,signal?:AbortSignal){return this.botsClient().group(groupId,signal);}

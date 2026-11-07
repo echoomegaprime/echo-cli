@@ -12,7 +12,7 @@ import {sanitize} from './swarm.js';
  */
 export const BOTS_PROFILE='ECHO_ADK';
 export const BOTS_MAX={max_calls:120,max_cost_usd:5,max_wall_s:4800} as const;
-export const BOTS_LIMITS={name:64,text:12000,everyS:60,dailyCapUsd:5,groupMin:2,groupMax:6,messages:200,plugins:32,scopes:64,agent:120} as const;
+export const BOTS_LIMITS={name:64,text:12000,everyS:60,maxEveryS:604800,dailyCapUsd:5,groupMin:2,groupMax:6,messages:200,plugins:32,scopes:64,agent:120} as const;
 export interface BotsBudget {max_calls:number;max_cost_usd:number;max_wall_s:number}
 export interface BotsConfig {baseUrl:string;defaultBudget:BotsBudget}
 /** Default cost 0: bots run on the free local lane until the owner raises a bot's daily cap explicitly. */
@@ -81,7 +81,8 @@ export function parseBotsConfig(value:unknown):BotsConfig{
  return {baseUrl:new URL(baseUrl).origin,defaultBudget};
 }
 export interface BotLease {scopes:string[];ttl_s:number;max_uses:number}
-export interface BotCreateBody {name:string;agent:string;mode?:'personal'|'team';schedule?:{every_s:number}|null;instruction?:string;plugins?:string[];lease?:BotLease;daily_cost_cap_usd:number}
+export type BotSchedule={every_s:number;missed?:'skip'|'once'}|{at:string;tz:string;weekdays:number[];missed:'skip'|'once'};
+export interface BotCreateBody {name:string;agent:string;mode?:'personal'|'team';schedule?:BotSchedule|null;instruction?:string;plugins?:string[];lease?:BotLease;daily_cost_cap_usd:number}
 /** Validates a create request from the browser into the exact contract body. Limits are refused, not clamped: nothing is guessed on the owner's behalf. */
 export function parseBotCreate(input:unknown,defaultCapUsd:number):BotCreateBody{
  const data=record(input,'bot request');
@@ -92,9 +93,21 @@ export function parseBotCreate(input:unknown,defaultCapUsd:number):BotCreateBody
  if(data.mode!==undefined){if(!(MODES as readonly unknown[]).includes(data.mode))throw new BotsError(400,'Invalid bot mode');body.mode=data.mode as 'personal'|'team';}
  if(data.schedule===null)body.schedule=null;
  else if(data.schedule!==undefined){
-  const schedule=record(data.schedule,'bot schedule');onlyKeys(schedule,['every_s'],'bot schedule');
-  if(typeof schedule.every_s!=='number'||!Number.isSafeInteger(schedule.every_s)||schedule.every_s<BOTS_LIMITS.everyS)throw new BotsError(400,'Invalid bot schedule: every_s must be an integer of at least '+BOTS_LIMITS.everyS);
-  body.schedule={every_s:schedule.every_s};
+  const schedule=record(data.schedule,'bot schedule');
+  if(schedule.missed!==undefined&&schedule.missed!=='skip'&&schedule.missed!=='once')throw new BotsError(400,'Invalid bot schedule: missed must be skip or once');
+  if('every_s' in schedule){
+   onlyKeys(schedule,['every_s','missed'],'bot schedule');
+   if(typeof schedule.every_s!=='number'||!Number.isSafeInteger(schedule.every_s)||schedule.every_s<BOTS_LIMITS.everyS||schedule.every_s>BOTS_LIMITS.maxEveryS)throw new BotsError(400,'Invalid bot schedule: every_s must be an integer of at least '+BOTS_LIMITS.everyS+' and at most '+BOTS_LIMITS.maxEveryS);
+   body.schedule={every_s:schedule.every_s,...(schedule.missed===undefined?{}:{missed:schedule.missed as 'skip'|'once'})};
+  }else{
+   onlyKeys(schedule,['at','tz','weekdays','missed'],'bot schedule');
+   if(typeof schedule.at!=='string'||!/^([01]\d|2[0-3]):[0-5]\d$/.test(schedule.at))throw new BotsError(400,'Invalid bot schedule: at must be HH:mm');
+   if(typeof schedule.tz!=='string'||!schedule.tz||schedule.tz.length>100)throw new BotsError(400,'Invalid bot schedule: timezone required');
+   try{new Intl.DateTimeFormat('en',{timeZone:schedule.tz}).format();}catch{throw new BotsError(400,'Invalid bot schedule: unknown timezone');}
+   if(!Array.isArray(schedule.weekdays)||!schedule.weekdays.length||schedule.weekdays.length>7||schedule.weekdays.some(d=>!Number.isInteger(d)||d<1||d>7)||new Set(schedule.weekdays).size!==schedule.weekdays.length)throw new BotsError(400,'Invalid bot schedule: weekdays must be distinct ISO days 1 to 7');
+   const missed=schedule.missed===undefined?'skip':schedule.missed as 'skip'|'once';
+   body.schedule={at:schedule.at,tz:schedule.tz,weekdays:schedule.weekdays as number[],missed};
+  }
  }
  const instruction=optionalText(data.instruction,'instruction',BOTS_LIMITS.text);if(instruction!==undefined)body.instruction=instruction;
  if(data.plugins!==undefined){
@@ -173,11 +186,14 @@ export class BotsClient {
  }
  /** Service identity: refuses anything that is not healthy or does not report profile ECHO_ADK (same rule as the swarm profile check). */
  async health(signal?:AbortSignal){
-  const h=await this.request('/health',this.timeouts.health,{},signal);
+  let h:Record<string,unknown>;
+  try{h=await this.request('/v2/health',this.timeouts.health,{},signal);}
+  catch(error){if(error instanceof BotsError&&error.status===404)throw new BotsError(502,'echoBots automation API v2 is unavailable; upgrade the echo-adk service to use these controls','unsupported_contract');throw error;}
   if(h.ok!==true)throw new BotsError(502,'echoBots service reports it is not healthy');
   if(h.profile!==BOTS_PROFILE)throw new BotsError(502,'echoBots service reports an unexpected profile; refusing to use it');
+  if(h.contract_version!==2)throw new BotsError(502,'echoBots automation API v2 is required; the service did not confirm its contract','unsupported_contract');
   debug('%j',{event:'prime_bots_health',profile:h.profile,bots:h.bots,runsActive:h.runs_active});
-  return sanitize({service:h.service,version:h.version,profile:h.profile,agents:h.agents,bots:h.bots,runsActive:h.runs_active}) as Record<string,unknown>;
+  return sanitize({service:h.service,version:h.version,profile:h.profile,agents:h.agents,bots:h.bots,runsActive:h.runs_active,contract_version:h.contract_version,features:h.features,budgets:h.budgets,connections:h.connections}) as Record<string,unknown>;
  }
  /** A Bot from the service: the id is verified before anything is kept; every string is redacted. */
  private bot(raw:Record<string,unknown>,expected?:string):Record<string,unknown>{
@@ -186,24 +202,24 @@ export class BotsClient {
   return sanitize(raw) as Record<string,unknown>;
  }
  async list(signal?:AbortSignal){
-  const reply=await this.request('/bots',this.timeouts.poll,{},signal);
+  const reply=await this.request('/v2/bots',this.timeouts.poll,{},signal);
   if(!Array.isArray(reply.bots))throw new BotsError(502,'echoBots service returned an unrecognized bot list');
   return {bots:reply.bots.slice(0,500).map(b=>this.bot(obj(b)))};
  }
  async get(botId:string,signal?:AbortSignal){
   const id=hexId(botId,'bot');
-  return this.bot(await this.request('/bots/'+id,this.timeouts.poll,{},signal),id);
+  return this.bot(await this.request('/v2/bots/'+id,this.timeouts.poll,{},signal),id);
  }
  async create(input:unknown,signal?:AbortSignal){
   const body=parseBotCreate(input,this.config.defaultBudget.max_cost_usd);
   debug('%j',{event:'prime_bots_create_submitting',agent:body.agent,mode:body.mode??'personal',scheduled:!!body.schedule,plugins:body.plugins?.length??0,dailyCapUsd:body.daily_cost_cap_usd});
-  const bot=this.bot(await this.request('/bots',this.timeouts.mutate,{method:'POST',body},signal));
+  const bot=this.bot(await this.request('/v2/bots',this.timeouts.mutate,{method:'POST',body},signal));
   debug('%j',{event:'prime_bots_create_accepted',botId:bot.bot_id,status:bot.status});
   return bot;
  }
  private async transition(botId:string,action:'pause'|'resume',signal?:AbortSignal){
   const id=hexId(botId,'bot');
-  const bot=this.bot(await this.request('/bots/'+id+'/'+action,this.timeouts.mutate,{method:'POST'},signal),id);
+  const bot=this.bot(await this.request('/v2/bots/'+id+'/'+action,this.timeouts.mutate,{method:'POST'},signal),id);
   debug('%j',{event:'prime_bots_action',action,botId:id,status:bot.status});
   return bot;
  }
@@ -226,6 +242,17 @@ export class BotsClient {
   debug('%j',{event:'prime_bots_message_accepted',botId:id,messageId:reply.message_id,runId:reply.run_id,textChars:text.length});
   return {botId:id,messageId:reply.message_id,runId:reply.run_id};
  }
+ /** Delivers an idempotent external event without changing the bot's status or permissions. */
+ async event(botId:string,input:unknown,signal?:AbortSignal){
+  const id=hexId(botId,'bot'),data=record(input,'bot event');
+  onlyKeys(data,['event_id','source','text'],'bot event');
+  const eventId=requiredText(data.event_id,'event id',128),source=requiredText(data.source,'event source',64),text=requiredText(data.text,'event text',10000);
+  if(!/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(eventId)||!/^[a-z0-9][a-z0-9_.-]*$/.test(source))throw new BotsError(400,'Invalid bot event id or source');
+  const reply=await this.request('/v2/bots/'+id+'/events',this.timeouts.mutate,{method:'POST',body:{event_id:eventId,source,text}},signal);
+  const statusValid=reply.duplicate===true?typeof reply.status==='string'&&['queued','running','gated','done','failed','unavailable'].includes(reply.status):reply.status==='queued';
+  if(reply.event_id!==eventId||typeof reply.message_id!=='string'||!HEX.test(reply.message_id)||typeof reply.run_id!=='string'||!HEX.test(reply.run_id)||typeof reply.duplicate!=='boolean'||!statusValid)throw new BotsError(502,'echoBots service returned an invalid event receipt');
+  return {botId:id,messageId:reply.message_id,runId:reply.run_id,eventId,duplicate:reply.duplicate,status:reply.status};
+ }
  async messages(botId:string,options:{since?:unknown;limit?:unknown}={},signal?:AbortSignal){
   const id=hexId(botId,'bot'),query:Record<string,string|undefined>={};
   if(options.since!==undefined)query.since=hexId(options.since,'message');
@@ -243,7 +270,7 @@ export class BotsClient {
   });
   return {botId:id,messages};
  }
- /** Group chat of 2 to 6 bots. Each bot answers through its own run with its own Lease; nothing is shared between them. */
+ /** Group chat of 2 to 6 bots. Each bot answers through its own governed run. */
  async createGroup(input:unknown,signal?:AbortSignal){
   const body=parseGroupCreate(input);
   debug('%j',{event:'prime_bots_group_submitting',bots:body.bots.length,promptChars:body.prompt.length});
