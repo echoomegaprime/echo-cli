@@ -10,7 +10,7 @@
  const HEX=/^[0-9a-f]{32}$/,STATUSES=['paused','idle','running','error'];
  let verdict={configured:false,available:false,reason:'echoBots status not loaded'},health=null,healthCheckedAt=null,bots=[],agents=null,agentsLoaded=false;
  let selected=null,pendingDelete=null,editing=null,pane='none',noteText='',busy=false,generation=0,healthGeneration=0,failedAt=-Infinity,lastList=0;
- let dialog=null,ui=null,navButton=null,chat=null,group=null,timer=null;
+ let dialog=null,ui=null,navButton=null,chat=null,group=null,timer=null,workspaceView=null;
  const num=v=>typeof v==='number'&&Number.isFinite(v)?v:null;
  const str=(v,n)=>typeof v==='string'?(v.length>n?v.slice(0,n)+'…':v):'';
  const list=v=>Array.isArray(v)?v.filter(x=>typeof x==='string'&&x):[];
@@ -58,8 +58,8 @@
    // Only a session that claimed owner admission has anything to invalidate (a real expiry or demotion); a visitor or member
    // is refused by design and a 405 from a route this host does not serve is not an identity event.
    const ws=workspace();
-   if((response.status===401||response.status===403)&&owner&&ws&&typeof ws.invalidate==='function'){ws.invalidate();debug('invalidated',{status:response.status,url});}
-   const error=new Error(data&&typeof data.error==='string'?data.error:'echoBots request failed (HTTP '+response.status+')');error.status=response.status;throw error;
+   if((response.status===401||response.status===403)&&(!data||data.source!=='bot_service')&&owner&&ws&&typeof ws.invalidate==='function'){ws.invalidate();debug('invalidated',{status:response.status,url});}
+   const error=new Error(data&&typeof data.error==='string'?data.error:'echoBots request failed (HTTP '+response.status+')');error.status=response.status;error.outcomeUnknown=data&&data.outcome_unknown===true;throw error;
   }
   if(!data||typeof data!=='object')throw new Error('echoBots returned an unrecognized response');
   return data;
@@ -122,7 +122,7 @@
  }
  function comparison(){
   const d=el('details',undefined,'bots-note');d.append(el('summary','Bot controls and data scope'));
-  d.append(el('p','Bots start paused. Schedules and queued messages run after you resume them. Each bot has a capability lease and local memory scope bot:<id>; group chats exchange bot responses. Scoped memory does not establish separate computers or isolated credentials. Deleting a bot does not guarantee removal of run records or backups. Readiness and budget figures below are reported by the connected service.'));
+  d.append(el('p','Bots start paused. Each bot has a capability lease, memory notes and run history. Configured browsers use separate processes and profiles on the same host. App connections belong to one bot and require provider consent. Readiness and budget figures come from the connected service. Deleting a bot removes its local resources; provider revocation is reported separately.'));
   return d;
  }
  // ---- bot cards -------------------------------------------------------------
@@ -142,7 +142,7 @@
   return wrap;
  }
  function row(label,value){const p=el('p',undefined,'bots-row');p.append(el('span',label,'bots-label'),el('span',value));return p;}
- function schedule(bot){const s=bot.schedule;if(!s||typeof s!=='object')return 'on message only';if(typeof s.at==='string'&&typeof s.tz==='string'){const days=Array.isArray(s.weekdays)?s.weekdays.map(d=>['','Mon','Tue','Wed','Thu','Fri','Sat','Sun'][d]).filter(Boolean).join(', '):'days not reported';return str(s.at,5)+' '+str(s.tz,100)+' · '+days+' · '+(s.missed==='once'?'catch up once':'skip missed');}const every=num(s.every_s);return every===null?'not reported':every%60===0?'every '+(every/60)+' min':'every '+every+' s';}
+ function schedule(bot){const s=bot.schedule;if(!s||typeof s!=='object')return 'on message only';if(s.once_at)return 'once '+str(s.once_at,16)+' '+str(s.tz,100)+(bot.schedule_complete?' · complete':'');if(s.cron)return 'cron '+str(s.cron,256)+' · '+str(s.tz,100);if(typeof s.at==='string'&&typeof s.tz==='string'){const days=Array.isArray(s.weekdays)?s.weekdays.map(d=>['','Mon','Tue','Wed','Thu','Fri','Sat','Sun'][d]).filter(Boolean).join(', '):Array.isArray(s.monthdays)?'days '+s.monthdays.join(', ')+(Array.isArray(s.months)?' · months '+s.months.join(', '):' of each month'):'days not reported';return str(s.at,5)+' '+str(s.tz,100)+' · '+days+' · '+(s.missed==='once'?'catch up once':'skip missed');}const every=num(s.every_s);return every===null?'not reported':every%60===0?'every '+(every/60)+' min':'every '+every+' s';}
  function card(bot){
   const art=el('article',undefined,'bots-card'+(selected===bot.bot_id?' bots-card-selected':'')+(pendingDelete===bot.bot_id?' bots-card-confirm':''));
   attr(art,{'data-bot-id':bot.bot_id});
@@ -158,6 +158,7 @@
   const paused=bot.status==='paused';
   controls.push(button(paused?'Resume':'Pause',()=>act(bot.bot_id,paused?'resume':'pause')));
   controls.push(button('Stop',()=>act(bot.bot_id,'stop')),button('Edit',()=>edit(bot.bot_id)));
+  if(service().features&&service().features.bot_workspaces===true)controls.push(button('Browser & apps',()=>{stopChat();selected=bot.bot_id;pane='workspace';renderPane();}));
   if(pendingDelete===bot.bot_id)controls.push(button('Confirm delete',()=>act(bot.bot_id,'delete'),'quiet-button bots-danger'),button('Cancel',()=>{pendingDelete=null;note('');renderList();}));
   else controls.push(button('Delete',()=>{pendingDelete=bot.bot_id;note('Select Confirm delete on '+(str(bot.name,80)||'this bot')+' to remove it, or Cancel.');renderList();}));
   for(const b of controls)b.disabled=busy;
@@ -182,7 +183,7 @@
    publishSatellites();
    lastList=Date.now();
    if(pendingDelete&&!bots.some(b=>b.bot_id===pendingDelete))pendingDelete=null;
-   if(selected&&!bots.some(b=>b.bot_id===selected)){stopChat();selected=null;editing=null;if(pane==='chat'||pane==='edit')pane='none';}
+   if(selected&&!bots.some(b=>b.bot_id===selected)){stopChat();selected=null;editing=null;if(pane==='chat'||pane==='edit'||pane==='workspace')pane='none';}
    renderList();renderPane();debug('list',{bots:bots.length});
   }catch(error){if(gen!==generation)return;note('Bot list unavailable: '+(error instanceof Error?error.message:'request failed')+'. No automatic retry was made.');}
  }
@@ -208,8 +209,9 @@
     note('Stop requested for '+name+'. Active provider steps may still be running. Refresh to check before editing.');
    }else if(action==='delete'){
     bots=bots.filter(b=>b.bot_id!==botId);pendingDelete=null;
-    if(selected===botId){stopChat();selected=null;editing=null;if(pane==='chat'||pane==='edit')pane='none';try{localStorage.removeItem(STORAGE);}catch{}}
-    note('Deleted '+name+' (confirmed by the service).');
+    if(selected===botId){stopChat();selected=null;editing=null;if(pane==='chat'||pane==='edit'||pane==='workspace')pane='none';try{localStorage.removeItem(STORAGE);}catch{}}
+    const revocations=result.cleanup&&result.cleanup.connections&&result.cleanup.connections.connections,remaining=Array.isArray(revocations)?revocations.filter(c=>!c.provider_revoked&&c.revocation_status!=='not_needed'):[];
+    note('Deleted '+name+' (confirmed by the service).'+(remaining.length?' Local app access was removed; '+remaining.length+' provider revocation(s) need review in the provider account.':''));
    }else{
     bots=bots.map(b=>b.bot_id===botId?result:b);
     note((action==='pause'?'Paused ':'Resumed ')+name+': status '+(STATUSES.includes(result.status)?result.status:'not reported')+'.');
@@ -249,9 +251,10 @@
   const scheduled=attr(el('input'),{type:'checkbox'});
   const minutes=attr(el('input'),{type:'number',min:'1',max:'10080',step:'1'});minutes.value='15';minutes.disabled=true;
   const scheduleType=attr(el('select'),{'aria-label':'Schedule type'});
-  for(const [value,label] of [['interval','Every N minutes'],['calendar','Calendar time']]){const option=el('option',label);option.value=value;scheduleType.append(option);}scheduleType.value='interval';
+  for(const [value,label] of [['interval','Every N minutes'],['calendar','Weekly calendar'],['once','Once'],['monthly','Monthly'],['yearly','Yearly'],['cron','Custom cron']]){const option=el('option',label);option.value=value;scheduleType.append(option);}scheduleType.value='interval';
   const calendarReady=service().features&&service().features.calendar_schedules===true;
   scheduleType.children[1].disabled=!calendarReady;
+  for(let i=2;i<scheduleType.children.length;i++)scheduleType.children[i].disabled=service().features&&service().features.extended_schedules!==true;
   const time=attr(el('input'),{type:'time','aria-label':'Local run time'});time.value='09:00';
   const timezone=attr(el('input'),{maxlength:100,placeholder:'Timezone, e.g. America/Chicago','aria-label':'Schedule timezone',autocomplete:'off'});
   try{timezone.value=Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC';}catch{timezone.value='UTC';}
@@ -260,10 +263,12 @@
   const missed=attr(el('select'),{'aria-label':'Missed run policy'});
   for(const [value,label] of [['skip','Skip missed times'],['once','Catch up once after downtime']]){const option=el('option',label);option.value=value;missed.append(option);}missed.value='skip';
   const calendarFields=el('div',undefined,'bots-calendar');
-  const clockRow=el('div',undefined,'bots-inline');clockRow.append(field('Local time',time),field('Timezone (IANA name)',timezone));
-  calendarFields.append(clockRow,dayGroup,field('If a scheduled time was missed',missed),el('p','Daylight saving: a skipped local time is skipped; a repeated time runs once. The next run is shown in UTC on the bot card.','bots-meta'));
+  const once=attr(el('input'),{type:'datetime-local','aria-label':'One-time local date and time'}),monthdays=attr(el('input'),{'aria-label':'Days of month',placeholder:'1, 15',maxlength:100}),months=attr(el('input'),{'aria-label':'Months of year',placeholder:'1, 6, 12',maxlength:50}),cron=attr(el('input'),{'aria-label':'Five-field cron',placeholder:'0 9 * * 1-5',maxlength:256});monthdays.value='1';months.value='1';cron.value='0 9 * * 1-5';
+  const onceField=field('Local date and time',once),monthdaysField=field('Days of month (1–31)',monthdays),monthsField=field('Months (1–12)',months),cronField=field('Cron: minute hour day month weekday',cron);
+  const timeField=field('Local time',time),clockRow=el('div',undefined,'bots-inline');clockRow.append(timeField,field('Timezone (IANA name)',timezone));
+  calendarFields.append(clockRow,onceField,dayGroup,monthdaysField,monthsField,cronField,field('If a scheduled time was missed',missed),el('p','Daylight saving: a skipped local time is skipped; a repeated time runs once. Dates absent from a month are skipped. The next run is shown in UTC.','bots-meta'));
   const minutesField=field('Every N minutes (1 to 10080)',minutes);
-  function updateSchedule(){const calendar=scheduled.checked&&scheduleType.value==='calendar';scheduleType.disabled=!scheduled.checked;minutes.disabled=!scheduled.checked||calendar;minutesField.hidden=calendar;calendarFields.hidden=!calendar;for(const control of [time,timezone,missed,...days])control.disabled=!calendar;}
+  function updateSchedule(){const kind=scheduleType.value,calendar=scheduled.checked&&kind!=='interval';scheduleType.disabled=!scheduled.checked;minutes.disabled=!scheduled.checked||calendar;minutesField.hidden=calendar;calendarFields.hidden=!calendar;for(const control of [time,timezone,missed,once,monthdays,months,cron,...days])control.disabled=!calendar;dayGroup.hidden=kind!=='calendar';onceField.hidden=kind!=='once';monthdaysField.hidden=!['monthly','yearly'].includes(kind);monthsField.hidden=kind!=='yearly';cronField.hidden=kind!=='cron';timeField.hidden=['once','cron'].includes(kind);}
   scheduled.addEventListener('change',updateSchedule);scheduleType.addEventListener('change',updateSchedule);updateSchedule();
   const instruction=attr(el('textarea'),{rows:'3',maxlength:MAX_TEXT,placeholder:'Standing instruction (optional, up to 12000 characters)'});
   const plugins=attr(el('input'),{placeholder:'Skill names, comma-separated (optional)',autocomplete:'off'});
@@ -275,10 +280,10 @@
    name.value=existing.name;mode.value=existing.mode||'personal';instruction.value=typeof existing.instruction==='string'?existing.instruction:'';plugins.value=list(existing.plugins).join(', ');cap.value=String(existing.daily_cost_cap_usd);
    const lease=existing.lease||{};scopes.value=list(lease.scopes).join(', ');ttl.value=num(lease.ttl_s)===null?'':String(lease.ttl_s);uses.value=num(lease.max_uses)===null?'':String(lease.max_uses);
    scopes.setAttribute('placeholder','Exact capability ids; leave empty to revoke all capabilities');
-   if(existing.schedule){scheduled.checked=true;if(typeof existing.schedule.at==='string'){scheduleType.value='calendar';time.value=existing.schedule.at;timezone.value=existing.schedule.tz;days.forEach((day,i)=>{day.checked=Array.isArray(existing.schedule.weekdays)&&existing.schedule.weekdays.includes(i+1);});missed.value=existing.schedule.missed||'skip';}else minutes.value=String(existing.schedule.every_s/60);}
+   if(existing.schedule){const s=existing.schedule;scheduled.checked=true;timezone.value=s.tz||timezone.value;missed.value=s.missed||'skip';if(s.once_at){scheduleType.value='once';once.value=s.once_at;}else if(s.cron){scheduleType.value='cron';cron.value=s.cron;}else if(s.monthdays){scheduleType.value=s.months?'yearly':'monthly';time.value=s.at;monthdays.value=s.monthdays.join(', ');if(s.months)months.value=s.months.join(', ');}else if(typeof s.at==='string'){scheduleType.value='calendar';time.value=s.at;days.forEach((day,i)=>{day.checked=Array.isArray(s.weekdays)&&s.weekdays.includes(i+1);});}else minutes.value=String(s.every_s/60);}
    updateSchedule();
   }
-  const scheduleDraft=()=>JSON.stringify([scheduled.checked,scheduleType.value,minutes.value,time.value,timezone.value,days.map(day=>day.checked),missed.value]);
+  const scheduleDraft=()=>JSON.stringify([scheduled.checked,scheduleType.value,minutes.value,time.value,timezone.value,days.map(day=>day.checked),missed.value,once.value,monthdays.value,months.value,cron.value]);
   const initial={name:name.value.trim(),mode:mode.value,instruction:instruction.value,plugins:plugins.value,cap:cap.value,scopes:scopes.value,ttl:ttl.value,uses:uses.value,schedule:scheduleDraft()};
   const scheduleRow=el('div',undefined,'bots-inline');scheduleRow.append(field('Run on a schedule',scheduled),field('Schedule type',scheduleType),minutesField);
   const leaseRow=el('div',undefined,'bots-inline');leaseRow.append(field('Lease TTL (seconds)',ttl),field('Lease max uses',uses));
@@ -291,13 +296,15 @@
    if(existing&&n!==initial.name)body.name=n;
    if(existing&&mode.value!==initial.mode)body.mode=mode.value;
    if((!existing||scheduleDraft()!==initial.schedule)&&scheduled.checked){
-    if(scheduleType.value==='calendar'){
+    if(scheduleType.value!=='interval'){
      if(!calendarReady){note('Calendar scheduling is not reported by this service.');return;}
      const tz=timezone.value.trim(),weekdays=days.flatMap((day,i)=>day.checked?[i+1]:[]);
-     if(!/^([01]\d|2[0-3]):[0-5]\d$/.test(time.value)){note('Choose a local time in HH:mm format.');return;}
+     if(!['once','cron'].includes(scheduleType.value)&&!/^([01]\d|2[0-3]):[0-5]\d$/.test(time.value)){note('Choose a local time in HH:mm format.');return;}
      try{if(!tz)throw new Error();new Intl.DateTimeFormat('en',{timeZone:tz}).format();}catch{note('Enter a valid IANA timezone, such as America/Chicago or UTC.');return;}
-     if(!weekdays.length){note('Choose at least one weekday.');return;}
-     body.schedule={at:time.value,tz,weekdays,missed:missed.value};
+     if(scheduleType.value==='calendar'){if(!weekdays.length){note('Choose at least one weekday.');return;}body.schedule={at:time.value,tz,weekdays,missed:missed.value};}
+     else if(scheduleType.value==='once'){if(!/^\d{4}-\d\d-\d\dT\d\d:\d\d$/.test(once.value)){note('Choose a local date and time.');return;}body.schedule={once_at:once.value,tz,missed:missed.value};}
+     else if(scheduleType.value==='cron'){if(cron.value.trim().split(/\s+/).length!==5){note('Enter five cron fields.');return;}body.schedule={cron:cron.value.trim(),tz,missed:missed.value};}
+     else{const dates=monthdays.value.split(',').map(s=>Number(s.trim())),selectedMonths=months.value.split(',').map(s=>Number(s.trim()));if(!dates.length||dates.some(n=>!Number.isInteger(n)||n<1||n>31)||(scheduleType.value==='yearly'&&(!selectedMonths.length||selectedMonths.some(n=>!Number.isInteger(n)||n<1||n>12)))){note('Enter valid day and month numbers separated by commas.');return;}body.schedule={at:time.value,tz,monthdays:[...new Set(dates)],...(scheduleType.value==='yearly'?{months:[...new Set(selectedMonths)]}:{}),missed:missed.value};}
     }else{const m=Number(minutes.value);if(!Number.isSafeInteger(m)||m<1||m>10080){note('The schedule needs a whole number of minutes from 1 to 10080.');return;}body.schedule={every_s:m*60};if(existing&&existing.schedule&&existing.schedule.missed)body.schedule.missed=existing.schedule.missed;}
    }
    if(existing&&scheduleDraft()!==initial.schedule&&!scheduled.checked)body.schedule=null;
@@ -513,6 +520,7 @@
  }
  /** The pane is rebuilt only when what it shows changes (bot, status, agents list, group); a list refresh alone keeps drafts in place. */
  function paneKey(){
+  if(pane==='workspace')return 'workspace:'+selected;
   if(pane==='chat'){const b=bots.find(x=>x.bot_id===selected);return 'chat:'+selected+':'+(b?b.status:'');}
   if(pane==='create')return 'create:'+(agents&&agents.length?'select':'text');
   if(pane==='edit')return 'edit:'+(editing?editing.bot_id:'none');
@@ -526,6 +534,10 @@
   const key=paneKey();
   if(!force&&key===ui.paneKey){if(pane==='chat')renderTranscript();else if(pane==='group')renderGroup();return;}
   ui.paneKey=key;
+  if(workspaceView){workspaceView.destroy();workspaceView=null;}
+  if((pane==='workspace'||pane==='teams')&&window.EchoPrimeBotWorkspace){
+   workspaceView=window.EchoPrimeBotWorkspace.mount(ui.pane,{bot:pane==='workspace'?bots.find(b=>b.bot_id===selected):null,bots,getBots:()=>bots,mode:pane,api,refresh:loadList});return;
+  }
   ui.pane.replaceChildren(pane==='create'?createPane():pane==='edit'&&editing?createPane(editing):pane==='chat'?chatPane():pane==='group'?groupPane():el('p','Open a bot\u2019s chat, create a new bot or start a group chat.','bots-meta'));
  }
  function ensureDialog(){
@@ -539,10 +551,11 @@
   const noteLine=attr(el('p',undefined,'bots-notice'),{id:'bots-note',role:'status'});
   const tools=el('div',undefined,'bots-toolbar');
   tools.append(button('Refresh',async()=>{lastList=0;await refreshHealth();await loadList();}),button('New bot',()=>{pane='create';renderPane();}),button('Group chat',()=>{pane='group';renderPane();}));
+  tools.append(button('Teams & templates',()=>{stopChat();pane='teams';renderPane();}));
   const body=el('div',undefined,'bots-body'),listNode=attr(el('section',undefined,'bots-list'),{id:'bots-list','aria-label':'Your bots'}),paneNode=attr(el('section',undefined,'bots-pane'),{id:'bots-pane'});
   body.append(listNode,paneNode);
   dialog.append(title,status,readinessNode,comparison(),tools,noteLine,body);
-  dialog.addEventListener('close',()=>{stopChat();stopGroup();pane='none';debug('view',{outcome:'closed'});});
+  dialog.addEventListener('close',()=>{stopChat();stopGroup();if(workspaceView){workspaceView.destroy();workspaceView=null;}pane='none';debug('view',{outcome:'closed'});});
   doc.body.append(dialog);
   ui={status,readiness:readinessNode,note:noteLine,tools,list:listNode,pane:paneNode,paneKey:''};
  }
@@ -583,7 +596,7 @@
  });
  if(typeof doc.addEventListener==='function')doc.addEventListener('echo-orb-open',async event=>{try{const d=event&&event.detail;if(!d||d.kind!=='bot'||typeof d.id!=='string'||!/^bot:[0-9a-f]{32}$/.test(d.id))return;const botId=d.id.slice(4);await open();select(botId);}catch{}});
  window.addEventListener('echo-account-changed',()=>{reset();void refreshHealth();});
- window.addEventListener('pagehide',()=>{stopChat();stopGroup();});
+ window.addEventListener('pagehide',()=>{stopChat();stopGroup();if(workspaceView){workspaceView.destroy();workspaceView=null;}});
  window.EchoPrimeBots={ready:refreshHealth(),refresh:refreshHealth,open,async openBot(botId){if(!HEX.test(String(botId)))return;await open();select(botId);},close(){if(dialog&&dialog.open)dialog.close();},admission,
   state(){return {verdict,selected,pane,pendingDelete,polling:!!chat,group:group?{groupId:group.groupId,done:group.done}:null,bots:bots.length};}};
 })();

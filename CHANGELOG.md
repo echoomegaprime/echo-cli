@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased -- per-bot workspaces (2026-11-08)
+
+- Add owner-admitted browser, app marketplace, OAuth callback, connection actions, memory revisions,
+  team import/export/templates/recovery and app-event watches to the echoBots workspace.
+- Extend scheduling controls with one-time, monthly, yearly and numeric five-field cron schedules.
+- Project the ADK's fixed resource schemas through the loopback client and existing owner/CSRF guards.
+  Preserve verified screenshot bytes and portable bundle hashes without display truncation.
+- Offer 32 bounded owner chat tools, including browser actions, connected operations, note editing and
+  app-watch creation/control. OAuth consent responses and credentials are never model tool arguments.
+- Report per-bot resource cleanup and provider revocation separately. Browser availability and app
+  consent remain actual service states; these changes do not mark unconfigured providers connected.
+
 ## Unreleased -- bot autonomy hardening (2026-11-07)
 
 ### Fixed

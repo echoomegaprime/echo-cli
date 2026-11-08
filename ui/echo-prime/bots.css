@@ -60,3 +60,22 @@
 .bots-summary{display:grid;gap:4px;padding:10px;border:1px solid #3d6b57;border-radius:8px;background:#0f2a22}
 .bots-summary p{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
 @media(max-width:860px){.bots-dialog .quiet-button{min-height:44px}.bots-body{grid-template-columns:1fr}.bots-inline,.bots-readiness{grid-template-columns:1fr}.bots-composer{grid-template-columns:1fr}}
+/* Per-bot resources keep long provider output and screenshots inside the pane. */
+.bot-workspace-content{display:grid;gap:14px;min-width:0}
+.bot-workspace-content>h4{margin:8px 0 0}
+.bot-workspace-content .quiet-button{min-height:40px;padding:8px 12px;border:1px solid #375c4d;border-radius:8px;color:#c5e6d7;background:#10251d;font-size:12px;line-height:1.5}
+.bot-workspace-content .quiet-button:hover:not(:disabled){border-color:#6ab18e;background:#19372a;color:#e4eeeb}
+.bot-workspace-content .quiet-button:disabled{color:#829e91;background:#102019;border-color:#294237;opacity:.7}
+.bot-workspace-content input,.bot-workspace-content textarea,.bot-workspace-content select{max-width:100%;box-sizing:border-box}
+.bot-workspace-content textarea{width:100%;resize:vertical;min-width:0;border:1px solid #375c4d;border-radius:8px;background:#0b1915;color:#e1f2ea;padding:10px 12px;font:inherit;line-height:1.5}
+.bot-workspace-output{white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow:auto;padding:12px;border:1px solid #ffffff20;border-radius:10px;background:#0003;font-size:12px;line-height:1.5}
+.bot-browser-control{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 0;border-bottom:1px solid #ffffff14}
+.bot-browser-control>span{flex:1 1 160px;overflow-wrap:anywhere}
+.bot-browser-control>input{flex:1 1 150px;min-width:0}
+.bot-browser-shot{display:block;width:100%;height:auto;border:1px solid #ffffff25;border-radius:10px}
+.bot-template-list,.bot-connection-list{display:grid;gap:12px}
+.bots-toolbar [aria-pressed=true]{border-color:#61dec3;background:#61dec31a}
+.bot-oauth-callback{font-family:system-ui,sans-serif;background:#111b22;color:#e7f5f3;display:grid;min-height:90vh;place-items:center;padding:24px}
+.bot-oauth-callback main{max-width:540px;padding:28px;border:1px solid #ffffff25;border-radius:18px}
+.bot-oauth-callback a{color:#8be7d2}
+@media(max-width:600px){.bot-workspace-content .bots-inline{display:grid;grid-template-columns:1fr}.bot-workspace-content .bots-toolbar{flex-wrap:wrap}.bot-workspace-content .bots-card{min-width:0}.bot-browser-control{align-items:stretch}}

@@ -224,7 +224,7 @@ describe('Prime routes for agent definitions', () => {
 describe('AutoAgents: tools, status and prompt guidance', () => {
   it('offers find_capabilities, make_agent and make_bot as owner-only tools with schemas; the hub offers none when the feature is off', async () => {
     const s = await service(); const tools = s.auto.tools();
-    expect(tools.map(t => t.name)).toEqual(['find_capabilities', 'make_agent', 'make_bot', 'bots_status', 'list_bots', 'get_bot', 'update_bot', 'pause_bot', 'resume_bot', 'stop_bot', 'delete_bot', 'message_bot', 'deliver_bot_event', 'bot_messages', 'bot_run_status', 'stop_bot_run', 'create_bot_group', 'bot_group_status', 'delegate_task']);
+    expect(tools.map(t => t.name)).toEqual(['bot_browser_status', 'bot_browser_action', 'bot_browser_close', 'bot_connections', 'bot_connection_invoke', 'bot_app_catalog', 'bot_memory_read', 'bot_memory_edit', 'bot_team_templates', 'bot_app_watches', 'create_bot_app_watch', 'enable_bot_app_watch', 'disable_bot_app_watch', 'find_capabilities', 'make_agent', 'make_bot', 'bots_status', 'list_bots', 'get_bot', 'update_bot', 'pause_bot', 'resume_bot', 'stop_bot', 'delete_bot', 'message_bot', 'deliver_bot_event', 'bot_messages', 'bot_run_status', 'stop_bot_run', 'create_bot_group', 'bot_group_status', 'delegate_task']);
     expect(tools.every(t => t.ownerOnly === true && typeof t.description === 'string' && t.description.length > 40)).toBe(true);
     const makeAgent = tools.find(t => t.name === 'make_agent')!;
     expect(makeAgent.inputSchema).toMatchObject({ type: 'object', additionalProperties: false, required: ['name', 'role', 'purpose', 'capabilities'] });

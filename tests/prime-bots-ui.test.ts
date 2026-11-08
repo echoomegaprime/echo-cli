@@ -133,10 +133,10 @@ describe('echoBots nav entry and off state', () => {
     expect(s.status()).toMatch(/echoBots service unavailable: echoBots service unreachable at http:\/\/127\.0\.0\.1:8378\. Run status cannot be verified from this view/);
     expect(s.count('/api/prime/bots/list')).toBe(0);
   });
-  it('reports capabilities and actual connections without claiming credential isolation or complete deletion', async () => {
+  it('reports actual connections, process isolation and separate provider revocation', async () => {
     const s = await opened();
     const note = text(s.dialog());
-    for (const expected of ['Calendar scheduling: available', 'idempotent events available', 'Memory: local recall, durable, scoped per bot', 'Browser: No isolated browser provider is configured', '$1.00 used · $2.00 reserved · $197.00 available · $200.00 cap', 'Bots start paused', 'memory scope bot:<id>', 'does not establish separate computers or isolated credentials', 'does not guarantee removal of run records or backups'])
+    for (const expected of ['Calendar scheduling: available', 'idempotent events available', 'Memory: local recall, durable, scoped per bot', 'Browser: No isolated browser provider is configured', '$1.00 used · $2.00 reserved · $197.00 available · $200.00 cap', 'Bots start paused', 'memory notes and run history', 'separate processes and profiles on the same host', 'require provider consent', 'provider revocation is reported separately'])
       expect(note).toContain(expected);
     expect(note).not.toContain('nothing of it remains');
     expect(note).not.toContain('never holds a token');

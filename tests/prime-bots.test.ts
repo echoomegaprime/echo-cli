@@ -119,7 +119,7 @@ describe('bots config, budget and request validation', () => {
     const refused: [unknown, RegExp][] = [
       [{ name: 'x'.repeat(65), agent: 'a' }, /exceeds 64/], [{ name: '   ', agent: 'a' }, /Invalid bot name/], [{ agent: 'a' }, /Invalid bot name/],
       [{ name: 'n', agent: '../x' }, /agent/], [{ name: 'n' }, /agent/], [{ name: 'n', agent: 'a', mode: 'shared' }, /mode/],
-      [{ name: 'n', agent: 'a', schedule: { every_s: 59 } }, /at least 60/], [{ name: 'n', agent: 'a', schedule: { every_s: 60.5 } }, /at least 60/], [{ name: 'n', agent: 'a', schedule: { cron: '* *' } }, /unknown field/],
+      [{ name: 'n', agent: 'a', schedule: { every_s: 59 } }, /at least 60/], [{ name: 'n', agent: 'a', schedule: { every_s: 60.5 } }, /at least 60/], [{ name: 'n', agent: 'a', schedule: { cron: '* *' } }, /timezone required/],
       [{ name: 'n', agent: 'a', daily_cost_cap_usd: 5.01 }, /exceeds 5/], [{ name: 'n', agent: 'a', daily_cost_cap_usd: -1 }, /daily cost cap/], [{ name: 'n', agent: 'a', daily_cost_cap_usd: '1' }, /daily cost cap/],
       [{ name: 'n', agent: 'a', instruction: 'x'.repeat(12001) }, /exceeds 12000/], [{ name: 'n', agent: 'a', plugins: ['ok', 5] }, /plugins/], [{ name: 'n', agent: 'a', plugins: 'git' }, /plugins/],
       [{ name: 'n', agent: 'a', lease: { scopes: ['not-a-cap'], ttl_s: 1, max_uses: 1 } }, /exact capability ids/], [{ name: 'n', agent: 'a', lease: { scopes: ['echo.x'], ttl_s: 0, max_uses: 1 } }, /ttl_s/],
@@ -212,7 +212,7 @@ describe('BotsClient against a stand-in service', () => {
     expect((await client.messages(BOT, { since: '1'.repeat(32) })).messages).toHaveLength(1);
     expect(await client.remove(BOT3)).toEqual({ botId: BOT3, deleted: true });
     expect(seen.map(s => `${s.method} ${s.url}`)).toEqual(['GET /v2/bots', 'POST /v2/bots', `GET /v2/bots/${BOT}`, `POST /v2/bots/${BOT2}/pause`, `POST /v2/bots/${BOT2}/resume`, `POST /bots/${BOT}/message`,
-      `GET /bots/${BOT}/messages?limit=50`, `GET /bots/${BOT}/messages?since=${'1'.repeat(32)}`, `DELETE /bots/${BOT3}`]);
+      `GET /bots/${BOT}/messages?limit=50`, `GET /bots/${BOT}/messages?since=${'1'.repeat(32)}`, `DELETE /v2/bots/${BOT3}`]);
     expect(seen.every(s => s.method !== 'POST' || s.body === '' || s.body.startsWith('{'))).toBe(true);
   });
   it('creates and reads a group of 2..6 bots', async () => {

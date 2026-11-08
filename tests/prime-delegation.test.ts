@@ -234,8 +234,8 @@ describe('owner bot control tools',()=>{
   const f=await fixture(),tools=f.auto.tools();
   for(const tool of tools)await expect(tool.run({}, {...ctx(),owner:false})).rejects.toMatchObject({status:403,code:'owner_only'});
   expect(f.state.seen).toHaveLength(0);expect(f.state.resolved).toHaveLength(0);
-  expect(tools.filter(t=>t.readOnly).map(t=>t.name)).toEqual(['find_capabilities','bots_status','list_bots','get_bot','bot_messages','bot_run_status','bot_group_status']);
-  expect(tools.filter(t=>t.deduplicate===false).map(t=>t.name)).toEqual(['update_bot','pause_bot','resume_bot','stop_bot','delete_bot','stop_bot_run']);
+  expect(tools.filter(t=>t.readOnly).map(t=>t.name)).toEqual(['bot_browser_status','bot_connections','bot_app_catalog','bot_memory_read','bot_team_templates','bot_app_watches','find_capabilities','bots_status','list_bots','get_bot','bot_messages','bot_run_status','bot_group_status']);
+  expect(tools.filter(t=>t.deduplicate===false).map(t=>t.name)).toEqual(['enable_bot_app_watch','disable_bot_app_watch','update_bot','pause_bot','resume_bot','stop_bot','delete_bot','stop_bot_run']);
  });
  it('makes basic management available when catalog execution is off, while reporting that distinction',async()=>{
   const f=await fixture(),b=f.bot(),managed=new AutoAgents({bots:f.options.bots});

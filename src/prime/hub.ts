@@ -309,6 +309,7 @@ export class PrimeHub {
  async botsMessages(botId:string,options:{since?:unknown;limit?:unknown},signal?:AbortSignal){return this.botsClient().messages(botId,options,signal);}
  async botsGroupCreate(input:unknown,signal?:AbortSignal){return this.botsClient().createGroup(input,signal);}
  async botsGroup(groupId:string,signal?:AbortSignal){return this.botsClient().group(groupId,signal);}
+ async botsWorkspace(operation:string,input:unknown,signal?:AbortSignal){return this.botsClient().workspace(operation,input,signal);}
  /** Opt-in in-chat browser (the Commander's own ShadowGlass Chrome via the loopback relay). Status never throws for an
   *  unconfigured or disconnected relay; it says why. Owner-only is enforced by the Prime server, not here. */
  async browserStatus(signal?:AbortSignal){

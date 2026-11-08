@@ -1,8 +1,10 @@
 import {debuglog} from 'node:util';
+import {createHash} from 'node:crypto';
 import {validateEndpoint} from '../code/model.js';
 import {redact} from '../code/workspace.js';
 import {WorkspaceHttpError} from './workspace.js';
 import {sanitize} from './swarm.js';
+import {botWorkspaceRequest} from './bot-workspace.js';
 /**
  * Client for echoBots: always-on governed agents served by the loopback `echo-adk-api` service (contract
  * docs/echo-code/ECHO_ADK_API_CONTRACT.md, frozen 2026-11-04). Consumed exactly the way swarm.ts consumes the
@@ -26,7 +28,7 @@ const CAPABILITY=/^echo\.[A-Za-z0-9_.-]{1,180}$/;
 const MODES=['personal','team'] as const;
 const debug=debuglog('echo-prime');
 /** Carries an HTTP status so the Prime server answers 4xx/5xx instead of a blanket 400, plus the contract error code when the service named one. */
-export class BotsError extends WorkspaceHttpError {constructor(status:number,message:string,public code?:string){super(status,message);}}
+export class BotsError extends WorkspaceHttpError {constructor(status:number,message:string,public code?:string,public outcomeUnknown=false,public details?:unknown){super(status,message);}}
 const obj=(v:unknown):Record<string,unknown>=>v&&typeof v==='object'&&!Array.isArray(v)?v as Record<string,unknown>:{};
 function record(value:unknown,what:string):Record<string,unknown>{
  if(!value||typeof value!=='object'||Array.isArray(value))throw new BotsError(400,'Invalid '+what);
@@ -81,22 +83,39 @@ export function parseBotsConfig(value:unknown):BotsConfig{
  return {baseUrl:new URL(baseUrl).origin,defaultBudget};
 }
 export interface BotLease {scopes:string[];ttl_s:number;max_uses:number}
-export type BotSchedule={every_s:number;missed?:'skip'|'once'}|{at:string;tz:string;weekdays:number[];missed:'skip'|'once'};
+export type BotSchedule={every_s:number;missed?:'skip'|'once'}|{at:string;tz:string;weekdays:number[];missed:'skip'|'once'}|{once_at:string;tz:string;missed:'skip'|'once'}|{at:string;tz:string;monthdays:number[];months?:number[];missed:'skip'|'once'}|{cron:string;tz:string;missed:'skip'|'once'};
 export interface BotCreateBody {name:string;agent:string;mode?:'personal'|'team';schedule?:BotSchedule|null;instruction?:string;plugins?:string[];lease?:BotLease;daily_cost_cap_usd:number}
 export type BotUpdateBody=Partial<Omit<BotCreateBody,'agent'|'instruction'|'lease'>> & {instruction?:string|null;lease?:Partial<BotLease>};
 export function parseBotSchedule(value:unknown):BotSchedule|null{
  if(value===null)return null;
  const schedule=record(value,'bot schedule');
+ onlyKeys(schedule,['every_s','missed','at','tz','weekdays','once_at','monthdays','months','cron'],'bot schedule');
  if(schedule.missed!==undefined&&schedule.missed!=='skip'&&schedule.missed!=='once')throw new BotsError(400,'Invalid bot schedule: missed must be skip or once');
  if('every_s' in schedule){
   onlyKeys(schedule,['every_s','missed'],'bot schedule');
   if(typeof schedule.every_s!=='number'||!Number.isSafeInteger(schedule.every_s)||schedule.every_s<BOTS_LIMITS.everyS||schedule.every_s>BOTS_LIMITS.maxEveryS)throw new BotsError(400,'Invalid bot schedule: every_s must be an integer of at least '+BOTS_LIMITS.everyS+' and at most '+BOTS_LIMITS.maxEveryS);
   return {every_s:schedule.every_s,...(schedule.missed===undefined?{}:{missed:schedule.missed as 'skip'|'once'})};
  }
- onlyKeys(schedule,['at','tz','weekdays','missed'],'bot schedule');
- if(typeof schedule.at!=='string'||!/^([01]\d|2[0-3]):[0-5]\d$/.test(schedule.at))throw new BotsError(400,'Invalid bot schedule: at must be HH:mm');
  if(typeof schedule.tz!=='string'||!schedule.tz||schedule.tz.length>100)throw new BotsError(400,'Invalid bot schedule: timezone required');
  try{new Intl.DateTimeFormat('en',{timeZone:schedule.tz}).format();}catch{throw new BotsError(400,'Invalid bot schedule: unknown timezone');}
+ const missed=schedule.missed===undefined?'skip':schedule.missed as 'skip'|'once',tz=schedule.tz;
+ if('once_at' in schedule){
+  onlyKeys(schedule,['once_at','tz','missed'],'bot schedule');
+  if(typeof schedule.once_at!=='string'||!/^\d{4}-\d\d-\d\dT([01]\d|2[0-3]):[0-5]\d$/.test(schedule.once_at)||!Number.isFinite(Date.parse(schedule.once_at+'Z')))throw new BotsError(400,'Invalid one-time local date and time');
+  return {once_at:schedule.once_at,tz,missed};
+ }
+ if('cron' in schedule){
+  onlyKeys(schedule,['cron','tz','missed'],'bot schedule');
+  if(typeof schedule.cron!=='string'||schedule.cron.length>256||schedule.cron.trim().split(/\s+/).length!==5||!/^[\d*,/\-\s]+$/.test(schedule.cron))throw new BotsError(400,'Cron requires five numeric fields');
+  return {cron:schedule.cron.trim(),tz,missed};
+ }
+ if(typeof schedule.at!=='string'||!/^([01]\d|2[0-3]):[0-5]\d$/.test(schedule.at))throw new BotsError(400,'Invalid bot schedule: at must be HH:mm');
+ if('monthdays' in schedule){
+  onlyKeys(schedule,['at','tz','monthdays','months','missed'],'bot schedule');
+  for(const [key,max] of [['monthdays',31],['months',12]] as const){const values=schedule[key];if(key==='months'&&values===undefined)continue;if(!Array.isArray(values)||!values.length||values.length>max||values.some(d=>!Number.isSafeInteger(d)||d<1||d>max)||new Set(values).size!==values.length)throw new BotsError(400,'Invalid calendar '+key);}
+  return {at:schedule.at,tz,monthdays:schedule.monthdays as number[],...(schedule.months===undefined?{}:{months:schedule.months as number[]}),missed};
+ }
+ onlyKeys(schedule,['at','tz','weekdays','missed'],'bot schedule');
  if(!Array.isArray(schedule.weekdays)||!schedule.weekdays.length||schedule.weekdays.length>7||schedule.weekdays.some(d=>!Number.isInteger(d)||d<1||d>7)||new Set(schedule.weekdays).size!==schedule.weekdays.length)throw new BotsError(400,'Invalid bot schedule: weekdays must be distinct ISO days 1 to 7');
  return {at:schedule.at,tz:schedule.tz,weekdays:schedule.weekdays as number[],missed:schedule.missed===undefined?'skip':schedule.missed as 'skip'|'once'};
 }
@@ -170,29 +189,66 @@ export class BotsClient {
   this.origin=validateEndpoint(config.baseUrl);
   this.config={baseUrl:this.origin.origin,defaultBudget:clampBotsBudget(config.defaultBudget,DEFAULT_BOTS.defaultBudget)};
  }
- private async request(route:string,ms:number,init:RequestInit={},signal?:AbortSignal):Promise<Record<string,unknown>>{
+ /** Fixed, versioned workspace contracts; never a caller-provided path or host. */
+ async workspace(operation:string,input:unknown={},signal?:AbortSignal){
+  const {route,method,query,body}=botWorkspaceRequest(operation,input);
+  const result=await this.request(route,35000,{method,query,body},signal,true);
+  const params=input as Record<string,unknown>;
+  if(params.bot_id!==undefined&&result.bot_id!==params.bot_id)throw new BotsError(502,'Bot workspace answered for a different bot'+(method!=='GET'?'; outcome unknown':''),'invalid_receipt',method!=='GET');
+  const refuse=()=>{throw new BotsError(502,'Bot workspace did not return a valid operation receipt'+(method!=='GET'?'; outcome unknown':''),'invalid_receipt',method!=='GET');};
+  if(operation==='browser.status'&&typeof result.available!=='boolean')refuse();
+  if(operation==='browser.act'&&(result.action!==params.action||result.untrusted!==true||result.status!=='ready'))refuse();
+  if(operation==='browser.close'&&result.closed!==true)refuse();
+  if(operation==='browser.reset'&&(result.closed!==true||result.reset!==true))refuse();
+  const arrays:Record<string,string>={marketplace:'providers','connection.list':'connections','subscription.list':'subscriptions','subscription.poll':'receipts','memory.revisions':'revisions','team.templates':'templates','team.imports':'imports'};
+  if(Object.hasOwn(arrays,operation)&&!Array.isArray(result[arrays[operation]]))refuse();
+  if(operation.startsWith('memory.')&&operation!=='memory.revisions'&&(typeof result.text!=='string'||!Number.isSafeInteger(result.revision)||result.scope!=='bot:'+params.bot_id))refuse();
+  if(operation==='connection.invoke'&&(result.ok!==true||result.connection_id!==params.connection_id||result.operation_id!==params.operation_id))refuse();
+  if(['connection.get','connection.refresh','connection.disconnect'].includes(operation)&&((result.id??result.connection_id)!==params.connection_id||typeof result.status!=='string'))refuse();
+  if(operation==='connection.authorize'){
+   const connection=obj(result.connection);if(connection.bot_id!==params.bot_id||typeof connection.id!=='string'||!HEX.test(connection.id)||typeof result.authorization_url!=='string')refuse();
+  }
+  if(operation.startsWith('subscription.')&&!['subscription.list','subscription.poll'].includes(operation)&&(typeof result.id!=='string'||!HEX.test(result.id)||(params.subscription_id!==undefined&&result.id!==params.subscription_id)||(operation==='subscription.delete'?result.deleted!==true:typeof result.enabled!=='boolean')))refuse();
+  if(operation==='team.preview'&&(typeof result.plan_sha256!=='string'||!/^[a-f0-9]{64}$/.test(result.plan_sha256)||!Array.isArray(result.bots)))refuse();
+  if(operation==='team.import'&&(result.status!=='imported'||result.plan_sha256!==params.expected_plan_sha256||!Array.isArray(result.bots)))refuse();
+  if(['team.inspect','team.recover'].includes(operation)&&(result.import_id!==params.import_id||typeof result.status!=='string'))refuse();
+  const clean=sanitize(result) as Record<string,unknown>;
+  if(operation==='browser.artifact'){
+   if(result.artifact_id!==params.artifact_id||result.mime_type!=='image/png'||typeof result.base64!=='string'||result.base64.length>700000||!/^[A-Za-z0-9+/]*={0,2}$/.test(result.base64))throw new BotsError(502,'Invalid bot screenshot');
+   const bytes=Buffer.from(result.base64,'base64');
+   if(bytes.length>524288||bytes.length!==result.bytes||bytes.toString('base64')!==result.base64||!bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))||createHash('sha256').update(bytes).digest('hex')!==result.sha256)throw new BotsError(502,'Bot screenshot digest or size did not match');
+   clean.base64=result.base64;
+  }
+  if(operation==='team.export'||operation==='team.template'){
+   if(typeof result.bundle_json!=='string'||Buffer.byteLength(result.bundle_json,'utf8')>262144||redact(result.bundle_json)!==result.bundle_json||createHash('sha256').update(result.bundle_json).digest('hex')!==result.sha256)throw new BotsError(502,'Portable team exceeds its transport limit or fails integrity validation');
+   clean.bundle_json=result.bundle_json;
+  }
+  return clean;
+ }
+ private async request(route:string,ms:number,init:RequestInit={},signal?:AbortSignal,preserveErrors=false):Promise<Record<string,unknown>>{
   const url=new URL(route,this.origin);
   if(url.origin!==this.origin.origin||url.pathname!==route)throw new BotsError(400,'echoBots route refused');
   for(const [key,value] of Object.entries(init.query??{}))if(value!==undefined)url.searchParams.set(key,value);
   const method=init.method??(init.body===undefined?'GET':'POST');
+  const uncertain=preserveErrors&&method!=='GET',unknownNote=uncertain?'; outcome unknown':'';
   let response:Response;
   try{
    response=await fetch(url,{method,redirect:'error',headers:init.body===undefined?{accept:'application/json'}:{accept:'application/json','content-type':'application/json'},
     body:init.body===undefined?undefined:JSON.stringify(init.body),signal:AbortSignal.any([AbortSignal.timeout(ms),...(signal?[signal]:[])])});
   }catch(error){
-   if(signal?.aborted)throw new BotsError(499,'Interrupted');
-   if(error instanceof Error&&error.name==='TimeoutError')throw new BotsError(504,'echoBots service timed out after '+Math.round(ms/1000)+' s; outcome unknown');
-   throw new BotsError(502,'echoBots service unreachable at '+this.origin.origin);
+   if(signal?.aborted)throw new BotsError(499,'Interrupted'+unknownNote,'cancelled',uncertain);
+   if(error instanceof Error&&error.name==='TimeoutError')throw new BotsError(504,'echoBots service timed out after '+Math.round(ms/1000)+' s; outcome unknown','timeout',uncertain);
+   throw new BotsError(502,'echoBots service unreachable at '+this.origin.origin+unknownNote,'unavailable',uncertain);
   }
   const reader=response.body?.getReader();
   const chunks:Uint8Array[]=[];let size=0;
   try{
    if(reader)for(;;){
     const {done,value}=await reader.read();if(done)break;size+=value.length;
-    if(size>1048576)throw new BotsError(502,'echoBots service response exceeds the 1 MiB limit');
+    if(size>1048576)throw new BotsError(502,'echoBots service response exceeds the 1 MiB limit'+unknownNote,'invalid_receipt',uncertain);
     chunks.push(value);
    }
-  }catch(error){if(error instanceof BotsError)throw error;throw new BotsError(504,'echoBots service response was interrupted');}
+  }catch(error){if(error instanceof BotsError)throw error;throw new BotsError(504,'echoBots service response was interrupted'+unknownNote,'interrupted',uncertain);}
   finally{await reader?.cancel().catch(()=>undefined);}
   let parsed:unknown;
   try{parsed=JSON.parse(Buffer.concat(chunks).toString('utf8'));}catch{parsed=undefined;}
@@ -205,9 +261,12 @@ export class BotsClient {
     if(needs)detail+=' (needs: '+needs+')';
     if(typeof body.how==='string')detail+=' (how: '+redact(body.how).slice(0,200)+')';
    }
-   throw new BotsError(response.status===404||response.status===409?response.status:response.status<500?400:502,'echoBots service answered HTTP '+response.status+(code?': '+code:'')+detail,code);
+   const outcomeUnknown=body.outcome_unknown===true||body.outcome==='unknown'||(uncertain&&response.status>=500&&body.outcome_unknown!==false&&body.outcome!=='not_started'&&body.outcome!=='failed');
+   if(outcomeUnknown&&!detail.toLowerCase().includes('outcome unknown'))detail+='; outcome unknown';
+   const status=preserveErrors?response.status:response.status===404||response.status===409?response.status:response.status<500?400:502;
+   throw new BotsError(status,'echoBots service answered HTTP '+response.status+(code?': '+code:'')+detail,code,outcomeUnknown,body.cleanup?sanitize({cleanup:body.cleanup}):undefined);
   }
-  if(!parsed||typeof parsed!=='object'||Array.isArray(parsed))throw new BotsError(502,'echoBots service returned an unrecognized response');
+  if(!parsed||typeof parsed!=='object'||Array.isArray(parsed))throw new BotsError(502,'echoBots service returned an unrecognized response'+unknownNote,'invalid_receipt',uncertain);
   return parsed as Record<string,unknown>;
  }
  /** Service identity: refuses anything that is not healthy or does not report profile ECHO_ADK (same rule as the swarm profile check). */
@@ -263,10 +322,10 @@ export class BotsClient {
  resume(botId:string,signal?:AbortSignal){return this.transition(botId,'resume',signal);}
  async remove(botId:string,signal?:AbortSignal){
   const id=hexId(botId,'bot');
-  const reply=await this.request('/bots/'+id,this.timeouts.mutate,{method:'DELETE'},signal);
-  if(reply.bot_id!==id||reply.deleted!==true)throw new BotsError(502,'echoBots service did not confirm the deletion');
+  const reply=await this.request('/v2/bots/'+id,35000,{method:'DELETE'},signal,true);
+  if(reply.bot_id!==id||reply.deleted!==true)throw new BotsError(502,'echoBots service did not confirm the deletion; outcome unknown','invalid_receipt',true);
   debug('%j',{event:'prime_bots_action',action:'delete',botId:id});
-  return {botId:id,deleted:true};
+  return {botId:id,deleted:true,...(reply.cleanup?{cleanup:sanitize(reply.cleanup)}:{})};
  }
  /** Queues one bot turn. A paused bot still accepts the message and answers when resumed; the answer arrives through its run. */
  async message(botId:string,input:unknown,signal?:AbortSignal){

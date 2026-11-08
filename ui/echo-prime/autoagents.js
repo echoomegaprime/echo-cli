@@ -47,7 +47,18 @@
   return origin&&origin.by==='echo'?attr(el('span','Echo-made from your prompt','autoagent-badge'),{title:'Echo created this definition from a chat prompt'+(typeof origin.prompt_sha256==='string'?' (prompt '+origin.prompt_sha256.slice(0,12)+'…)':'')}):null;
  }
  function tierText(c){const t=num(c&&c.tier);return t===null?'tier unknown':'tier '+t;}
- function cadence(s){if(s&&typeof s.at==='string'&&typeof s.tz==='string'){const days=Array.isArray(s.weekdays)?s.weekdays.map(day=>['','Mon','Tue','Wed','Thu','Fri','Sat','Sun'][day]).filter(Boolean).join(', '):'days not reported';return str(s.at,5)+' '+str(s.tz,100)+' · '+days+' · '+(s.missed==='once'?'catch up once':'skip missed');}const e=s&&typeof s==='object'?num(s.every_s):null;return e===null?'on message only':e%60===0?'every '+(e/60)+' min':'every '+e+' s';}
+ function cadence(s){
+  if(s&&typeof s.tz==='string'){
+   const policy=s.missed==='once'?'catch up once':'skip missed';
+   if(typeof s.once_at==='string')return 'once · '+str(s.once_at,16)+' '+str(s.tz,100)+' · '+policy;
+   if(typeof s.cron==='string')return 'cron '+str(s.cron,100)+' · '+str(s.tz,100)+' · '+policy;
+   if(typeof s.at==='string'){
+    const days=Array.isArray(s.monthdays)?'days '+s.monthdays.join(', ')+(Array.isArray(s.months)?' · months '+s.months.join(', '):' each month'):Array.isArray(s.weekdays)?s.weekdays.map(day=>['','Mon','Tue','Wed','Thu','Fri','Sat','Sun'][day]).filter(Boolean).join(', '):'days not reported';
+    return str(s.at,5)+' '+str(s.tz,100)+' · '+days+' · '+policy;
+   }
+  }
+  const e=s&&typeof s==='object'?num(s.every_s):null;return e===null?'on message only':e%60===0?'every '+(e/60)+' min':'every '+e+' s';
+ }
  function row(label,value){const p=el('p',undefined,'autoagent-row');p.append(el('span',label,'autoagent-label'),typeof value==='string'?el('span',value):value);return p;}
  function statusBadge(status,values=STATUSES){const s=values.includes(status)?status:'unknown';return el('span',s==='unknown'?'status not reported':s,'autoagent-status autoagent-status-'+s);}
  function explain(){
