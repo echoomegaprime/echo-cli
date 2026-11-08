@@ -29,6 +29,14 @@ async function fixture(run:(f:{root:string;store:SessionStore;workspace:Workspac
   await run({root,store:new SessionStore(state),workspace:new Workspace(root,[state]),ui:root});
  }finally{rmSync(root,{recursive:true,force:true});rmSync(state,{recursive:true,force:true});}
 }
+it.each([undefined,180000])('advertises the validated %s/default host deadline through the authenticated status route without invoking a model',async turnTimeoutMs=>fixture(async f=>{
+ const invoke=broker([]),chat=new SharedChat({...f,invoke,admission,...(turnTimeoutMs===undefined?{}:{turnTimeoutMs})}),s=await startPrimeServer(new PrimeHub({capabilities:[],chat}),f.ui,0);
+ try{
+  const page=await fetch(s.url),cookie=page.headers.get('set-cookie')!.split(';')[0];
+  const response=await fetch(s.url+'/api/status',{headers:{cookie,origin:s.url,'x-prime-request':'1'}});
+  expect(response.status).toBe(200);expect((await response.json()).chat).toMatchObject({state:'attached',routing:false,turnTimeoutMs:turnTimeoutMs??120000});expect(invoke).not.toHaveBeenCalled();
+ }finally{await s.close();}
+}));
 it('round trips authenticated HTTP chat through shared read-only tools and resumes its durable session',async()=>fixture(async f=>{
  const invoke=broker([{action:'read',path:'info.txt'},{action:'final',content:'info.txt: calibration 714.'},{action:'final',content:'Still 714.'}]);
  const chat=new SharedChat({...f,invoke,admission}),s=await startPrimeServer(new PrimeHub({capabilities:[],chat}),f.ui,0);

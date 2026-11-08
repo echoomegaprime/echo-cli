@@ -57,11 +57,11 @@ export class SharedChat {
   const models=this.options.models,personality=this.options.personality?this.options.personality.settings():null;
   if(models){
    const auto=models.auto;
-   return {state:'attached',busy:this.busy,mode:'read-only',routing:true,defaultProvider:auto.enabled?AUTO_ID:models.defaultId,auto:auto.enabled,declineTo:auto.declineTo,personality,tools:this.options.tools?.enabled===true,botControl:this.options.autoagents?.status()??{configured:false,reason:'Bot controls are not attached to this chat'},
+   return {state:'attached',busy:this.busy,mode:'read-only',turnTimeoutMs:this.turnTimeoutMs,routing:true,defaultProvider:auto.enabled?AUTO_ID:models.defaultId,auto:auto.enabled,declineTo:auto.declineTo,personality,tools:this.options.tools?.enabled===true,botControl:this.options.autoagents?.status()??{configured:false,reason:'Bot controls are not attached to this chat'},
     detail:auto.enabled?'Model router attached; Auto (Echo decides) routes each turn by task class before the call. A vendor that declines is re-run on Qwen and labelled; an unavailable provider fails the turn'
      :'Model router attached; the selected provider answers and no other provider is used as a fallback'+(auto.declineTo==='qwen'?' (a vendor that declines is re-run on Qwen and labelled)':'')};
   }
-  return {state:'attached',busy:this.busy,mode:'read-only',routing:false,auto:false,personality,detail:'Host attached; pinned owner contract and coding.invoke are checked on every turn'};
+  return {state:'attached',busy:this.busy,mode:'read-only',turnTimeoutMs:this.turnTimeoutMs,routing:false,auto:false,personality,detail:'Host attached; pinned owner contract and coding.invoke are checked on every turn'};
  }
  private claim(requestId:string,signal?:AbortSignal){
   if(this.used.has(requestId))throw new Error('Chat request already submitted; no automatic replay');

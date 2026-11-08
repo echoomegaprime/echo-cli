@@ -60,6 +60,8 @@ The parent model invokes the tools through the normal action protocol:
 
 It may submit a batch with `action: "tools"` and a `calls` array. `OwnerBotTools` executes at most four calls from a batch, sequentially, and reports how many were omitted. Bot operations share the existing turn's tool allowance; registering them does not create a second allowance. Defaults are 12 tool calls, 60 seconds of tool time, and 6,000 characters per model-facing result, tunable through the reviewed tools configuration. Each owner operation is also bounded by the remaining allowance and a 30-second maximum. The chat itself defaults to a 120-second deadline and permits up to 30 model steps when bot tools are attached. An embedding host may set `SharedChatOptions.turnTimeoutMs` to an integer from 1,000 to 300,000 milliseconds; this uses the existing cancellation path and cannot be overridden in browser/model requests. These are admission and observation limits, not a guarantee that child work finishes during the parent turn.
 
+The authenticated `/api/status` response advertises that validated limit as `chat.turnTimeoutMs`. After its bounded status/admission check, the browser starts one response timer using the advertised host limit plus 5,000 milliseconds of transport grace. The default remains 125,000 milliseconds; a missing, non-integer, or out-of-range status value uses that default. Activity does not extend the timer, and Stop, account changes, and page exit still cancel the request. The browser never sends a deadline override to the host.
+
 For an immediate subtask, `delegate_task`:
 
 1. Validates a stable lowercase `task_key` of 1 to 64 letters, digits, dots, underscores, or hyphens, and task text of at most 9,600 characters.

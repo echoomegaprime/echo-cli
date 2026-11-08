@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Advertise the host's validated chat deadline to the browser, which adds five seconds of transport
+  grace after its status check. Longer configured turns are no longer cancelled by the old fixed
+  125-second browser timer; Stop and account-change cancellation remain immediate.
 - Let a parent wait up to 25 seconds for a run's terminal output/proof in one read-only status
   operation. Expiry remains incomplete; interrupted queries retain only the requested run ID.
   Polling cannot resume or resubmit work and remains within the existing 30-second operation cap.
