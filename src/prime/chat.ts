@@ -16,7 +16,11 @@ import {OwnerBotTools} from './bot-tools.js';
 import {PrimeAutonomyHooks,type BeforeTurn,type AutonomyActivity} from './autonomy-hooks.js';
 import {isPrimeRole,type PrimeRole,type RoleState} from './roles.js';
 /** Either the authenticated host path (invoke + admission) or a reviewed model router (Qwen on loopback, or a vendor CLI). `tools` = the always-on live tools (web, Wolfram, knowledge, skills, MCP) for router turns. */
-export interface SharedChatOptions {workspace:Workspace;store:SessionStore;invoke?:CodingInvoker;admission?:CodingAdmission;models?:ModelRouter;personality?:PersonalityForge;tools?:ToolKit;autonomyHooks?:PrimeAutonomyHooks;autoagents?:AutoAgents}
+export interface SharedChatOptions {
+ workspace:Workspace;store:SessionStore;invoke?:CodingInvoker;admission?:CodingAdmission;models?:ModelRouter;personality?:PersonalityForge;tools?:ToolKit;autonomyHooks?:PrimeAutonomyHooks;autoagents?:AutoAgents;
+ /** Host-only turn deadline. Defaults to 120000 ms; browser/model requests cannot override it. */
+ turnTimeoutMs?:number;
+}
 /** Per-request context the server binds: the Workspace personality catalog loader (owner cookie), never browser data. */
 export interface SubmitContext {personalities?:CatalogLoader}
 export interface PersonalityTag {id:string;name:string;reason:string;pinned:boolean}
@@ -40,9 +44,12 @@ const VERIFY_SYSTEM='You are reviewing your own previous answer for evidence. Yo
  * a vendor that DECLINES is re-run on Qwen and the reply is labelled (never for an outage); the
  * Personality Forge picks a personality per turn; every completed reply carries a claim check. */
 export class SharedChat {
- private busy=false;private used=new Set<string>();private options:SharedChatOptions;
+ private busy=false;private used=new Set<string>();private options:SharedChatOptions;private readonly turnTimeoutMs:number;
  constructor(options:SharedChatOptions){
   if(!options.models&&!(typeof options.invoke==='function'&&options.admission))throw new Error('Shared chat needs a model router or an authenticated host invoker with owner admission');
+  const timeout=options.turnTimeoutMs===undefined?120000:options.turnTimeoutMs;
+  if(typeof timeout!=='number'||!Number.isInteger(timeout)||timeout<1000||timeout>300000)throw new Error('turnTimeoutMs must be an integer between 1000 and 300000');
+  this.turnTimeoutMs=timeout;
   this.options={...options,...(options.admission?{admission:{...options.admission}}:{})};
  }
  get personality():PersonalityForge|undefined{return this.options.personality;}
@@ -113,7 +120,7 @@ export class SharedChat {
   const {workspace,store,invoke,admission}=this.options;
   const started=performance.now(),controller=new AbortController();
   const abort=()=>controller.abort();signal?.addEventListener('abort',abort,{once:true});
-  const timer=setTimeout(abort,120000);
+  const timer=setTimeout(abort,this.turnTimeoutMs);
   try{
    const sessionModel=router&&provider?(provider===AUTO_ID?AUTO_ID:router.sessionModel(provider,variant)):'qwen2.5-coder:7b';
    const session=data.sessionId?store.get(data.sessionId as string):store.create(workspace.root,sessionModel);

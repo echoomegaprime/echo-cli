@@ -8,17 +8,35 @@ import {Workspace} from '../src/code/workspace.js';
 import {SessionStore,type Message} from '../src/code/sessions.js';
 import {DEFAULT_MODELS,ModelRouter} from '../src/code/model-factory.js';
 import type {Action,Model} from '../src/code/model.js';
-import type {AutoAgents,ChatTool,DelegatedTask,ToolContext} from '../src/code/tools/autoagents.js';
+import {AutoAgents,type ChatTool,type DelegatedTask,type ToolContext} from '../src/code/tools/autoagents.js';
+import {AdkClient,type AdkRunStatus} from '../src/prime/agents.js';
 
 const BOT='a'.repeat(32),RUN='b'.repeat(32),MESSAGE='c'.repeat(32),HASH='d'.repeat(64);
 const dirs:string[]=[];
-afterEach(()=>{vi.restoreAllMocks();while(dirs.length)rmSync(dirs.pop()!,{recursive:true,force:true});});
+afterEach(()=>{vi.clearAllTimers();vi.useRealTimers();vi.restoreAllMocks();while(dirs.length)rmSync(dirs.pop()!,{recursive:true,force:true});});
 function fixture(){
  const root=mkdtempSync(join(tmpdir(),'prime-bot-chat-')),state=mkdtempSync(join(tmpdir(),'prime-bot-chat-state-'));dirs.push(root,state);
  return {workspace:new Workspace(root,[state]),store:new SessionStore(state)};
 }
 
 describe('owner bot tools in the real SharedChat turn loop',()=>{
+ it('gathers delayed output and proof through one bounded real run-status operation before the parent final',async()=>{
+  vi.useFakeTimers();
+  const f=fixture(),adk=new AdkClient(),autoagents=new AutoAgents({adk}),seen:Message[][]=[],started=Date.now();
+  const status=vi.spyOn(adk,'status').mockImplementation(async():Promise<AdkRunStatus>=>Date.now()-started<1250?{runId:RUN,status:'running',done:false,steps:[]}:{runId:RUN,status:'done',done:true,steps:[{kind:'final',ok:true,data:{text:'Actual delayed fixture evidence'}}],proof:{run_id:RUN,events_sha256:HASH,verdict:'PASS'}});
+  const actions:Action[]=[{action:'tool',tool:'bot_run_status',args:{run_id:RUN,wait_ms:25000}},{action:'final',content:'The worker returned its evidence and proof.'}];
+  const model:Model={next:vi.fn(async messages=>{seen.push(structuredClone(messages));return actions.shift()!;})};
+  const router=new ModelRouter({...DEFAULT_MODELS}),info={...router.turn('qwen').info(),answered:true};
+  vi.spyOn(router,'turn').mockReturnValue({model,answered:()=>info,info:()=>info});
+  const chat=new SharedChat({...f,models:router,autoagents}),pending=chat.submit({requestId:randomUUID(),prompt:'Gather the existing run and report its evidence.'});
+  await vi.advanceTimersByTimeAsync(1500);const result=await pending;
+  expect(result).toMatchObject({status:'completed',tools:{calls:1}});expect(status).toHaveBeenCalledTimes(4);
+  const evidence=seen[1].filter(message=>message.content.startsWith('UNTRUSTED TOOL RESULT')).map(message=>message.content).join('\n');
+  expect(evidence).toContain('Actual delayed fixture evidence');expect(evidence).toContain(HASH);expect(evidence).toContain(RUN);
+  expect(seen[0][0].content).toContain('wait_ms:25000');
+  expect(result.tools?.events.filter(event=>event.type==='tool_result')).toEqual([expect.objectContaining({result:expect.objectContaining({runId:RUN,status:'done',output:'Actual delayed fixture evidence',proof:expect.objectContaining({events_sha256:HASH})})})]);
+  expect(result.delegatedTasks).toEqual([]);expect(vi.getTimerCount()).toBe(0);
+ });
  it('delegates, gathers actual run evidence into parent messages, and returns dedicated task receipts',async()=>{
   const f=fixture(),seen:Message[][]=[],contexts:ToolContext[]=[];
   const queued={kind:'delegated_task',tool:'delegate_task',taskKey:'release-check',task:'Check release readiness',agent:'release-scout',botId:BOT,runId:RUN,messageId:MESSAGE,eventId:'task:release-check',status:'queued',done:false,duplicate:false,untrusted:true,summary:'Queued'};

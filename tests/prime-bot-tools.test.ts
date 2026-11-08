@@ -72,6 +72,19 @@ describe('OwnerBotTools public execution contract',()=>{
   await tools.execute(action('fixture_read'));await tools.execute(action('list_bots'));const exhausted=await tools.execute(action('list_bots'));
   expect(baseRun).toHaveBeenCalledOnce();expect(ownerRun).toHaveBeenCalledOnce();expect(tools.used).toBe(2);expect(tools.budgetExhausted).toBe(true);expect(JSON.stringify(exhausted.result)).toMatch(/budget/i);
  });
+ it('preserves a cancelled status query target without fabricating admission or caching the read',async()=>{
+  const controller=new AbortController(),runId='f'.repeat(32);let entered!:()=>void;
+  const ready=new Promise<void>(resolve=>{entered=resolve;});
+  const read=vi.fn<ChatTool['run']>().mockImplementationOnce(async()=>{entered();return await new Promise<never>(()=>{});}).mockResolvedValueOnce({kind:'bot_run',runId,status:'done',done:true,output:'Fresh result'});
+  const tools=new OwnerBotTools({tools:()=>[definition('bot_run_status',read,true)]},ctx);
+  const pending=tools.execute(action('bot_run_status',{run_id:runId,wait_ms:25000}),undefined,controller.signal);
+  await ready;controller.abort();const result=(await pending).result;
+  expect(result).toMatchObject({kind:'bot_run',runId,status:'unavailable',done:false,state:'unknown'});
+  expect(result).not.toHaveProperty('proof');expect(result).not.toHaveProperty('output');expect(result).not.toHaveProperty('messageId');expect(result).not.toHaveProperty('eventId');
+  expect(tools.delegatedTasks).toEqual([]);
+  expect((await tools.execute(action('bot_run_status',{run_id:runId,wait_ms:25000}))).result).toMatchObject({runId,status:'done',output:'Fresh result'});
+  expect(read).toHaveBeenCalledTimes(2);expect(tools.used).toBe(2);expect(tools.delegatedTasks).toEqual([]);
+ });
  it('preserves durable admission IDs at the 30-second boundary without waiting or replaying the mutation',async()=>{
   vi.useFakeTimers();
   try{

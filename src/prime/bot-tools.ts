@@ -75,7 +75,10 @@ export class OwnerBotTools implements TurnExecutor {
    // before bot creation. All uncertain failures retain their admission cache.
    const notStarted=!controller.signal.aborted&&call.tool==='make_bot'&&error instanceof AutoagentError&&error.status===404&&error.code==='agent_not_found';
    if(notStarted)onNotStarted?.();
-   const result=admission?{...admission,state:'unknown',error:{code:'status_unavailable',message:'Task admission was recorded, but the current run outcome is unavailable. Inspect this run before retrying.'},summary:'Task admission is recorded. Current run status is unavailable; use these IDs to inspect it. No work was resubmitted.'}:{ok:false,error:errorText(error),state:controller.signal.aborted?'unknown':notStarted?'not_started':'failed'};
+   // A cancelled read retains only its requested target. It is not an observed
+   // admission and must never be collected as a delegated task receipt.
+   const queriedRun=controller.signal.aborted&&call.tool==='bot_run_status'&&typeof call.args.run_id==='string'&&/^[a-f0-9]{32}$/.test(call.args.run_id)?call.args.run_id:undefined;
+   const result=admission?{...admission,state:'unknown',error:{code:'status_unavailable',message:'Task admission was recorded, but the current run outcome is unavailable. Inspect this run before retrying.'},summary:'Task admission is recorded. Current run status is unavailable; use these IDs to inspect it. No work was resubmitted.'}:queriedRun?{kind:'bot_run',untrusted:true,runId:queriedRun,status:'unavailable',done:false,state:'unknown',error:{code:'status_unavailable',message:'The status query was interrupted or timed out. This ID identifies the requested run; its current state was not observed.'}}:{ok:false,error:errorText(error),state:controller.signal.aborted?'unknown':notStarted?'not_started':'failed'};
    this.collect(result);
    emit({type:'tool_result',tool:call.tool,request_id:requestId,sha256,at:new Date().toISOString(),result:compact(result,this.budget.resultChars),duration_ms:Date.now()-started,evidence:{status:'failed'}});
    return result;

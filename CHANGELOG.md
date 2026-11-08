@@ -4,6 +4,11 @@
 
 ### Fixed
 
+- Let a parent wait up to 25 seconds for a run's terminal output/proof in one read-only status
+  operation. Expiry remains incomplete; interrupted queries retain only the requested run ID.
+  Polling cannot resume or resubmit work and remains within the existing 30-second operation cap.
+- Allow an embedding host to configure the chat turn deadline from 1 to 300 seconds, retaining
+  the 120-second default and existing cancellation path. Browser/model requests cannot override it.
 - Reuse verified capability metadata within one delegation, with a 30-second expiry, to avoid
   exhausting admission time on repeated catalog reads. Later operations re-read the catalog;
   current bot state, leases, spending limits and the worker's SDK authorization still apply.
