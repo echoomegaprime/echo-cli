@@ -144,6 +144,22 @@ describe('Prime OAuth callback edge privacy', () => {
     expect(after.cookies).toHaveLength(2);
   });
 
+  it.each([
+    ["const remote='https://agent.echo-op.com.evil.test';", "const remote='https://agent.echo-op.com.evil.test';"],
+    ["const remote='https://agent.echo-op.com@evil.test';", "const remote='https://agent.echo-op.com@evil.test';"],
+    ["const remote='https://evil.test/path/https://agent.echo-op.com';", "const remote='https://evil.test/path/https://agent.echo-op.com';"],
+    ["const text='prefix https://agent.echo-op.com suffix';", "const text='prefix https://agent.echo-op.com suffix';"],
+    ["const remote='https://agent.echo-op.com';", "const remote='/agent-api';"],
+    ['const remote="https://agent.echo-op.com";', 'const remote="/agent-api";'],
+  ])('rewrites only a complete quoted source literal: %s', async (body, expected) => {
+    const upstream = () => new Response(body, { headers: { 'content-type': 'application/javascript' } });
+    const before = await invoke(baseline, '/app.js?asset=1', 'GET', upstream);
+    const after = await invoke(worker, '/app.js?asset=1', 'GET', upstream);
+    expect(after).toEqual(before);
+    expect(after.body).toBe(expected);
+    expect(after.requests[0].url).toBe('https://desktop-web.echo-op.com/app.js?asset=1');
+  });
+
   it.each([404, 502])('preserves upstream callback status %s and body', async status => {
     const result = await invoke(worker, '/bots-oauth-callback.html?code=synthetic&state=synthetic', 'GET',
       () => new Response('Upstream response', { status, headers: { 'cache-control': 'no-store' } }));

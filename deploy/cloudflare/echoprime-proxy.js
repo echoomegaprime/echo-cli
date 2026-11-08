@@ -60,10 +60,8 @@ export default {
 
     if (url.pathname.endsWith("/app.js") || contentType.includes("javascript")) {
       let body = await resp.text();
-      if (body.includes("https://agent.echo-op.com")) {
-        body = body.split("'https://agent.echo-op.com'").join("'/agent-api'")
-                   .split('"https://agent.echo-op.com"').join('"/agent-api"');
-      }
+      body = body.split("'https://agent.echo-op.com'").join("'/agent-api'")
+                 .split('"https://agent.echo-op.com"').join('"/agent-api"');
       const headers = rebuild(resp);
       headers.delete("content-length");
       return new Response(body, { status: resp.status, headers });

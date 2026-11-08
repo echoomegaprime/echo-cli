@@ -18,6 +18,10 @@ Other paths and methods retain their existing routing and query behavior. Login
 routing, the agent API prefix, JavaScript origin rewriting, response headers,
 status codes and separate Set-Cookie headers are unchanged.
 
+The JavaScript response rewriter directly replaces complete quoted origin
+literals. It does not need a preliminary substring condition, and it does not
+use response text to validate or choose request destinations.
+
 This limits exposure in tunnel and origin request URLs. Cloudflare receives the
 original incoming URL before this code executes, so Worker invocation logs and
 zone logging need separate verification. This change does not establish provider
