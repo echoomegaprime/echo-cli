@@ -18,7 +18,7 @@ export class OwnerBotTools implements TurnExecutor {
  constructor(auto:Pick<AutoAgents,'tools'>,private context:ToolContext,private base?:TurnExecutor,private budget:ToolsBudget={...DEFAULT_TOOLS.budget}){
   this.context={...context};this.budget={...budget};
   const definitions=auto.tools();
-  if(definitions.length>32||new Set(definitions.map(t=>t.name)).size!==definitions.length)throw new Error('Invalid owner bot tool registry');
+  if(definitions.length>35||new Set(definitions.map(t=>t.name)).size!==definitions.length)throw new Error('Invalid owner bot tool registry');
   this.definitions=new Map(definitions.map(t=>[t.name,t]));
  }
  get used(){return this.calls+(this.base?.used??0);}

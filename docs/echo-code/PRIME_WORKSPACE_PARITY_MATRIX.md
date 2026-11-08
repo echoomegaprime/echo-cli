@@ -1,6 +1,6 @@
 # Prime ↔ Workspace feature parity matrix
 
-Status: living document. Created 2026-11-04 on `agent/prime-workspace-parity-20261104` (base 8672697, PR #6).
+Status: historical implementation and gap log. Created 2026-11-04 on `agent/prime-workspace-parity-20261104` (base 8672697, PR #6). Preserve the dated observations below; they are not a current deployment audit. For the later bot browser, connected-app, memory, schedule and portability implementation, see [Echo bot workspaces](ECHO_BOT_WORKSPACES.md) and the [v2 bot contract](ECHO_BOTS_API_V2.md). Source support remains separate from SDK registration, provider consent and production activation.
 Reference Workspace source: `echo-omnipresence-runtime` @ `8de99d98521787c9580c84e1645dfb5b7aadfd88`, `SYSTEMS/echo_qwen_chat` (the running 8768 copy is identical except older `accounts.py`, `accounts_http.py`, `AUTH.md`).
 
 Terms: **present** same label and behaviour · **hidden** exists but only shown once a Workspace backend is configured and the account is approved · **reduced** partly there · **missing** absent · **extra** Prime-only.
@@ -8,7 +8,7 @@ Refs: WS = `SYSTEMS/echo_qwen_chat` (`static/index.html` and `style.css` are min
 
 Gating: `workspace.js:434-435` enables Workspace features only when `/api/session` reports `workspaceConfigured:true` and the account is approved; owner-only items use `[data-owner-only]` (`workspace.js:47-52`). Without a backend Prime is the older ECHO Code / Creative Studio shell.
 
-Update this file as each row lands. Visual comparison (screenshots) is tracked in `docs/echo-code/parity/` once captured.
+Keep this dated history when assessing earlier gaps. Current bot behavior belongs in the linked workspace and API guides. Historical visual comparisons are tracked in `docs/echo-code/parity/`.
 
 ## 1. Shell, header, node status
 

@@ -1,5 +1,87 @@
 // Generated from echo-adk/echo_adk/sdk/{operations,workspace}.py. The owner callback is not an SDK capability.
 export const BOT_WORKSPACE_CONTRACT = {
+ "continuity.status": {
+  "method": "GET",
+  "path": "/v2/bots/{bot_id}/continuity",
+  "schema": {
+   "type": "object",
+   "additionalProperties": false,
+   "properties": {
+    "bot_id": {
+     "type": "string",
+     "pattern": "^[0-9a-f]{32}$"
+    }
+   },
+   "required": [
+    "bot_id"
+   ],
+   "minProperties": 0
+  },
+  "readOnly": true,
+  "query": []
+ },
+ "continuity.capture": {
+  "method": "POST",
+  "path": "/v2/bots/{bot_id}/continuity/capture",
+  "schema": {
+   "type": "object",
+   "additionalProperties": false,
+   "properties": {
+    "bot_id": {
+     "type": "string",
+     "pattern": "^[0-9a-f]{32}$"
+    },
+    "request_ref": {
+     "type": "string",
+     "pattern": "^[A-Za-z0-9_.:-]{1,100}$"
+    },
+    "title": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 200
+    },
+    "detail": {
+     "type": "string",
+     "minLength": 1,
+     "maxLength": 4000
+    }
+   },
+   "required": [
+    "bot_id",
+    "request_ref",
+    "title",
+    "detail"
+   ],
+   "minProperties": 0
+  },
+  "readOnly": false,
+  "query": []
+ },
+ "continuity.reconcile": {
+  "method": "POST",
+  "path": "/v2/bots/{bot_id}/continuity/reconcile",
+  "schema": {
+   "type": "object",
+   "additionalProperties": false,
+   "properties": {
+    "bot_id": {
+     "type": "string",
+     "pattern": "^[0-9a-f]{32}$"
+    },
+    "capture_id": {
+     "type": "string",
+     "pattern": "^[0-9a-f]{32}$"
+    }
+   },
+   "required": [
+    "bot_id",
+    "capture_id"
+   ],
+   "minProperties": 0
+  },
+  "readOnly": false,
+  "query": []
+ },
  "marketplace": {
   "method": "GET",
   "path": "/v2/bots/marketplace",
