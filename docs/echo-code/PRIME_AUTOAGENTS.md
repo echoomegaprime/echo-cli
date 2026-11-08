@@ -1,172 +1,232 @@
-# Prime autonomous agents and bots (autoagents)
+# Prime agents, bot controls, and delegated tasks
 
-Status: built 2026-11-04 on `agent/prime-autoagents-20261104` (base f421473). Drafting: first draft by Gemini (`wrap.sh draft gemini`, `gemini-4-argon-medium`, second run after a 150 s print timeout), cross-checked against a GPT draft (`wrap.sh draft gpt`, `gpt-6-astra`), then reviewed and corrected against the code by the integrating builder. Facts below are the implemented behaviour; the real `echo-adk-api` was not called.
+Updated 2026-11-07 against the current implementation. This document describes the source contract and automated test coverage. Configuration, a responding local API, catalog discovery, successful task execution, and deployment certification are separate states; none is inferred from the others.
 
-## 1. What it does
+Echo Prime exposes **19 owner-only chat tools** for discovering capabilities, creating agents and bots, managing their lifecycle, and delegating bounded independent subtasks. A parent chat turn can delegate useful work, read the child's actual run result, and use that evidence in its answer. Recurring work uses a persistent bot and a schedule. A trivial question can still be answered directly.
 
-Autoagents implements the Commander order of 2026-11-04: "Have it so Echo autonomously makes ADKs and echoBots for tasks from the user's prompts."
-Echo Prime is a local web UI and Node/TypeScript server whose chat model can call three owner-only tools from `src/code/tools/autoagents.ts`: `find_capabilities`, `make_agent` and `make_bot`.
-These tools look up live capabilities through the SDK broker, create validated Echo ADK agent definitions through the loopback `echo-adk-api`, and create paused echoBots with dedicated capability leases.
-Zero-cost bots using only tier 0 or tier 1 capabilities are resumed by Echo; higher-tier, untiered or non-free bots stay paused behind an approval card in the chat.
-Prime runs headless with no silent fallback, never handles tokens, never shares a lease between bots, and redacts every string before it reaches the UI.
+The main implementation is [AutoAgents](../../src/code/tools/autoagents.ts), registered in the real chat loop by [OwnerBotTools](../../src/prime/bot-tools.ts) and [SharedChat](../../src/prime/chat.ts). The browser renders returned records through [autoagents.js](../../ui/echo-prime/autoagents.js). The local service contract is [ECHO_BOTS_API_V2.md](ECHO_BOTS_API_V2.md); authenticated catalog transport is documented in [PRIME_SDK_BRIDGE.md](PRIME_SDK_BRIDGE.md).
 
-## 2. When the model uses it
+## 1. Configuration and owner admission
 
-`AUTOAGENTS_PROMPT_FRAGMENT` (exported from the module; the brain slice includes it in the system prompt with one line) tells the model, in substance: use the tools when the user asks for work that is ongoing, recurring, scheduled, delegated or multi-step, or explicitly asks for an agent or a bot; call `find_capabilities` first, then `make_agent`, then `make_bot`; never use them for a one-shot question or work that finishes in the current turn; use only capability ids the catalog returned and never invent or alter one; prefer the free local lane and the smallest budget; bots start paused and the tool result says whether Echo resumed it or the owner must approve; always finish by summarising what was built; when a tool refuses, say so plainly and do not retry with different ids. The exact text:
+The normal CLI startup path creates `AutoAgents` when the reviewed configuration supplies `adk`, `bots`, and an SDK broker. Router-based chat additionally needs `models`, and `tools.enabled: false` prevents AutoAgents from being attached to chat at startup. Direct Agents and echoBots views use their separately configured clients. See [commands.ts](../../src/prime/commands.ts).
 
-> Autonomous agents and bots (owner only). When the user asks for work that is ongoing, recurring, scheduled, delegated or multi-step (for example "every morning", "keep watching", "each time", "take over", "monitor", "report weekly") or explicitly asks for an agent or a bot, build it: call find_capabilities to see the live catalog, call make_agent (name, fleet role, purpose, exact capability ids, skills, instruction, max_steps, budget), then call make_bot for that agent (schedule, mode, instruction, daily_cost_cap_usd). Never use make_agent or make_bot for a one-shot question, a single answer or work you can finish in this turn. Use only capability ids returned by find_capabilities; never invent, guess or alter an id, and when a needed capability is not in the catalog say so instead of substituting one. Prefer the free local lane (qwen-local, cost 0) and the smallest budget that fits. Bots start paused; the make_bot result says whether Echo resumed it or whether the owner must approve it first. Always finish by summarising what you built: agent name, role, capabilities with their tiers, schedule, budget, and whether the bot is running or waiting for approval. If a tool refuses (unknown capability, not the owner, service off), tell the user plainly and do not retry with different ids.
+`AutoAgents.status()` reports whether its required clients are configured; it makes no network request. `bots_status` reads the actual v2 bot health endpoint and reports `configured` separately from `available`, including returned features, connections, and budget accounting. A library host may construct `AutoAgents` with only a bot client to inspect, pause, stop, or delete existing work. Operations requiring catalog verification still refuse when ADK or SDK access is absent. The normal CLI startup requires all three clients before registering the chat service.
 
-One-shot questions never qualify and are answered directly without any autoagent tool call. The module enforces its own rules regardless of what the model does: an invented id is refused by `make_agent`, and a non-owner is refused by every tool.
+The [Prime server](../../src/prime/server.ts) admits the request through its session boundary and, when Workspace authentication is configured, `requireOwner`. `SharedChat` then supplies the tool context:
 
-## 3. Pipeline
+```ts
+{owner: true, prompt, sessionId, requestId, signal}
+```
 
-1. `find_capabilities({query})` returns live catalog rows (id, tier as the catalog reports it, scope, registered, health, description) through the SDK broker so the model selects real `echo.*` ids. Read-only; up to 20 rows; the query is at most 150 characters (the broker's own limit).
-2. `make_agent({name, role, purpose, capabilities[], skills?, schedule?, instruction?, max_steps?, budget?})` resolves every capability through `brokerCapabilityLookup(sdk)` (`sdk.read` of the exact id), applies the drafting rules below, checks idempotency, and creates the agent with `POST /agents` (or returns the existing one).
-3. `make_bot({agent?, name?, mode?, schedule?, instruction?, daily_cost_cap_usd?})` verifies the agent with `GET /agents/{name}`, re-resolves its capabilities, creates the bot with `POST /bots` (paused by contract, lease = exactly the agent's capability ids) and applies the auto-resume gate; it resumes the bot with `POST /bots/{id}/resume` only when the gate allows.
-4. Each `make_*` call returns an `AutoagentBuilt` record (`{kind:"autoagent", tool, promptSha256, agent, bot?, summary}`). The tool loop attaches these to the chat turn result under `autoagents` (an array); `chat.js` then calls `window.EchoPrimeAutoagents.render(result)` and one card is appended per record. The `summary` is plain text the model can relay.
+These values come from the admitted host turn. Tool arguments cannot supply owner status, a parent identity, credentials, another service URL, or an approval grant. The chat request parser rejects an `owner` field. Every AutoAgents tool handler checks `ctx.owner === true` before making network or catalog requests, and `OwnerBotTools` checks admission again. A programmatic host embedding these classes must enforce its own caller admission before constructing this context.
 
-## 4. Drafting rules
+Browser cards and the Agents/echoBots views also inspect the cached account state. Signed-out visitors and non-owner members receive an explanation instead of bot requests. UI admission is an additional check; the server remains the authorization boundary.
 
-| Field | Rule |
+## 2. Exact tool catalog
+
+All tools declare `ownerOnly: true`. The authoritative schemas and descriptions are exported by `autoagentTools(service)`.
+
+| Tool | Arguments and behavior |
 | --- | --- |
-| `name` (agent) | Slugified by `slugName`: NFKD, lowercase, non-alphanumerics to `-`, trimmed, at most 63 characters; must then match `^[a-z0-9][a-z0-9-]{1,62}$` or the call is refused. `"Queue Scout!"` becomes `queue-scout`. |
-| `role` | Required; one of `FLEET_ROLES`: `commander`, `architect`, `observer`, `builder`, `publisher`, `enhancer`, `researcher`. |
-| `purpose` | Required, at most 400 characters. Folded into the agent `instruction` as `Purpose: <purpose>`, a blank line, then the optional `instruction` (the `EchoAgent` contract has no purpose field and the service refuses unknown keys). The card shows it as "Purpose". |
-| `capabilities` | 1 to 64 exact ids matching `^echo\.[a-z0-9_.]+$`, deduplicated. Each is resolved with `sdk.read`: the detail must answer for the same id, be `registration_state: "registered"`, and its health must not be `red`, `orphaned` or `unregistered`; the tier is read from the detail (`tier` or `danger_tier` on the capability, its metadata, the record or the record metadata), never from the search row, whose missing tier the broker coerces to 0. Any unknown id refuses the whole call with `Unknown capability id: <ids>. Only ids present in the live catalog can be granted; nothing was created.` A malformed id is refused before the catalog is asked. |
-| `skills` | Optional; at most 32 strings matching `^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$` (Agent-Skills directory names), deduplicated. |
-| `schedule` (agent) | Optional: `null`, `{every_s >= 60}` or a whole number of minutes. Not an `EchoAgent` field, so it is never sent to the service; it is carried on the built record (the card shows it) and becomes the default schedule of `make_bot` for the same prompt. |
-| `instruction` (agent) | Optional text; with the purpose prefix the total is at most 12000 characters. |
-| `lane` | Always `{node: "forge", model: "qwen-local"}`: the free local lane, cost 0 by default. |
-| `budget` | `{max_calls, max_cost_usd, max_wall_s}` clamped by `clampAdkBudget` to the service caps 120 calls, 5 USD, 4800 s; missing keys take the `adk` config defaults (40, 0, 900). A non-numeric value is refused, not guessed. |
-| `max_steps` | Clamped to 1..24; default 12. |
-| `origin` | `{by: "echo", prompt_sha256: <normalised prompt hash>, created_at: <ISO time>}`. |
-| `agent` (bot) | Defaults to the agent `make_agent` created for this prompt; must match the slug regex; `GET /agents/{name}` must succeed (a 404 refuses with "create it with make_agent first", code `agent_not_found`). An agent with no capabilities is refused (no lease can be drafted). |
-| `name` (bot) | Defaults to the agent name; at most 64 characters. |
-| `mode` (bot) | `personal` or `team`; default `personal`. |
-| `schedule` (bot) | `null`, `{every_s >= 60}` or a whole number of minutes (60 means every hour); when omitted, the schedule given to `make_agent` for this prompt applies, else `null` (on message only). |
-| `daily_cost_cap_usd` | Defaults to the `bots` config `defaultBudget.max_cost_usd` (0 unless raised); must be between 0 and 5. |
-| `lease` (bot) | `{scopes: <exactly the agent's capability ids>, ttl_s: 3600, max_uses: 100}`; each bot owns its own lease (spec invariant R3). The model cannot supply a lease: `lease` is an unknown argument for both tools. |
-| `instruction` (bot) | Optional, at most 12000 characters, forwarded as the bot's standing instruction. |
+| `find_capabilities` | Read-only catalog search by `query` of at most 150 characters; returns up to 20 exact IDs with reported tier, scope, registration, health, and description. |
+| `make_agent` | Creates or recovers an agent from `name`, `role`, `purpose`, and `capabilities`; accepts optional `skills`, `instruction`, `schedule`, `max_steps`, `budget`, and `task_key`. An explicit `capabilities: []` means reasoning only. |
+| `make_bot` | Creates or recovers a bot for `agent`, or the agent just made for the current task. Optional `name`, `mode`, `schedule`, `instruction`, `daily_cost_cap_usd`, and `task_key`. New bots start paused and pass the automatic-resume checks below. |
+| `bots_status` | Read-only configuration and live local-service health, feature, connection, and budget report. No arguments. |
+| `list_bots` | Read-only bot discovery, with `limit` from 1 to 50, default 20. |
+| `get_bot` | Read-only configuration and lifecycle state for an exact `bot_id`. |
+| `update_bot` | Applies a partial `patch` to `bot_id`. Requires paused, drained work; automatic changes can narrow leases and stay within configured spending defaults. |
+| `pause_bot` | Pauses future dispatch for `bot_id`; an active run may finish. |
+| `resume_bot` | Resumes `bot_id` only after checking its current lease, live capability tiers, and configured automatic spending limits. |
+| `stop_bot` | Pauses future dispatch and requests cancellation of current queued and running work for `bot_id`. An external call already in flight may finish. |
+| `delete_bot` | Deletes eligible bot-owned state for `bot_id`; active bot/group work must be stopped and finished first. Shared transcripts, aggregate service accounting, and external provider records have separate retention. |
+| `message_bot` | Queues one `text` message, at most 12,000 characters, on `bot_id` after execution admission checks. A paused bot stays paused. Use `delegate_task` when durable parent-task recovery is needed. |
+| `deliver_bot_event` | Delivers `bot_id`, `source`, stable `event_id`, and `text` through the idempotent event API. This does not authenticate an external webhook sender. |
+| `bot_messages` | Read-only bounded transcript for `bot_id`, with optional `since` message ID and `limit` from 1 to 50, default 20. Returned text is untrusted. |
+| `bot_run_status` | Reads fresh status, successful final output when present, error, spending, and proof fields for `run_id`. Optional integer `wait_ms` from 0 to 25,000 defaults to one immediate read; a positive wait polls read-only and returns early on terminal status. Queued/running is incomplete; gated/failed is not success. |
+| `stop_bot_run` | Requests cooperative stop for one `run_id`. Read status afterward to determine the outcome. |
+| `create_bot_group` | Admits a bounded task with `name`, 2 to 6 distinct `bots`, and `prompt`, after checking every member. The service reserves members and executes sequentially; this explicit group task may use paused members. |
+| `bot_group_status` | Read-only lifecycle and bounded shared transcript for `group_id`. |
+| `delegate_task` | Admits an immediate subtask using stable `task_key`, precise `text`, and exactly one of `bot_id`, `agent`, or `agent_definition`; optional `bot_name` and `wait_ms` from 0 to 5,000. Returns real receipt IDs and the observed status/result. |
 
-Service facts honoured (echoomegaprime/echo-adk PR #1, head 1056da9): a capability must already be in the service's default-deny registry; when the catalog knows an id the registry lacks, the service answers 4xx `invalid` and Prime passes that refusal through (`AdkError.detail.http` keeps the raw status) without substituting anything. `gated` is only a run status, never an HTTP error code. `PUT /agents/{name}` answers 404 for a missing agent and never creates one. `DELETE /agents/{name}` answers 409 `invalid` while a bot references the agent. An unknown agent on `POST /runs` answers 404.
+The wrapper dispatches the seven read-only tools afresh instead of reusing a previous tool result. `update_bot`, `pause_bot`, `resume_bot`, `stop_bot`, `delete_bot`, and `stop_bot_run` also bypass the wrapper's mutation cache so a later lifecycle change or a resolved conflict can be observed. Other identical creation/admission calls reuse the prior result within the parent turn; argument values remain case-sensitive. One verified pre-admission exception is `make_bot` returning the typed `agent_not_found` error: no bot mutation started, so the parent may create that agent and retry. Arbitrary errors and uncertain outcomes remain cached.
 
-## 5. Gating policy
+## 3. Chat execution and bounded delegation
 
-Every bot is created paused by the service contract.
-Auto-resume is requested only when every capability of the agent reports a numeric tier of at most 1 (`AUTOAGENT_LIMITS.autoResumeTier`) and `daily_cost_cap_usd` is at most the configured bots default (`defaultBudget.max_cost_usd`, 0 unless the reviewed config raises it, so by default only free bots are resumed by Echo).
-The gate fails closed: a capability with no reported tier counts as not auto-approvable; a tier of 2 or higher, or a cap above the default, keeps the bot paused.
-A paused result carries `bot.approval = {required: true, reasons: [...]}` with one reason per cause, for example `echo.shell.run is tier 2 (auto-resume allows tier 0 or 1)`, `echo.odd.cap has no reported tier (treated as not auto-approvable)`, `daily cost cap $1.50 exceeds the configured default of $0.00`. The card renders these in an approval box with an "Approve and resume" button; resuming from the card is the owner's explicit approval and goes through the normal owner-only bot route.
-If the service refuses the resume, the bot stays paused, the refusal is recorded as a reason (`resume was refused: ... (the bot stays paused)`) and nothing is retried.
-An existing bot returned by a re-ask is never resumed or paused by the tool; its current status is reported.
+The parent model invokes the tools through the normal action protocol:
 
-## 6. Idempotency
+```json
+{"action":"tool","tool":"list_bots","args":{"limit":20}}
+```
 
-`promptSha256(prompt)` trims the prompt and collapses whitespace runs to one space (case kept), then hashes with SHA-256; a re-ask with different spacing hashes the same, a re-worded prompt does not.
-`make_agent` first consults an in-memory map (prompt hash to `{agent, botId, schedule}`) for the process, then scans `GET /agents` for a definition with `origin.by === "echo"` and `origin.prompt_sha256` equal to the hash; a match is returned with `existing: true` and no `POST /agents` is made, even when the model proposed another name.
-When `POST /agents` answers 409 (the name exists), the named agent is returned as existing only if its `origin.prompt_sha256` equals this hash; otherwise the call refuses with code `name_taken` ("An agent named X already exists and was not made from this request; choose another name.") rather than inventing a variant.
-`make_bot` returns the bot remembered for the prompt, else any listed bot whose `agent` equals the agent name (the `Bot` contract has no origin field), with `existing: true` and no second `POST /bots`.
+It may submit a batch with `action: "tools"` and a `calls` array. `OwnerBotTools` executes at most four calls from a batch, sequentially, and reports how many were omitted. Bot operations share the existing turn's tool allowance; registering them does not create a second allowance. Defaults are 12 tool calls, 60 seconds of tool time, and 6,000 characters per model-facing result, tunable through the reviewed tools configuration. Each owner operation is also bounded by the remaining allowance and a 30-second maximum. The chat itself defaults to a 120-second deadline and permits up to 30 model steps when bot tools are attached. An embedding host may set `SharedChatOptions.turnTimeoutMs` to an integer from 1,000 to 300,000 milliseconds; this uses the existing cancellation path and cannot be overridden in browser/model requests. These are admission and observation limits, not a guarantee that child work finishes during the parent turn.
 
-## 7. Owner-only and admission
+The authenticated `/api/status` response advertises that validated limit as `chat.turnTimeoutMs`. After its bounded status/admission check, the browser starts one response timer using the advertised host limit plus 5,000 milliseconds of transport grace. The default remains 125,000 milliseconds; a missing, non-integer, or out-of-range status value uses that default. Activity does not extend the timer, and Stop, account changes, and page exit still cancel the request. The browser never sends a deadline override to the host.
 
-All three tools declare `ownerOnly: true`. The host passes `ctx = {owner, prompt, signal?}` where `owner` comes from its real admission (the `/api/chat` route already sits behind `requireOwner`; the tool checks again), never from model text or the browser.
-When `ctx.owner !== true` the call refuses before anything is requested: HTTP-shaped 403, code `owner_only`, message "Only the owner can create agents and bots. Ask the primary owner to create this for you."
-When the Prime config lacks `adk`, `bots` or `sdk`, `status()` names the missing sections and every tool refuses with 503, code `off`; the hub offers no tools at all.
-In the UI a signed-in member or a visitor never sees a card: `render()` appends one explanation ("Agents and bots are owner-only ... Nothing was created for your account") and fetches nothing. The Agents and echoBots views keep their own owner gating.
+For an immediate subtask, `delegate_task`:
 
-## 8. Routes and client methods
+1. Validates a stable lowercase `task_key` of 1 to 64 letters, digits, dots, underscores, or hyphens, and task text of at most 9,600 characters.
+2. Selects exactly one target: an existing bot, an existing agent, or a bounded new agent definition. A new task bot is personal, on-message only, with the configured default daily cap and a lease drawn from the agent's exact allowlist.
+3. Re-reads the bot, verifies its current lease and live capability metadata, and applies the automatic execution gate. A refusal before event admission returns an approval blocker without inventing run/message/event IDs.
+4. Delivers the task as an idempotent event with source `echo-delegation`. Task text is labeled untrusted and includes the task fingerprint. No task text becomes an owner grant or a standing-instruction override.
+5. Resumes a newly created, eligible bot after durable admission. An existing paused bot stays paused; the receipt says its task is queued until an explicit `resume_bot` or owner UI action succeeds.
+6. Attempts a bounded status read. `wait_ms` defaults to zero, which still permits one short read; a positive value polls for at most five seconds. It returns the observed state, output/proof when available, or the admitted IDs plus an observation error. It does not wait indefinitely.
 
-| Component | Method or route | Contract |
-| --- | --- | --- |
-| `AutoAgents` (`src/code/tools/autoagents.ts`) | `findCapabilities`, `makeAgent`, `makeBot`, `tools()`, `status()` | The tool operations, the `ChatTool[]` in registration shape, and config readiness. Options: `adk`, `bots`, `caps` (a `CapabilityLookup`), `events` (sink for tests), `now`. |
-| `AdkClient` (`src/prime/agents.ts`) | `createAgent(def)` | `POST /agents` (201). Validated by `parseAgentDefinition` (name regex, cap-id regex, skills, lane, budget clamp, `max_steps` clamp, origin). The reply must answer for the same name. |
-| `AdkClient` | `updateAgent(name, def)` | `PUT /agents/{name}` (200); the body name must equal the path name; 404 when missing, never creates. |
-| `AdkClient` | `deleteAgent(name)` | `DELETE /agents/{name}`; requires `{name, deleted: true}`; 409 `invalid` while a bot references the agent is passed through. |
-| `AdkError.detail.http` | | The service's raw status (409, 422, ...) next to the mapped Prime status (400/404/502) and the contract code. |
-| `PrimeHub` (`src/prime/hub.ts`) | `adkCreateAgent`, `adkUpdateAgent`, `adkDeleteAgent`, `autoagentTools()`, `autoagentsStatus()` | Facade; `autoagentTools()` is `[]` when the feature is off. |
-| Server (`src/prime/server.ts`) | `POST /api/prime/adk/agents` | Owner-only JSON POST, 201. |
-| Server | `POST /api/prime/adk/agents/:name/update` | Owner-only JSON POST, 200. |
-| Server | `POST /api/prime/adk/agents/:name/delete` | Owner-only JSON POST, 200 (a POST, like bots, so the Origin check applies; `GET` on these paths is 405). |
-| `commands.ts` | | Builds `AutoAgents` only when `adk`, `bots` and the SDK broker all exist. |
+At most six independent task keys may be admitted per parent request in the current AutoAgents process. Parent tracking is bounded to 256 contexts and expires after 24 hours; it is not a durable global fan-out quota. Service queue limits, event receipts, leases, and budget reservations remain separate backend controls.
 
-## 9. UI
+The parent gathers unfinished work with `bot_run_status({run_id, wait_ms:25000})` while its remaining turn allowance permits it. The optional wait checks the same run at a 500-millisecond cadence, stops on terminal status, and counts as one parent tool operation. The local wait deadline includes network reads and sleeps. At expiry, an observed queued/running snapshot is returned with `waitExpired:true`; it is still incomplete. A failed read, interruption, or expiry before any response returns `status:"unavailable"`, `done:false`, the requested run ID, and an observation error, with no claimed output or proof. This queried ID is not evidence that a new task was admitted. Waiting never resumes a bot, delivers another event, or retries a mutation. Omitted/zero `wait_ms` preserves the existing immediate read and error behavior.
 
-`ui/echo-prime/autoagents.js` and `autoagents.css` render the cards; `chat.js` calls `window.EchoPrimeAutoagents.render(result)` after the assistant line when `result.autoagents` is an array (one additive line).
-Card titles: "Echo built an agent and a bot for this", "Echo built an agent for this", "Echo already had an agent and a bot for this", "Echo already had an agent for this", and after a delete "Echo removed this agent (and its bot)".
-A card shows the agent name, role, purpose, capabilities with tier badges (`tier 0` ... `tier 3`, `tier unknown`), lane, budget, max steps, schedule, the bot name, mode, status badge (`paused`, `idle`, `running`, `error`), daily cap, and the approval box with its reasons when the gate kept the bot paused. The "Echo-made from your prompt" badge appears when `origin.by === "echo"`.
-Buttons: Resume (labelled "Approve and resume" when the gate paused it) or Pause, Open in echoBots (writes `localStorage` `echo-prime-bot-v1` and calls `EchoPrimeBots.open()`, which reopens the remembered bot), Open agent (`EchoPrimeAgents.open()`), Delete (inline two-step: "Confirm delete" / "Cancel", no `window.confirm`; the bot is deleted first, then the agent definition; a failure reports how far it got and makes no retry). Every request carries the Prime headers and the owner's CSRF header; a 401/403 invalidates only a session that claimed owner.
-`agents.js` (agent cards) and `bots.js` (bot cards) show "Echo-made from your prompt" when a record carries `origin.by === "echo"` (one additive line each).
-`echo-orb-satellites` is dispatched on `window` as a `CustomEvent` (a plain `Event` with `detail` when `CustomEvent` is absent) with `{source, action: created|resume|pause|delete, botId, status}` when a newly created bot is rendered, when the echoBots create form creates one, and on resume, pause and delete; the orb module may listen for it.
+Returned output enters the real tool-result messages available to the parent model and session. The orchestration prompt prefers bounded waiting over rapid immediate reads so pending work does not consume the call allowance without time to progress. Each wait remains subject to the existing 30-second operation cap and the remaining shared allowance. Worker output, memory, transcripts, and proofs are untrusted evidence; they cannot authorize new capabilities or further delegation. The worker runtime does not receive these parent orchestration tools for recursive bot creation.
+
+If an operation times out or is interrupted, the wrapper reports an unknown outcome where appropriate. The parent must inspect the returned IDs or recover the same task identity before retrying. A queued receipt, a running status, or a proof object alone is not a successful task result.
+
+Immediately after durable event admission, a host-only callback records the returned bot, run,
+message and event IDs before resume or result reads begin. If the existing 30-second operation
+deadline or cancellation fires afterward, those IDs remain in the tool result and delegated card,
+with `status: "unavailable"`, `done: false`, and no claimed output or proof. The wrapper does not
+wait indefinitely or send a recovery mutation. Before admission is observed, it invents no IDs.
+
+## 4. Identity, duplicate admission, and recovery
+
+Modern task identity combines the host's `sessionId` and `requestId` with `task_key`. Different keys identify independent subtasks, even when their text matches. Reusing a key for changed task arguments is a conflict. `wait_ms` affects observation only and is excluded from the task-content fingerprint.
+
+The wrapper deduplicates identical creation/admission calls within one parent turn, including a configured model reroute. AutoAgents also serializes concurrent admissions, remembers created workers, and recovers them from service records. Agent origins carry the identity hash in the existing `origin.prompt_sha256` field; delegation-created agent and bot names include deterministic identity suffixes. Despite the legacy field name, the modern hash includes the parent/task context, not just the prompt text. Older programmatic calls without session/request IDs or a task key retain normalized-prompt identity: whitespace is collapsed, case is preserved, and SHA-256 is applied.
+
+Delegated event IDs are `delegate-<task identity hash>`. The service scopes idempotency to `(bot_id, source, event_id)` and checks the canonical content hash. An identical replay returns the same message/run IDs and current status; changed content returns 409. This also allows a fresh AutoAgents instance to recover an admitted task when it has the same host identity and arguments. If status reading fails after admission, the receipt remains useful; another task must not be created to compensate for a missing read.
+
+**A new parent request or session changes the identity.** In a later chat turn, inspect a known run with `bot_run_status`; merely reusing a task key under a new request does not recover the old task. Retention is bounded: the v2 service retains receipts for at least 24 hours and while their run is unfinished, subject to its documented capacity and pruning rules. A receipt whose run was removed reports `unavailable`. This is durable recovery within that contract, not permanent global exactly-once execution. See [event delivery and recovery](ECHO_BOTS_API_V2.md).
+
+`make_agent` and `make_bot` also recover matching definitions instead of blindly creating duplicates. Existing agents are matched through remembered identity or origin; a name collision belonging to another task returns 409. Existing bots are matched through remembered identity or the applicable agent/name relationship. Returning an existing bot does not implicitly resume, pause, or reconfigure it. Use explicit task keys to pair an agent and bot when several independent definitions are created in the same parent request.
+
+## 5. Capabilities, reasoning workers, and execution gates
+
+Nonempty capability lists must contain exact IDs discovered through the live SDK catalog. Before granting them, `brokerCapabilityLookup` reads each exact ID, requires verified registration, and refuses red/orphaned/unregistered health. The SDK bridge verifies registration using detail plus an exact match in the active search result: detail alone can describe inactive entries. Missing, malformed, or invalid tiers remain `null`; they are never coerced to tier 0. `resolveAll` accepts integer tiers 0 through 3 and treats anything else as unknown.
+
+One `delegate_task` invocation reuses that verified metadata across its agent creation and admission
+checks; each entry expires 30 seconds after lookup starts. The snapshot is private to that invocation
+and is never supplied by model arguments or reused by a later operation. Bot state, agent allowlists,
+leases and spend are read again before admission, and the worker's SDK gate independently validates
+each actual capability call. This removes repeated catalog latency without granting execution scope.
+
+The paired current ADK service can resolve a capability missing from its local registry through its authenticated `GateBroker`: it verifies exact active membership and metadata, then registers that definition locally. Absence from the builtin registry is therefore not an unconditional refusal for a verified SDK capability. Unknown, inactive, unhealthy, conflicting, or incomplete metadata still fails closed. Catalog discovery does not prove that the configured credential has execution scope or that a downstream handler/provider works. It does not register new global SDK capabilities or manufacture scope names.
+
+An explicit `capabilities: []` is supported for a pure reasoning worker, with `lease.scopes: []`. Such a worker can use its configured model and supplied context but cannot call external capabilities. This is not a substitute when the requested task requires an unavailable external tool: that missing capability must be reported. An empty list still needs a working model provider and remains subject to run and spend budgets.
+
+New bots start paused. `make_bot` requests automatic resume only when all declared capabilities have verified numeric tier 0 or 1 and the daily cap does not exceed `bots.defaultBudget.max_cost_usd`, which defaults to zero. Unknown or higher tiers, or a larger daily cap, produce approval reasons. A refused resume is reported; it does not trigger a fallback.
+
+Automatic message/event admission, delegation, `resume_bot`, and group admission additionally inspect the current bot lease and agent run allowance. Lease scopes must be inside the agent allowlist; the daily cap and effective run-cost allowance must fit the configured automatic defaults. A proposed delegated agent's run budget is checked before creation. Model-generated grants, tier claims, or approval flags are not accepted. With an empty capability list there is no capability-tier blocker, but the same cost and service checks still apply.
+
+Owner UI actions use the normal protected control routes. An approval button requests an owner action; it does not override the backend's policy, credential scopes, HMAC requirements, provider authorization, or budget enforcement. Trusted SDK signing is configured separately as described in [PRIME_SDK_BRIDGE.md](PRIME_SDK_BRIDGE.md), never supplied through tool arguments.
+
+## 6. Definition, schedule, and budget limits
+
+| Field | Current behavior |
+| --- | --- |
+| Agent name | Normalized to a lowercase slug of 2 to 63 characters. Delegation adds a deterministic identity suffix to generated worker names. |
+| Role | `commander`, `architect`, `observer`, `builder`, `publisher`, `enhancer`, `researcher`; delegation defaults to `researcher`. |
+| Purpose/instruction | Purpose is at most 400 characters and is folded into the agent instruction. Combined instruction is at most 12,000 characters. |
+| Capabilities/skills | 0 to 64 exact capability IDs, deduplicated; skill names are bounded to 32 and validated by the ADK client. Installed skill availability is a separate service configuration. |
+| Lane | New agents use `forge` / `qwen-local`. There is no automatic paid-model fallback. |
+| Run budget | Uses configured ADK defaults, initially 40 calls, $0, and 900 seconds; service/client ceilings are 120 calls, $5, and 4,800 seconds. Numeric values are clamped; malformed values are refused. |
+| Steps | Default 12, bounded to 1 through 24 for these tools. |
+| Bot name/mode | Name at most 64 characters; mode `personal` or `team`. |
+| Bot daily cap | $0 through $5, defaulting to the configured bots allowance. Automatic tools apply the stricter configured-spend checks above. |
+| Initial bot lease | Exact agent capability IDs, TTL 3,600 seconds, and maximum 100 uses; an empty list grants no capabilities. The model cannot supply arbitrary creation grants. |
+
+Schedules support on-message only (`null`), intervals of 60 through 604,800 seconds, or an IANA local-time calendar:
+
+```json
+{"at":"09:00","tz":"America/Chicago","weekdays":[1,2,3,4,5],"missed":"skip"}
+```
+
+Weekdays are ISO Monday 1 through Sunday 7. `missed` is `skip` or `once`; calendar schedules default to `skip`. The backend skips nonexistent daylight-saving local times and runs an ambiguous local time once. `make_agent` and `make_bot` additionally accept an integer number of minutes, 1 through 10,080, as interval shorthand. The agent's schedule is planning metadata retained for the paired `make_bot`; it is not sent as an unsupported agent-definition field. Bot update requests use the validated schedule object or `null`. See [the v2 schedule contract](ECHO_BOTS_API_V2.md).
+
+The service's per-run reservation and settlement rules enforce the actual spending boundary. The UI displays returned spent, reserved, and available values and labels the service-wide total as a dated snapshot. A configured maximum or a zero-cost default is not evidence of incurred cost, remaining quota, or a completed run.
+
+## 7. Editing and lifecycle controls
+
+`update_bot` accepts a nonempty partial patch containing only `name`, `mode`, `schedule`, `instruction`, `plugins`, `daily_cost_cap_usd`, and `lease`. Agent identity, bot identity, origin, and memory identity are immutable. Omitted fields retain their values. Clears are explicit: `schedule: null`, `instruction: null` or an empty string, `plugins: []`, and `lease.scopes: []`.
+
+The service requires a paused bot, no active run or group reservation, and an empty pending inbox. It returns 409 on conflict; neither the tool nor editor silently pauses or cancels work to make an edit succeed. A partial lease retains omitted limits. Automatic chat edits may only narrow existing scopes, cannot increase lease TTL or maximum uses, and cannot set the daily cap above the configured automatic allowance. The owner editor is still subject to the service's validation and the agent allowlist.
+
+`pause_bot` stops future dispatch. `stop_bot` additionally requests cancellation of captured queued and active work. Its receipt includes `stopRequested` and the affected run IDs; a returned `running` status is truthful while an in-flight provider step finishes. Stop is not synchronous proof that the bot has halted. Read the bot/run state before editing or deleting. New messages may still queue while paused.
+
+Deletion is confirmed by the service and is refused while active work or group reservations remain. Bot-owned records follow the v2 deletion contract; aggregate service spend, previously shared transcripts, backups, and external provider records must not be described as erased by a single bot deletion.
+
+## 8. Returned evidence and browser controls
+
+The real `SharedChat` reply keeps two distinct collections:
+
+- `autoagents`: `kind: "autoagent"` records returned by `make_agent` and `make_bot`.
+- `delegatedTasks`: `kind: "delegated_task"` receipts returned by `delegate_task`.
+
+Ordinary status/control results also enter the parent's tool-result messages. The collections are receipts actually returned during the turn, not fabricated summaries of work the model says it performed. The wrapper preserves them across configured model rerouting and tells the next model that pending receipts are incomplete, untrusted evidence.
+
+A delegated receipt includes `taskKey`, task text, agent, bot ID, lifecycle state, `done`, `duplicate`, `untrusted: true`, and a summary. Accepted delivery supplies `runId`, `messageId`, and `eventId`; refusal before admission omits those IDs and supplies approval reasons. Output, error, and bounded proof fields are included when returned by the service. `done: true` can also accompany a gated or failed outcome, so callers must inspect `status` and errors rather than equate `done` with success. The service's successful final-step output is used by the parent result reader.
+
+The chat renderer combines the two collections, validates their shapes, and keeps the latest delegated receipt per run/task identity within the reply. Creation cards show the agent, actual capability tiers, lane, budget, schedule, bot state, and any approval reasons. Delegated cards show queued/running/gated/done/failed/unavailable states, returned output, errors, receipt IDs, and proof fields. Proof text is displayed as returned evidence, not as independent production certification.
+
+`Refresh result` reads `/api/prime/adk/runs/:id` without resubmitting work. `Open run` opens the shipped Agents view and watches that exact run; `Open in echoBots` selects that exact bot. echoBots provides Edit, Pause/Resume, Stop, chat, group, and deletion controls. Editing fetches the current record and sends only changes; a conflict preserves the draft. Stop keeps the distinction between a cancellation request and confirmed completion. Every displayed worker string is treated as text, and returned data is redacted and bounded.
+
+## 9. HTTP/client integration
+
+Browser mutations use protected JSON POST routes, with the normal Prime Origin/session/Workspace checks. The loopback clients use fixed service routes, redirect refusal, bounded responses, and timeout reporting. A v2 health failure or missing contract is not silently retried as a different mutation.
+
+| Prime route | Local service operation |
+| --- | --- |
+| `GET /api/prime/bots/health` | `GET /v2/health` with contract version 2 verification |
+| `GET /api/prime/bots/list`, `GET /api/prime/bots/:id` | `GET /v2/bots`, `GET /v2/bots/:id` |
+| `POST /api/prime/bots/create` | `POST /v2/bots` |
+| `POST /api/prime/bots/:id/update` | `PUT /v2/bots/:id` |
+| `POST /api/prime/bots/:id/stop` | `POST /v2/bots/:id/stop` |
+| `POST /api/prime/bots/:id/events` | `POST /v2/bots/:id/events` |
+| `POST /api/prime/bots/:id/pause`, `/resume` | Corresponding v2 bot transition |
+| `POST /api/prime/bots/:id/message`, `GET /api/prime/bots/:id/messages` | Existing bot message/transcript routes |
+| `POST /api/prime/bots/:id/delete` | `DELETE /bots/:id` |
+| `POST /api/prime/adk/agents` | `POST /agents` |
+| `POST /api/prime/adk/agents/:name/update`, `/delete` | `PUT /agents/:name`, `DELETE /agents/:name` |
+| `GET /api/prime/adk/runs/:id`, `POST /api/prime/adk/runs/:id/stop` | `GET /runs/:id`, `POST /runs/:id/stop` |
+
+The [BotsClient](../../src/prime/bots.ts) and [AdkClient](../../src/prime/agents.ts) validate request bodies and receipt identities. They preserve upstream 409 conflicts; `AdkError.detail.http` also retains the raw upstream status. Requests do not smuggle model-supplied tokens or grants into the bot service. SDK transport credentials are configured separately on the host.
 
 ## 10. Examples
 
-### Example 1: recurring morning report (free bot, auto-resumed)
+### Immediate reasoning subtask
 
-Prompt: "Every morning at 7 check the FORGE build queue and summarise what is stuck." `echo.knowledge.search` and `echo.context.recall` stand for registered ids that the catalog reports as tier 0 and tier 1.
-
-```json
-[
-  { "tool": "find_capabilities", "args": { "query": "build queue" } },
-  { "tool": "make_agent", "args": { "name": "Queue Scout", "role": "observer", "purpose": "Watch the FORGE build queue each morning", "capabilities": ["echo.knowledge.search", "echo.context.recall"], "skills": ["echo-observer-power"], "schedule": 1440, "instruction": "Report stuck builds only." } },
-  { "tool": "make_bot", "args": { "name": "Queue scout" } }
-]
-```
-
-Outcome: agent `queue-scout` (lane `qwen-local` on `forge`, budget 40 calls / $0.00 / 15 min, 12 steps, `origin.by: "echo"`) is created; the bot is created paused with lease scopes exactly those two ids, every tier is at most 1 and the cap ($0.00) is within the default, so Echo resumes it: status `idle`, every 1440 min. The card says "Echo built an agent and a bot for this" with a Pause button.
-
-### Example 2: a task that needs `echo.shell.run` (tier 2, paused for approval)
-
-Prompt: "Run the nightly shell cleanup." The catalog reports `echo.shell.run` as tier 2.
+For a useful independent review of information already supplied by the owner, the model can submit:
 
 ```json
-[
-  { "tool": "find_capabilities", "args": { "query": "shell" } },
-  { "tool": "make_agent", "args": { "name": "shell-scout", "role": "builder", "purpose": "Clean stale temporary build directories nightly", "capabilities": ["echo.knowledge.search", "echo.shell.run"] } },
-  { "tool": "make_bot", "args": { "schedule": { "every_s": 86400 } } }
-]
+{
+  "action": "tool",
+  "tool": "delegate_task",
+  "args": {
+    "task_key": "review-schedule-assumptions",
+    "text": "Review the supplied schedule assumptions for contradictions. Use only the information in this task; list unresolved questions.",
+    "agent_definition": {
+      "name": "schedule-reviewer",
+      "role": "researcher",
+      "purpose": "Review supplied schedule assumptions without external tools",
+      "capabilities": [],
+      "budget": {"max_calls": 4, "max_cost_usd": 0, "max_wall_s": 120}
+    },
+    "wait_ms": 1000
+  }
+}
 ```
 
-Outcome: agent and bot are created; the bot stays `paused` with `approval: {required: true, reasons: ["echo.shell.run is tier 2 (auto-resume allows tier 0 or 1)"]}` and no resume is requested. The card shows the approval box and "Approve and resume"; the owner's click is the approval.
+The host supplies owner and parent identity. The result may be queued, running, terminal, or blocked. The parent uses the returned `runId` with `bot_run_status` before relying on completion. This example grants no network, shell, browsing, or other external capability and assumes a working configured local model.
 
-### Example 3: a one-shot question (no tool call)
+### Recurring work with real capabilities
 
-Prompt: "How does Echo Prime clamp agent budgets?"
+First call `find_capabilities` with the task's needs and inspect the returned exact IDs. Create an agent with those verified IDs and a stable task key. Create its bot using the same task key and a calendar such as `09:00 America/Chicago` on weekdays. Do not substitute example names for real catalog IDs, infer a tier from an ID, or replace a missing required capability with an empty list. The returned bot record determines whether automatic resume succeeded or owner review is required.
 
-```json
-[]
-```
+### Stop, verify, then edit
 
-Outcome: no autoagent tool runs, `result.autoagents` is absent, no card is rendered; the model answers in plain chat text.
+Read `get_bot`, call `stop_bot` if current work must be cancelled, and inspect the affected runs until the service confirms the bot is paused and drained. Then use `update_bot` with only the intended patch, for example `{"instruction":null,"lease":{"scopes":[]}}`. A 409 means outstanding work still prevents editing. No automatic retry, permission expansion, or paid fallback is implied.
 
-## 11. Debug events
+## 11. Evidence and remaining boundaries
 
-With `NODE_DEBUG=echo-prime` (or the injectable `events` sink used by the tests), the module logs:
+Automated coverage includes [delegation and lifecycle HTTP fixtures](../../tests/prime-delegation.test.ts), [the real parent chat loop](../../tests/prime-bot-chat.test.ts), [owner wrapper budgets and duplicate handling](../../tests/prime-bot-tools.test.ts), [bot client validation](../../tests/prime-bots.test.ts), and the [bot](../../tests/prime-bots-ui.test.ts) and [delegated-card](../../tests/prime-autoagents-ui.test.ts) UI suites. These verify returned evidence propagation, owner refusal before network access, stable task recovery across AutoAgents instances, explicit empty capabilities, spend/tier blockers, state controls, and no duplicate admission after failed observation. SDK contract and signer tests are documented separately in [PRIME_SDK_BRIDGE.md](PRIME_SDK_BRIDGE.md).
 
-- `prime_autoagent_agent_created` (`name`, `role`, `capabilities`, `tiers`, `promptSha256`)
-- `prime_autoagent_agent_existing`
-- `prime_autoagent_bot_created` (`botId`, `agent`, `scheduled`, `dailyCapUsd`, `status`)
-- `prime_autoagent_bot_resumed`
-- `prime_autoagent_bot_paused_for_approval` (`reasons`)
-- `prime_autoagent_bot_existing`
-- `prime_autoagent_refused` (`reason`: `owner_only`, `off`, `unknown_capability`, `name_taken`, `agent_not_found`)
+Fixture success does not establish that a live API key has the necessary scopes, a local model is installed and healthy, privileged handlers are usable, or a deployed service is running this revision. `configured: true` establishes attached clients; v2 health reports the local service's own state. Runtime operation receipts and separate deployment evidence are needed for stronger claims. Local memory readiness does not establish shared Crystal/ECF delivery, and the bot service does not create a per-bot browser or OS sandbox. Installed skills require their own host configuration and do not automatically execute bundled scripts.
 
-The client adds `prime_adk_agent_creating`, `prime_adk_agent_created`, `prime_adk_agent_updated`, `prime_adk_agent_deleted`. The UI logs `[echo.autoagents]` debug entries (`render`, `resume`, `pause`, `delete`, `satellites`, `invalidated`).
-
-## 12. Integration contract and what is not done here
-
-Exports of `src/code/tools/autoagents.ts`: class `AutoAgents` (`makeAgent`, `makeBot`, `findCapabilities`, `tools()`, `status()`), `autoagentTools(service)` returning `ChatTool[]` (`{name, description, inputSchema, ownerOnly: true, run(args, ctx)}`), `AUTOAGENTS_PROMPT_FRAGMENT`, `FLEET_ROLES`, `AUTOAGENT_LIMITS`, `promptSha256`, `slugName`, `brokerCapabilityLookup`, `AutoagentError`, and the types `ToolContext`, `ChatTool`, `CapabilityLookup`, `AutoagentBuilt`.
-
-For the tool loop and the brain slice (one line each):
-
-1. Tools: `tools.push(...hub.autoagentTools())` (or `...service.tools()`).
-2. Prompt: include `AUTOAGENTS_PROMPT_FRAGMENT` in the system prompt.
-3. Context: call `run(args, {owner, prompt, signal})` with `owner` from the host's real admission and `prompt` as the user's turn text.
-4. Result: append each `make_*` return value to the turn result's `autoagents` array; tool errors (`AutoagentError`, `AdkError`, `BotsError`) carry a plain message for the model and an HTTP-shaped `status` for hosts that map them.
-
-Not done here: the turn-loop wiring in `src/code/agent.ts` (the `Action` set and the local model's JSON schema still know only list/read/search/propose/final) and the system-prompt assembly in `src/prime/chat.ts` belong to the sibling tools and brain slices; until they land, the card cannot appear in a live chat, although every route, client method, view badge and the card itself work. The real `echo-adk-api` was not called; the tier source in the capability detail (`tier` / `danger_tier`) was inferred from the broker and `hub.prepare`, so a detail without either field resolves to `tier: null` and keeps the bot paused.
-
-## 13. Tests
-
-- `tests/prime-autoagents.test.ts` (25 tests): definition validation and clamps; `createAgent` / `updateAgent` / `deleteAgent` against a stateful stand-in echo-adk-api with the real service's shapes (409 on an existing name, 422 `invalid` for an id outside the default-deny registry, PUT 404 never creating, DELETE 409 while a bot references the agent); Prime routes (201/200, 405 on GET, 503 when off, CSRF refusals forward nothing, assets served); tools, status and the prompt fragment; owner-only refusal; drafting (slug, role, purpose folding, lane, clamps, origin); unknown and malformed capability ids; role/purpose/argument refusals; idempotency in-process and from the listing; 409 handling (existing vs name taken); redaction; auto-resume with an exact lease; tier 2 and unreported tier paused with reasons; cap above the default; bot idempotency and schedule carry-over; unknown agent and bad arguments; refused resume; `find_capabilities`; `brokerCapabilityLookup` tier source and fail-closed cases; the service registry refusal passed through.
-- `tests/prime-autoagents-ui.test.ts` (14 tests): card contents and tier badges; approval box; agent-only, existing and paused variants; Resume/Pause requests, headers, status and orb events; refused resume; two-step delete (bot then agent, Cancel, partial failure, agent-only); Open in echoBots / Open agent and the missing-view notes; orb event on created bots only and without `CustomEvent`; member and visitor explanation; malformed payloads ignored; `badge()`; the badge in `agents.js` and `bots.js` and the orb call from the echoBots create form.
-
-Gates on 2026-11-04: `npm run lint` 0 · `npx tsc --noEmit` 0 · `npx vitest run --maxWorkers=1` all files passed · `npm run build` 0. The real `echo-adk-api` was not called.
+This implementation has no measured quality ranking against Grok Bots or another product. Such a comparison needs a defined task set, matched permissions/resources, recorded outcomes, cost/latency measurements, and a reproducible evaluation. No deployment, live privileged execution, or comparative benchmark is certified by this document.

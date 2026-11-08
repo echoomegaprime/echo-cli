@@ -46,7 +46,7 @@
    const ws=options&&typeof options==='object'&&options.workspace&&typeof options.workspace==='object'?options.workspace:null;
    const author=ws?'Echo Prime':'ECHO Code',turnSession=ws?(typeof ws.sessionId==='string'?ws.sessionId:undefined):sessionId;
    const controller=new AbortController(),current=generation;active=controller;busy(true);
-   const timer=setTimeout(()=>controller.abort(),125000);let submitted=false,strip=null,asked=null;
+   let timer=setTimeout(()=>controller.abort(),125000),submitted=false,strip=null,asked=null;
    const ensureStrip=()=>{if(!strip&&activity)strip=activity.start(activityHost(),{label:author});return strip;};
    try{
     const status=await api('status',undefined,controller.signal);
@@ -61,6 +61,10 @@
     // files itself); the Workspace's attachment set is never forwarded as upload ids.
     const attached=ws?(Array.isArray(ws.attachments)?ws.attachments.filter(id=>typeof id==='string'):[]):[...(window.EchoPrimeWorkspace?.bridge?.state?.attachments||window.EchoPrimeLibrary?.standaloneAttachments?.()||[])];
     const prompt=ws&&typeof ws.prompt==='string'&&ws.prompt.trim()?ws.prompt:text,pick=pickOf();
+    // The host owns the actual turn limit. Start one response allowance after
+    // the bounded status check; neither activity nor later reads extend it.
+    const advertised=status.chat.turnTimeoutMs,hostTimeout=typeof advertised==='number'&&Number.isInteger(advertised)&&advertised>=1000&&advertised<=300000?advertised:120000;
+    clearTimeout(timer);timer=setTimeout(()=>controller.abort(),hostTimeout+5000);
     const result=await api('chat',{requestId:crypto.randomUUID(),prompt,...(turnSession?{sessionId:turnSession}:{}),...(attached.length?{attachments:attached}:{}),...(window.EchoPrimeModels?.provider()?{provider:window.EchoPrimeModels.provider()}:{}),...(window.EchoPrimeModels?.model?.()?{model:window.EchoPrimeModels.model()}:{}),...(rolePin!==undefined?{rolePin}:{})},controller.signal);
     if(current!==generation)return {cancelled:true};
     clearTimeout(deepTimer);orb('replying');orbEvent('echo-orb-pulse',{strength:1});

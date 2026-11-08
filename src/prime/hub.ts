@@ -31,7 +31,7 @@ const debugOwnerResponse=debuglog('echo-prime');
 export type Json=Record<string,unknown>;
 export interface Tool {name:string;description?:string;inputSchema:Json}
 export interface McpConnection {listTools():Promise<Tool[]>;call(name:string,args:Json,options?:{timeoutMs?:number}):Promise<unknown>}
-export interface Capability {id:string;registered:boolean;health:string;scope?:string;tier?:number;category:string;description:string}
+export interface Capability {id:string;registered:boolean;health:string;scope?:string;tier?:number|null;category:string;description:string}
 export interface SdkBroker {
  search(query:string):Promise<Capability[]>;
  read(capability:string):Promise<unknown>;
@@ -294,17 +294,22 @@ export class PrimeHub {
  async botsList(signal?:AbortSignal){return this.botsClient().list(signal);}
  async botsGet(botId:string,signal?:AbortSignal){return this.botsClient().get(botId,signal);}
  async botsCreate(input:unknown,signal?:AbortSignal){return this.botsClient().create(input,signal);}
+ async botsUpdate(botId:string,input:unknown,signal?:AbortSignal){return this.botsClient().update(botId,input,signal);}
  async botsAction(botId:string,action:string,signal?:AbortSignal){
   const bots=this.botsClient();
   if(action==='pause')return bots.pause(botId,signal);
   if(action==='resume')return bots.resume(botId,signal);
+  if(action==='stop')return bots.stop(botId,signal);
   if(action==='delete')return bots.remove(botId,signal);
   throw new BotsError(404,'Unknown echoBots action');
  }
  async botsMessage(botId:string,input:unknown,signal?:AbortSignal){return this.botsClient().message(botId,input,signal);}
+ /** An event is untrusted inbox data. The existing owner guard remains the authorization boundary. */
+ async botsEvent(botId:string,input:unknown,signal?:AbortSignal){return this.botsClient().event(botId,input,signal);}
  async botsMessages(botId:string,options:{since?:unknown;limit?:unknown},signal?:AbortSignal){return this.botsClient().messages(botId,options,signal);}
  async botsGroupCreate(input:unknown,signal?:AbortSignal){return this.botsClient().createGroup(input,signal);}
  async botsGroup(groupId:string,signal?:AbortSignal){return this.botsClient().group(groupId,signal);}
+ async botsWorkspace(operation:string,input:unknown,signal?:AbortSignal){return this.botsClient().workspace(operation,input,signal);}
  /** Opt-in in-chat browser (the Commander's own ShadowGlass Chrome via the loopback relay). Status never throws for an
   *  unconfigured or disconnected relay; it says why. Owner-only is enforced by the Prime server, not here. */
  async browserStatus(signal?:AbortSignal){

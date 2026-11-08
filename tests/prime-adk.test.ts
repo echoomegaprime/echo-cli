@@ -131,10 +131,15 @@ describe('AdkClient against a stand-in echo-adk-api', () => {
     const down = await clientFor(reply(503, { error: 'unavailable', message: 'provider down', provider: 'anthropic' }));
     await expect(down.client.run({ agent: 'researcher', prompt: 'o' })).rejects.toSatisfy((e: AdkError) => e.status === 502 && e.code === 'unavailable' && /Provider anthropic is unavailable; no fallback was used/.test(e.message) && e.detail.provider === 'anthropic');
     const budget = await clientFor(reply(409, { error: 'budget_exceeded', message: 'max_cost_usd' }));
-    await expect(budget.client.run({ agent: 'researcher', prompt: 'o' })).rejects.toMatchObject({ status: 400, code: 'budget_exceeded', message: /\(budget_exceeded\): max_cost_usd/ });
+    await expect(budget.client.run({ agent: 'researcher', prompt: 'o' })).rejects.toMatchObject({ status: 409, code: 'budget_exceeded', message: /\(budget_exceeded\): max_cost_usd/ });
     const leaky = await clientFor(reply(422, { error: 'invalid', message: 'bad body api_key=sk-abcdefghijklmnopqrstuvwx' }));
     await expect(leaky.client.run({ agent: 'researcher', prompt: 'o' })).rejects.toSatisfy((e: AdkError) => e.status === 400 && /HTTP 422 \(invalid\)/.test(e.message) && !e.message.includes('sk-abcdefghijklmnop'));
     await expect((await clientFor(reply(500, { detail: 'boom' }))).client.status(RUN)).rejects.toMatchObject({ status: 502, message: /HTTP 500: boom/ });
+  });
+  it('preserves an agent deletion conflict and does not retry or cancel referencing bots', async () => {
+    const { client, w } = await clientFor(reply(409, { error: 'conflict', message: 'Agent is referenced by a bot' }));
+    await expect(client.deleteAgent('researcher')).rejects.toMatchObject({ status: 409, detail: { http: 409 }, message: /referenced by a bot/ });
+    expect(w.seen.map(row => [row.method, row.url])).toEqual([['DELETE', '/agents/researcher']]);
   });
   it('polls a run: refuses bad ids before any request, another run, and normalizes steps, proof, error and spend', async () => {
     const { client, w } = await clientFor();
@@ -283,6 +288,15 @@ describe('Prime adk routes', () => {
       const run = await p.post('/api/prime/adk/runs', { agent: 'researcher', prompt: 'hi' });
       expect(run.status).toBe(400);
       expect((await run.json()).error).toMatch(/\(gated\): lease required\. Needs: echo\.shell\.run\. How: grant a Lease/);
+    } finally { await p.close(); }
+  });
+  it('preserves a service conflict on the owner agent deletion route', async () => {
+    const w = await fakeAdk(reply(409, { error: 'conflict', message: 'Agent is referenced by a bot' }));
+    const p = await primeServer(new AdkClient({ ...DEFAULT_ADK, baseUrl: w.url }));
+    try {
+      const result = await p.post('/api/prime/adk/agents/researcher/delete', {});
+      expect(result.status).toBe(409); expect((await result.json()).error).toContain('referenced by a bot');
+      expect(w.seen.map(row => [row.method, row.url])).toEqual([['DELETE', '/agents/researcher']]);
     } finally { await p.close(); }
   });
 });

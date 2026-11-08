@@ -25,7 +25,7 @@ function fixtureEngine(root:string){
  fs.writeFileSync('package.json',JSON.stringify({scripts:{build:mode==='bad-build'?'node -e "process.exit(2)"':'node --check app.cjs'}}));
  if(mode!=='no-startup')fs.writeFileSync('startup.sh','#!/bin/sh\\nset -eu\\ncd "$(dirname "$0")"\\nexec node app.cjs\\n');
  process.stdout.write('api_key=');setTimeout(()=>{console.log('fixtureSecretNeverExpose');console.error('Authorization: Bearer fixtureBearerNeverExpose');console.log('-----BEGIN PRIVATE KEY-----');console.log('fixturePemNeverExpose');console.log('-----END PRIVATE KEY-----');
- if(mode==='flood'){for(let i=0;i<1500;i++)console.log('line '+i+' '+('x'.repeat(1500)));}if(mode==='long-line')console.log('x'.repeat(15000));},10);`);
+ if(mode==='flood'){for(let i=0;i<1500;i++)console.log('line '+i+' '+('x'.repeat(1500)));console.log('environment_refresh_token=fixtureFloodSecretNeverExpose');}if(mode==='long-line')console.log('x'.repeat(15000));},10);`);
  return file;
 }
 async function runner(options:BuildRunnerOptions={},config:Partial<BuildConfig>={}){
@@ -55,6 +55,11 @@ describe('Build config and contract',()=>{
  it('validates ids before touching filesystem or upstream',()=>{for(const id of ['../x','a'.repeat(31),'A'.repeat(32),null,'a'.repeat(33)])expect(()=>buildId(id)).toThrow(/Invalid build id/);expect(buildId(ID)).toBe(ID);});
  it('uses engine argument arrays and no provider fallback',()=>{expect(engineCommand('gpt',ROOT,'prompt','x')).toMatchObject({cmd:'codex',args:expect.arrayContaining(['exec','-C',ROOT,'workspace-write']),input:'x'});expect(engineCommand('grok',ROOT,'prompt','x').args).toContain('--prompt-file');expect(engineCommand('gemini',ROOT,'prompt','x').cmd).toBe('agy');expect(engineCommand('claude',ROOT,'prompt','x').args).toContain('acceptEdits');});
  it('redacts bearer, cookie, named secrets, key formats and private keys',()=>{const value=redactBuild('Authorization: Bearer FAKE\nCookie: abc\nrefresh_token=FAKE\napi_key=FAKE\n-----BEGIN PRIVATE KEY-----\nFAKE\n-----END PRIVATE KEY-----');expect(value).not.toContain('FAKE');expect(value).toContain('REDACTED');});
+ it('redacts prefixed and quoted secret keys while preserving long ordinary log words',()=>{
+  const ordinary='x'.repeat(BUILD_LIMITS.lineChars),keys=['token','_TOKEN','environment_refresh_token','my_long_service_api_key','servicePASSWORD','99secret','abctoken','accessToken'];
+  for(const key of keys){const line=ordinary+' {"'+key+'":"fixtureNamedSecretNeverExpose"}';expect(redactBuild(line)).toBe(ordinary+' {"'+key+'":"[REDACTED]"}');}
+  expect(redactBuild(ordinary)).toBe(ordinary);
+ });
  it('defines real program, data, auth, build, headless QA and restart requirements',()=>{const text=buildContract({build_id:ID,engine:'gpt',preview:{port:8402}} as never);for(const word of ['Triage','CLI','Python','SQLite','echo-auth','npm run build','startup.sh','0.0.0.0:8402','Playwright','headless','No daemonizing'])expect(text).toContain(word);});
 });
 
@@ -64,7 +69,17 @@ describe('BuildRunner real subprocess lifecycle',()=>{
   try{const {build,b,seen}=await running();expect(b.build_id).toMatch(/^[a-f0-9]{32}$/);expect(b.workspace).toBe(join(build.config.root,b.build_id));expect(await (await fetch('http://127.0.0.1:'+b.preview.port)).text()).toContain('Hello Echo app');expect(existsSync(join(b.workspace,'.git'))).toBe(true);expect(seen.some(c=>c.cmd==='npm'&&c.args.join(' ')==='run build')).toBe(true);expect(JSON.stringify(seen.map(c=>c.env))).not.toContain(secret);expect(seen.every(c=>c.env.BROWSER==='none')).toBe(true);expect(b.log.map(e=>e.event)).toEqual(expect.arrayContaining(['prime_build_scaffolding','prime_build_building','prime_build_qa','prime_build_running']));}finally{delete process.env.ECHO_TEST_TOKEN;}
  },30000);
  it('redacts split chunks, stderr and multiline private key output before persisting',async()=>{const {build,b}=await running();const logs=JSON.stringify(build.log(b.build_id));expect(logs).not.toMatch(/fixture(Secret|Bearer|Pem)NeverExpose/);expect(logs).toContain('REDACTED');await build.hibernate(b.build_id);expect(readFileSync(join(build.config.root,'.echo-build-state',b.build_id+'.json'),'utf8')).not.toContain('fixtureSecretNeverExpose');},30000);
- it('caps streamed logs and provides monotonic cursors with truncation',async()=>{const {build,b}=await running({},'flood');const logs=build.log(b.build_id);expect(logs.truncated).toBe(true);expect(logs.events.length).toBeLessThanOrEqual(1000);expect(Buffer.byteLength(JSON.stringify(logs.events))).toBeLessThan(BUILD_LIMITS.logBytes+10000);expect(build.log(b.build_id,logs.next).events).toEqual([]);expect(()=>build.log(b.build_id,'-1')).toThrow();},30000);
+ it('caps streamed logs and provides monotonic cursors with truncation',async()=>{
+  const {build,b}=await running({},'flood'),logs=build.log(b.build_id),state=join(build.config.root,'.echo-build-state',b.build_id+'.json');
+  expect(logs.truncated).toBe(true);expect(logs.events.length).toBeLessThanOrEqual(1000);expect(Buffer.byteLength(JSON.stringify(logs.events))).toBeLessThan(BUILD_LIMITS.logBytes+10000);
+  expect(logs.events.every((row,index)=>index===0||row.seq>logs.events[index-1].seq)).toBe(true);expect(logs.next).toBe(logs.events.at(-1)!.seq);
+  expect(logs.events.some(row=>row.message.startsWith('line 1499 '))).toBe(true);expect(logs.events.some(row=>row.message==='environment_refresh_token=[REDACTED]')).toBe(true);
+  expect(JSON.stringify(logs)).not.toContain('fixtureFloodSecretNeverExpose');expect(JSON.parse(readFileSync(state,'utf8'))).toMatchObject({status:'running',log:logs.events});
+  expect(build.log(b.build_id,logs.next).events).toEqual([]);expect(()=>build.log(b.build_id,'-1')).toThrow();
+  await build.hibernate(b.build_id);const stopped=build.log(b.build_id,logs.next);
+  expect(stopped.next).toBeGreaterThan(logs.next);expect(stopped.events.every(row=>row.seq>logs.next)).toBe(true);expect(stopped.events.at(-1)?.event).toBe('prime_build_hibernated');
+  expect(JSON.parse(readFileSync(state,'utf8'))).toMatchObject({status:'hibernated',log:build.log(b.build_id).events});
+ },30000);
  it('drops oversized single lines instead of leaking a split secret',async()=>{const {b}=await running({},'long-line');expect(b.log.some(e=>e.message.includes('oversized log line omitted'))).toBe(true);},30000);
  it('hibernates the process, retains files, and revives by executing startup.sh',async()=>{const {build,b,seen}=await running();await build.hibernate(b.build_id);await expect(fetch('http://127.0.0.1:'+b.preview.port,{signal:AbortSignal.timeout(500)})).rejects.toThrow();expect(readFileSync(join(b.workspace,'count.txt'),'utf8')).toBe('1');await build.revive(b.build_id);expect((await build.idle(b.build_id)).status).toBe('running');expect(seen.filter(c=>c.cmd==='bash')).toHaveLength(2);expect(readFileSync(join(b.workspace,'count.txt'),'utf8')).toBe('1');},30000);
  it('applies follow-ups in the same workspace, preserving unrelated app files',async()=>{const {build,b}=await running();writeFileSync(join(b.workspace,'notes.txt'),'keep');await build.turn(b.build_id,{prompt:'followup'});expect((await build.idle(b.build_id)).status).toBe('running');expect(readFileSync(join(b.workspace,'count.txt'),'utf8')).toBe('2');expect(readFileSync(join(b.workspace,'notes.txt'),'utf8')).toBe('keep');},30000);

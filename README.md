@@ -97,3 +97,9 @@ Proprietary — see [LICENSE](LICENSE). Contributions: see [CONTRIBUTING.md](CON
 ## ECHO Prime visual interface
 
 Open [ui/echo-prime/index.html](ui/echo-prime/index.html) for the responsive emerald workspace and animated multicolor orb. [Interface notes](ui/echo-prime/README.md) describe rendering, controls and validation. This frontend saves local drafts; the production ECHO host is not connected.
+
+When served by the configured Prime host, the owner bot workspace connects to the native ADK API.
+[Bot workspace setup and contracts](docs/echo-code/ECHO_BOT_WORKSPACES.md) cover per-bot browsers,
+OAuth connections and app-event watches, editable memory, portable teams, and advanced schedules.
+Provider availability and consent are reported by the service; opening the static HTML alone does
+not activate these resources or production SDK capabilities.

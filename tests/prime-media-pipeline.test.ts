@@ -305,8 +305,9 @@ describe('review fixes: media that is actually stored',()=>{
   expect(on.config.localRoots).toEqual(['/home/forge/echo-media/out']);expect(on.warnings).toEqual([]);
   const off=resolveMediaHost(parseMediaConfig(undefined),undefined,()=>false);
   expect(off.config.localRoots).toEqual([]);expect(off.warnings.join(' ')).toMatch(/media\.localRoots/);
-  const explicit=resolveMediaHost(parseMediaConfig({localRoots:['/srv/out']}),{localRoots:['/srv/out']},()=>true);
-  expect(explicit.config.localRoots).toEqual(['/srv/out']);
+  const explicitRoot=tmp('prime-media-explicit-');
+  const explicit=resolveMediaHost(parseMediaConfig({localRoots:[explicitRoot]}),{localRoots:[explicitRoot]},()=>true);
+  expect(explicit.config.localRoots).toEqual([explicitRoot]);
   const none=resolveMediaHost(parseMediaConfig({origins:[]}),{origins:[]},()=>false);
   expect(none.warnings.join(' ')).toMatch(/media\.origins/);
  });

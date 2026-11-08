@@ -257,6 +257,12 @@ describe('live catalog discovery',()=>{
   it('overlays live registration and health on a snapshot entry but keeps its medium and description',()=>{
     expect(mergeCatalog([cap('echo.a.image',{category:'image',health:'red'})],[{id:'echo.a.image',registered:false,health:'green',category:'video',description:''}])).toEqual([cap('echo.a.image',{category:'image',health:'green',registered:false})]);
   });
+  it('keeps a live unknown tier unknown instead of retaining the snapshot tier zero',async()=>{
+    const row=cap(FLUX,{tier:0,description:TI}),live={...row,tier:null};
+    expect(mergeCatalog([row],[live])[0].tier).toBeNull();
+    const result=await new MediaRouter({catalog:()=>[row],search:async()=>[live],callKinds:RUNS}).route({text:'a fox image',classifier:false,probe:false});
+    expect(result.records.find(record=>record.id===FLUX)?.tier).toBeNull();
+  });
   it('ignores live rows whose ids are not capability ids',async()=>{
     const r=await new MediaRouter({catalog:()=>[],search:async()=>[{id:'not-an-echo-cap',health:'green'},{id:'echo.bad id',health:'green'},'x',null]}).route({text:'a fox image',classifier:false,probe:false});
     expect(r.catalog.listed).toBe(0);expect(r.picked).toBeNull();

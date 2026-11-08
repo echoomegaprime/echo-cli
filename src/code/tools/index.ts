@@ -10,7 +10,7 @@ import type { ToolModule } from './types.js';
 /** The registry. Adding a tool = one module file + one entry here; nothing else in the loop changes. */
 export const TOOL_MODULES: readonly ToolModule[] = [webSearch, webFetch, wolfram, echoKnowledge, echoMemory, skills, mcpPlugins];
 
-export { ToolKit, TurnTools, ToolCache, type ToolReport, type ToolKitOptions, type ExecuteOutcome } from './runtime.js';
+export { ToolKit, TurnTools, ToolCache, type ToolReport, type ToolKitOptions, type ExecuteOutcome, type TurnExecutor } from './runtime.js';
 export { parseToolsConfig, DEFAULT_TOOLS, type ToolsConfig } from './config.js';
 export { TOOL_FAMILIES, MEMBER_FAMILIES, ToolRefused } from './types.js';
 export type { ToolFamily, Audience, ToolModule, ToolSpec, ToolAction, ToolCall, ToolEvent, ToolEnvironment, SdkInvoke, McpGateway, Lookup, FetchTransport, FetchResponse, ToolArgs } from './types.js';

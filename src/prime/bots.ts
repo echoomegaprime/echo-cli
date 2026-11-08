@@ -1,8 +1,10 @@
 import {debuglog} from 'node:util';
+import {createHash} from 'node:crypto';
 import {validateEndpoint} from '../code/model.js';
 import {redact} from '../code/workspace.js';
 import {WorkspaceHttpError} from './workspace.js';
 import {sanitize} from './swarm.js';
+import {botWorkspaceRequest} from './bot-workspace.js';
 /**
  * Client for echoBots: always-on governed agents served by the loopback `echo-adk-api` service (contract
  * docs/echo-code/ECHO_ADK_API_CONTRACT.md, frozen 2026-11-04). Consumed exactly the way swarm.ts consumes the
@@ -12,7 +14,7 @@ import {sanitize} from './swarm.js';
  */
 export const BOTS_PROFILE='ECHO_ADK';
 export const BOTS_MAX={max_calls:120,max_cost_usd:5,max_wall_s:4800} as const;
-export const BOTS_LIMITS={name:64,text:12000,everyS:60,dailyCapUsd:5,groupMin:2,groupMax:6,messages:200,plugins:32,scopes:64,agent:120} as const;
+export const BOTS_LIMITS={name:64,text:12000,everyS:60,maxEveryS:604800,dailyCapUsd:5,groupMin:2,groupMax:6,messages:200,plugins:32,scopes:64,agent:120} as const;
 export interface BotsBudget {max_calls:number;max_cost_usd:number;max_wall_s:number}
 export interface BotsConfig {baseUrl:string;defaultBudget:BotsBudget}
 /** Default cost 0: bots run on the free local lane until the owner raises a bot's daily cap explicitly. */
@@ -21,12 +23,12 @@ const MIN:BotsBudget={max_calls:1,max_cost_usd:0,max_wall_s:30};
 const KEYS=Object.keys(BOTS_MAX) as (keyof BotsBudget)[];
 const HEX=/^[0-9a-f]{32}$/;
 const AGENT=/^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/;
-const PLUGIN=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
+const PLUGIN=/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/;
 const CAPABILITY=/^echo\.[A-Za-z0-9_.-]{1,180}$/;
 const MODES=['personal','team'] as const;
 const debug=debuglog('echo-prime');
 /** Carries an HTTP status so the Prime server answers 4xx/5xx instead of a blanket 400, plus the contract error code when the service named one. */
-export class BotsError extends WorkspaceHttpError {constructor(status:number,message:string,public code?:string){super(status,message);}}
+export class BotsError extends WorkspaceHttpError {constructor(status:number,message:string,public code?:string,public outcomeUnknown=false,public details?:unknown){super(status,message);}}
 const obj=(v:unknown):Record<string,unknown>=>v&&typeof v==='object'&&!Array.isArray(v)?v as Record<string,unknown>:{};
 function record(value:unknown,what:string):Record<string,unknown>{
  if(!value||typeof value!=='object'||Array.isArray(value))throw new BotsError(400,'Invalid '+what);
@@ -81,7 +83,68 @@ export function parseBotsConfig(value:unknown):BotsConfig{
  return {baseUrl:new URL(baseUrl).origin,defaultBudget};
 }
 export interface BotLease {scopes:string[];ttl_s:number;max_uses:number}
-export interface BotCreateBody {name:string;agent:string;mode?:'personal'|'team';schedule?:{every_s:number}|null;instruction?:string;plugins?:string[];lease?:BotLease;daily_cost_cap_usd:number}
+export type BotSchedule={every_s:number;missed?:'skip'|'once'}|{at:string;tz:string;weekdays:number[];missed:'skip'|'once'}|{once_at:string;tz:string;missed:'skip'|'once'}|{at:string;tz:string;monthdays:number[];months?:number[];missed:'skip'|'once'}|{cron:string;tz:string;missed:'skip'|'once'};
+export interface BotCreateBody {name:string;agent:string;mode?:'personal'|'team';schedule?:BotSchedule|null;instruction?:string;plugins?:string[];lease?:BotLease;daily_cost_cap_usd:number}
+export type BotUpdateBody=Partial<Omit<BotCreateBody,'agent'|'instruction'|'lease'>> & {instruction?:string|null;lease?:Partial<BotLease>};
+export function parseBotSchedule(value:unknown):BotSchedule|null{
+ if(value===null)return null;
+ const schedule=record(value,'bot schedule');
+ onlyKeys(schedule,['every_s','missed','at','tz','weekdays','once_at','monthdays','months','cron'],'bot schedule');
+ if(schedule.missed!==undefined&&schedule.missed!=='skip'&&schedule.missed!=='once')throw new BotsError(400,'Invalid bot schedule: missed must be skip or once');
+ if('every_s' in schedule){
+  onlyKeys(schedule,['every_s','missed'],'bot schedule');
+  if(typeof schedule.every_s!=='number'||!Number.isSafeInteger(schedule.every_s)||schedule.every_s<BOTS_LIMITS.everyS||schedule.every_s>BOTS_LIMITS.maxEveryS)throw new BotsError(400,'Invalid bot schedule: every_s must be an integer of at least '+BOTS_LIMITS.everyS+' and at most '+BOTS_LIMITS.maxEveryS);
+  return {every_s:schedule.every_s,...(schedule.missed===undefined?{}:{missed:schedule.missed as 'skip'|'once'})};
+ }
+ if(typeof schedule.tz!=='string'||!schedule.tz||schedule.tz.length>100)throw new BotsError(400,'Invalid bot schedule: timezone required');
+ try{new Intl.DateTimeFormat('en',{timeZone:schedule.tz}).format();}catch{throw new BotsError(400,'Invalid bot schedule: unknown timezone');}
+ const missed=schedule.missed===undefined?'skip':schedule.missed as 'skip'|'once',tz=schedule.tz;
+ if('once_at' in schedule){
+  onlyKeys(schedule,['once_at','tz','missed'],'bot schedule');
+  if(typeof schedule.once_at!=='string'||!/^\d{4}-\d\d-\d\dT([01]\d|2[0-3]):[0-5]\d$/.test(schedule.once_at)||!Number.isFinite(Date.parse(schedule.once_at+'Z')))throw new BotsError(400,'Invalid one-time local date and time');
+  return {once_at:schedule.once_at,tz,missed};
+ }
+ if('cron' in schedule){
+  onlyKeys(schedule,['cron','tz','missed'],'bot schedule');
+  if(typeof schedule.cron!=='string'||schedule.cron.length>256||schedule.cron.trim().split(/\s+/).length!==5||!/^[\d*,/\-\s]+$/.test(schedule.cron))throw new BotsError(400,'Cron requires five numeric fields');
+  return {cron:schedule.cron.trim(),tz,missed};
+ }
+ if(typeof schedule.at!=='string'||!/^([01]\d|2[0-3]):[0-5]\d$/.test(schedule.at))throw new BotsError(400,'Invalid bot schedule: at must be HH:mm');
+ if('monthdays' in schedule){
+  onlyKeys(schedule,['at','tz','monthdays','months','missed'],'bot schedule');
+  for(const [key,max] of [['monthdays',31],['months',12]] as const){const values=schedule[key];if(key==='months'&&values===undefined)continue;if(!Array.isArray(values)||!values.length||values.length>max||values.some(d=>!Number.isSafeInteger(d)||d<1||d>max)||new Set(values).size!==values.length)throw new BotsError(400,'Invalid calendar '+key);}
+  return {at:schedule.at,tz,monthdays:schedule.monthdays as number[],...(schedule.months===undefined?{}:{months:schedule.months as number[]}),missed};
+ }
+ onlyKeys(schedule,['at','tz','weekdays','missed'],'bot schedule');
+ if(!Array.isArray(schedule.weekdays)||!schedule.weekdays.length||schedule.weekdays.length>7||schedule.weekdays.some(d=>!Number.isInteger(d)||d<1||d>7)||new Set(schedule.weekdays).size!==schedule.weekdays.length)throw new BotsError(400,'Invalid bot schedule: weekdays must be distinct ISO days 1 to 7');
+ return {at:schedule.at,tz:schedule.tz,weekdays:schedule.weekdays as number[],missed:schedule.missed===undefined?'skip':schedule.missed as 'skip'|'once'};
+}
+/** Partial owner edit: omitted fields are never defaulted and identities cannot be changed. */
+export function parseBotUpdate(input:unknown):BotUpdateBody{
+ const data=record(input,'bot update');
+ onlyKeys(data,['name','mode','schedule','instruction','plugins','daily_cost_cap_usd','lease'],'bot update');
+ if(!Object.keys(data).length||Object.values(data).some(value=>value===undefined))throw new BotsError(400,'Invalid bot update: at least one defined field is required');
+ const body:BotUpdateBody={};
+ if('name' in data)body.name=requiredText(data.name,'bot name',BOTS_LIMITS.name).trim();
+ if('mode' in data){if(!(MODES as readonly unknown[]).includes(data.mode))throw new BotsError(400,'Invalid bot mode');body.mode=data.mode as 'personal'|'team';}
+ if('schedule' in data)body.schedule=parseBotSchedule(data.schedule);
+ if('instruction' in data)body.instruction=data.instruction===null?null:optionalText(data.instruction,'instruction',BOTS_LIMITS.text);
+ if('plugins' in data){
+  if(!Array.isArray(data.plugins)||data.plugins.length>BOTS_LIMITS.plugins||data.plugins.some(p=>typeof p!=='string'||!PLUGIN.test(p)))throw new BotsError(400,'Invalid bot plugins');
+  body.plugins=[...new Set(data.plugins as string[])];
+ }
+ if('daily_cost_cap_usd' in data){const cap=data.daily_cost_cap_usd;if(typeof cap!=='number'||!Number.isFinite(cap)||cap<0||cap>BOTS_LIMITS.dailyCapUsd)throw new BotsError(400,'Invalid daily cost cap: 0 to '+BOTS_LIMITS.dailyCapUsd+' USD');body.daily_cost_cap_usd=Math.round(cap*100)/100;}
+ if('lease' in data){
+  const lease=record(data.lease,'bot lease');onlyKeys(lease,['scopes','ttl_s','max_uses'],'bot lease');
+  if(!Object.keys(lease).length)throw new BotsError(400,'Invalid bot lease: at least one field is required');
+  const patch:Partial<BotLease>={};
+  if('scopes' in lease){if(!Array.isArray(lease.scopes)||lease.scopes.length>BOTS_LIMITS.scopes||lease.scopes.some(s=>typeof s!=='string'||!CAPABILITY.test(s)))throw new BotsError(400,'Invalid bot lease: scopes must be exact capability ids');patch.scopes=[...new Set(lease.scopes as string[])];}
+  if('ttl_s' in lease)patch.ttl_s=positiveInteger(lease.ttl_s,'bot lease ttl_s');
+  if('max_uses' in lease)patch.max_uses=positiveInteger(lease.max_uses,'bot lease max_uses');
+  body.lease=patch;
+ }
+ return body;
+}
 /** Validates a create request from the browser into the exact contract body. Limits are refused, not clamped: nothing is guessed on the owner's behalf. */
 export function parseBotCreate(input:unknown,defaultCapUsd:number):BotCreateBody{
  const data=record(input,'bot request');
@@ -90,12 +153,7 @@ export function parseBotCreate(input:unknown,defaultCapUsd:number):BotCreateBody
  if(typeof data.agent!=='string'||!AGENT.test(data.agent))throw new BotsError(400,'Invalid agent name');
  const body:BotCreateBody={name,agent:data.agent,daily_cost_cap_usd:defaultCapUsd};
  if(data.mode!==undefined){if(!(MODES as readonly unknown[]).includes(data.mode))throw new BotsError(400,'Invalid bot mode');body.mode=data.mode as 'personal'|'team';}
- if(data.schedule===null)body.schedule=null;
- else if(data.schedule!==undefined){
-  const schedule=record(data.schedule,'bot schedule');onlyKeys(schedule,['every_s'],'bot schedule');
-  if(typeof schedule.every_s!=='number'||!Number.isSafeInteger(schedule.every_s)||schedule.every_s<BOTS_LIMITS.everyS)throw new BotsError(400,'Invalid bot schedule: every_s must be an integer of at least '+BOTS_LIMITS.everyS);
-  body.schedule={every_s:schedule.every_s};
- }
+ if(data.schedule!==undefined)body.schedule=parseBotSchedule(data.schedule);
  const instruction=optionalText(data.instruction,'instruction',BOTS_LIMITS.text);if(instruction!==undefined)body.instruction=instruction;
  if(data.plugins!==undefined){
   if(!Array.isArray(data.plugins)||data.plugins.length>BOTS_LIMITS.plugins||data.plugins.some(p=>typeof p!=='string'||!PLUGIN.test(p)))throw new BotsError(400,'Invalid bot plugins');
@@ -103,7 +161,7 @@ export function parseBotCreate(input:unknown,defaultCapUsd:number):BotCreateBody
  }
  if(data.lease!==undefined){
   const lease=record(data.lease,'bot lease');onlyKeys(lease,['scopes','ttl_s','max_uses'],'bot lease');
-  if(!Array.isArray(lease.scopes)||!lease.scopes.length||lease.scopes.length>BOTS_LIMITS.scopes||lease.scopes.some(s=>typeof s!=='string'||!CAPABILITY.test(s)))throw new BotsError(400,'Invalid bot lease: scopes must be exact capability ids');
+  if(!Array.isArray(lease.scopes)||lease.scopes.length>BOTS_LIMITS.scopes||lease.scopes.some(s=>typeof s!=='string'||!CAPABILITY.test(s)))throw new BotsError(400,'Invalid bot lease: scopes must be exact capability ids');
   body.lease={scopes:[...new Set(lease.scopes as string[])],ttl_s:positiveInteger(lease.ttl_s,'bot lease ttl_s'),max_uses:positiveInteger(lease.max_uses,'bot lease max_uses')};
  }
  if(data.daily_cost_cap_usd!==undefined){
@@ -124,36 +182,73 @@ export function parseGroupCreate(input:unknown):BotGroupBody{
  if(new Set(bots).size!==bots.length)throw new BotsError(400,'A group cannot list the same bot twice');
  return {name,bots,prompt:requiredText(data.prompt,'group prompt',BOTS_LIMITS.text)};
 }
-interface RequestInit {method?:'GET'|'POST'|'DELETE';body?:unknown;query?:Record<string,string|undefined>}
+interface RequestInit {method?:'GET'|'POST'|'PUT'|'DELETE';body?:unknown;query?:Record<string,string|undefined>}
 export class BotsClient {
  readonly config:BotsConfig;private origin:URL;
  constructor(config:BotsConfig=DEFAULT_BOTS,private timeouts={health:5000,mutate:15000,poll:10000}){
   this.origin=validateEndpoint(config.baseUrl);
   this.config={baseUrl:this.origin.origin,defaultBudget:clampBotsBudget(config.defaultBudget,DEFAULT_BOTS.defaultBudget)};
  }
- private async request(route:string,ms:number,init:RequestInit={},signal?:AbortSignal):Promise<Record<string,unknown>>{
+ /** Fixed, versioned workspace contracts; never a caller-provided path or host. */
+ async workspace(operation:string,input:unknown={},signal?:AbortSignal){
+  const {route,method,query,body}=botWorkspaceRequest(operation,input);
+  const result=await this.request(route,35000,{method,query,body},signal,true);
+  const params=input as Record<string,unknown>;
+  if(params.bot_id!==undefined&&result.bot_id!==params.bot_id)throw new BotsError(502,'Bot workspace answered for a different bot'+(method!=='GET'?'; outcome unknown':''),'invalid_receipt',method!=='GET');
+  const refuse=()=>{throw new BotsError(502,'Bot workspace did not return a valid operation receipt'+(method!=='GET'?'; outcome unknown':''),'invalid_receipt',method!=='GET');};
+  if(operation==='browser.status'&&typeof result.available!=='boolean')refuse();
+  if(operation==='browser.act'&&(result.action!==params.action||result.untrusted!==true||result.status!=='ready'))refuse();
+  if(operation==='browser.close'&&result.closed!==true)refuse();
+  if(operation==='browser.reset'&&(result.closed!==true||result.reset!==true))refuse();
+  const arrays:Record<string,string>={marketplace:'providers','connection.list':'connections','subscription.list':'subscriptions','subscription.poll':'receipts','memory.revisions':'revisions','team.templates':'templates','team.imports':'imports'};
+  if(Object.hasOwn(arrays,operation)&&!Array.isArray(result[arrays[operation]]))refuse();
+  if(operation.startsWith('memory.')&&operation!=='memory.revisions'&&(typeof result.text!=='string'||!Number.isSafeInteger(result.revision)||result.scope!=='bot:'+params.bot_id))refuse();
+  if(operation==='connection.invoke'&&(result.ok!==true||result.connection_id!==params.connection_id||result.operation_id!==params.operation_id))refuse();
+  if(['connection.get','connection.refresh','connection.disconnect'].includes(operation)&&((result.id??result.connection_id)!==params.connection_id||typeof result.status!=='string'))refuse();
+  if(operation==='connection.authorize'){
+   const connection=obj(result.connection);if(connection.bot_id!==params.bot_id||typeof connection.id!=='string'||!HEX.test(connection.id)||typeof result.authorization_url!=='string')refuse();
+  }
+  if(operation.startsWith('subscription.')&&!['subscription.list','subscription.poll'].includes(operation)&&(typeof result.id!=='string'||!HEX.test(result.id)||(params.subscription_id!==undefined&&result.id!==params.subscription_id)||(operation==='subscription.delete'?result.deleted!==true:typeof result.enabled!=='boolean')))refuse();
+  if(operation==='team.preview'&&(typeof result.plan_sha256!=='string'||!/^[a-f0-9]{64}$/.test(result.plan_sha256)||!Array.isArray(result.bots)))refuse();
+  if(operation==='team.import'&&(result.status!=='imported'||result.plan_sha256!==params.expected_plan_sha256||!Array.isArray(result.bots)))refuse();
+  if(['team.inspect','team.recover'].includes(operation)&&(result.import_id!==params.import_id||typeof result.status!=='string'))refuse();
+  const clean=sanitize(result) as Record<string,unknown>;
+  if(operation==='browser.artifact'){
+   if(result.artifact_id!==params.artifact_id||result.mime_type!=='image/png'||typeof result.base64!=='string'||result.base64.length>700000||!/^[A-Za-z0-9+/]*={0,2}$/.test(result.base64))throw new BotsError(502,'Invalid bot screenshot');
+   const bytes=Buffer.from(result.base64,'base64');
+   if(bytes.length>524288||bytes.length!==result.bytes||bytes.toString('base64')!==result.base64||!bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))||createHash('sha256').update(bytes).digest('hex')!==result.sha256)throw new BotsError(502,'Bot screenshot digest or size did not match');
+   clean.base64=result.base64;
+  }
+  if(operation==='team.export'||operation==='team.template'){
+   if(typeof result.bundle_json!=='string'||Buffer.byteLength(result.bundle_json,'utf8')>262144||redact(result.bundle_json)!==result.bundle_json||createHash('sha256').update(result.bundle_json).digest('hex')!==result.sha256)throw new BotsError(502,'Portable team exceeds its transport limit or fails integrity validation');
+   clean.bundle_json=result.bundle_json;
+  }
+  return clean;
+ }
+ private async request(route:string,ms:number,init:RequestInit={},signal?:AbortSignal,preserveErrors=false):Promise<Record<string,unknown>>{
   const url=new URL(route,this.origin);
   if(url.origin!==this.origin.origin||url.pathname!==route)throw new BotsError(400,'echoBots route refused');
   for(const [key,value] of Object.entries(init.query??{}))if(value!==undefined)url.searchParams.set(key,value);
   const method=init.method??(init.body===undefined?'GET':'POST');
+  const uncertain=preserveErrors&&method!=='GET',unknownNote=uncertain?'; outcome unknown':'';
   let response:Response;
   try{
    response=await fetch(url,{method,redirect:'error',headers:init.body===undefined?{accept:'application/json'}:{accept:'application/json','content-type':'application/json'},
     body:init.body===undefined?undefined:JSON.stringify(init.body),signal:AbortSignal.any([AbortSignal.timeout(ms),...(signal?[signal]:[])])});
   }catch(error){
-   if(signal?.aborted)throw new BotsError(499,'Interrupted');
-   if(error instanceof Error&&error.name==='TimeoutError')throw new BotsError(504,'echoBots service timed out after '+Math.round(ms/1000)+' s; outcome unknown');
-   throw new BotsError(502,'echoBots service unreachable at '+this.origin.origin);
+   if(signal?.aborted)throw new BotsError(499,'Interrupted'+unknownNote,'cancelled',uncertain);
+   if(error instanceof Error&&error.name==='TimeoutError')throw new BotsError(504,'echoBots service timed out after '+Math.round(ms/1000)+' s; outcome unknown','timeout',uncertain);
+   throw new BotsError(502,'echoBots service unreachable at '+this.origin.origin+unknownNote,'unavailable',uncertain);
   }
   const reader=response.body?.getReader();
   const chunks:Uint8Array[]=[];let size=0;
   try{
    if(reader)for(;;){
     const {done,value}=await reader.read();if(done)break;size+=value.length;
-    if(size>1048576)throw new BotsError(502,'echoBots service response exceeds the 1 MiB limit');
+    if(size>1048576)throw new BotsError(502,'echoBots service response exceeds the 1 MiB limit'+unknownNote,'invalid_receipt',uncertain);
     chunks.push(value);
    }
-  }catch(error){if(error instanceof BotsError)throw error;throw new BotsError(504,'echoBots service response was interrupted');}
+  }catch(error){if(error instanceof BotsError)throw error;throw new BotsError(504,'echoBots service response was interrupted'+unknownNote,'interrupted',uncertain);}
   finally{await reader?.cancel().catch(()=>undefined);}
   let parsed:unknown;
   try{parsed=JSON.parse(Buffer.concat(chunks).toString('utf8'));}catch{parsed=undefined;}
@@ -166,18 +261,24 @@ export class BotsClient {
     if(needs)detail+=' (needs: '+needs+')';
     if(typeof body.how==='string')detail+=' (how: '+redact(body.how).slice(0,200)+')';
    }
-   throw new BotsError(response.status===404?404:response.status<500?400:502,'echoBots service answered HTTP '+response.status+(code?': '+code:'')+detail,code);
+   const outcomeUnknown=body.outcome_unknown===true||body.outcome==='unknown'||(uncertain&&response.status>=500&&body.outcome_unknown!==false&&body.outcome!=='not_started'&&body.outcome!=='failed');
+   if(outcomeUnknown&&!detail.toLowerCase().includes('outcome unknown'))detail+='; outcome unknown';
+   const status=preserveErrors?response.status:response.status===404||response.status===409?response.status:response.status<500?400:502;
+   throw new BotsError(status,'echoBots service answered HTTP '+response.status+(code?': '+code:'')+detail,code,outcomeUnknown,body.cleanup?sanitize({cleanup:body.cleanup}):undefined);
   }
-  if(!parsed||typeof parsed!=='object'||Array.isArray(parsed))throw new BotsError(502,'echoBots service returned an unrecognized response');
+  if(!parsed||typeof parsed!=='object'||Array.isArray(parsed))throw new BotsError(502,'echoBots service returned an unrecognized response'+unknownNote,'invalid_receipt',uncertain);
   return parsed as Record<string,unknown>;
  }
  /** Service identity: refuses anything that is not healthy or does not report profile ECHO_ADK (same rule as the swarm profile check). */
  async health(signal?:AbortSignal){
-  const h=await this.request('/health',this.timeouts.health,{},signal);
+  let h:Record<string,unknown>;
+  try{h=await this.request('/v2/health',this.timeouts.health,{},signal);}
+  catch(error){if(error instanceof BotsError&&error.status===404)throw new BotsError(502,'echoBots automation API v2 is unavailable; upgrade the echo-adk service to use these controls','unsupported_contract');throw error;}
   if(h.ok!==true)throw new BotsError(502,'echoBots service reports it is not healthy');
   if(h.profile!==BOTS_PROFILE)throw new BotsError(502,'echoBots service reports an unexpected profile; refusing to use it');
+  if(h.contract_version!==2)throw new BotsError(502,'echoBots automation API v2 is required; the service did not confirm its contract','unsupported_contract');
   debug('%j',{event:'prime_bots_health',profile:h.profile,bots:h.bots,runsActive:h.runs_active});
-  return sanitize({service:h.service,version:h.version,profile:h.profile,agents:h.agents,bots:h.bots,runsActive:h.runs_active}) as Record<string,unknown>;
+  return sanitize({service:h.service,version:h.version,profile:h.profile,agents:h.agents,bots:h.bots,runsActive:h.runs_active,contract_version:h.contract_version,features:h.features,budgets:h.budgets,connections:h.connections}) as Record<string,unknown>;
  }
  /** A Bot from the service: the id is verified before anything is kept; every string is redacted. */
  private bot(raw:Record<string,unknown>,expected?:string):Record<string,unknown>{
@@ -186,24 +287,34 @@ export class BotsClient {
   return sanitize(raw) as Record<string,unknown>;
  }
  async list(signal?:AbortSignal){
-  const reply=await this.request('/bots',this.timeouts.poll,{},signal);
+  const reply=await this.request('/v2/bots',this.timeouts.poll,{},signal);
   if(!Array.isArray(reply.bots))throw new BotsError(502,'echoBots service returned an unrecognized bot list');
   return {bots:reply.bots.slice(0,500).map(b=>this.bot(obj(b)))};
  }
  async get(botId:string,signal?:AbortSignal){
   const id=hexId(botId,'bot');
-  return this.bot(await this.request('/bots/'+id,this.timeouts.poll,{},signal),id);
+  return this.bot(await this.request('/v2/bots/'+id,this.timeouts.poll,{},signal),id);
  }
  async create(input:unknown,signal?:AbortSignal){
   const body=parseBotCreate(input,this.config.defaultBudget.max_cost_usd);
   debug('%j',{event:'prime_bots_create_submitting',agent:body.agent,mode:body.mode??'personal',scheduled:!!body.schedule,plugins:body.plugins?.length??0,dailyCapUsd:body.daily_cost_cap_usd});
-  const bot=this.bot(await this.request('/bots',this.timeouts.mutate,{method:'POST',body},signal));
+  const bot=this.bot(await this.request('/v2/bots',this.timeouts.mutate,{method:'POST',body},signal));
   debug('%j',{event:'prime_bots_create_accepted',botId:bot.bot_id,status:bot.status});
   return bot;
  }
+ async update(botId:string,input:unknown,signal?:AbortSignal){
+  const id=hexId(botId,'bot'),body=parseBotUpdate(input);
+  return this.bot(await this.request('/v2/bots/'+id,this.timeouts.mutate,{method:'PUT',body},signal),id);
+ }
+ /** Pauses future work and requests cancellation; an active provider step may still be running. */
+ async stop(botId:string,signal?:AbortSignal){
+  const id=hexId(botId,'bot'),reply=await this.request('/v2/bots/'+id+'/stop',this.timeouts.mutate,{method:'POST'},signal);
+  if(reply.bot_id!==id||reply.stop_requested!==true||typeof reply.status!=='string'||!['paused','idle','running','error'].includes(reply.status)||!Array.isArray(reply.run_ids)||reply.run_ids.some(run=>typeof run!=='string'||!HEX.test(run)))throw new BotsError(502,'echoBots service returned an invalid stop receipt');
+  return {botId:id,status:reply.status,stopRequested:true as const,runIds:reply.run_ids as string[]};
+ }
  private async transition(botId:string,action:'pause'|'resume',signal?:AbortSignal){
   const id=hexId(botId,'bot');
-  const bot=this.bot(await this.request('/bots/'+id+'/'+action,this.timeouts.mutate,{method:'POST'},signal),id);
+  const bot=this.bot(await this.request('/v2/bots/'+id+'/'+action,this.timeouts.mutate,{method:'POST'},signal),id);
   debug('%j',{event:'prime_bots_action',action,botId:id,status:bot.status});
   return bot;
  }
@@ -211,10 +322,10 @@ export class BotsClient {
  resume(botId:string,signal?:AbortSignal){return this.transition(botId,'resume',signal);}
  async remove(botId:string,signal?:AbortSignal){
   const id=hexId(botId,'bot');
-  const reply=await this.request('/bots/'+id,this.timeouts.mutate,{method:'DELETE'},signal);
-  if(reply.bot_id!==id||reply.deleted!==true)throw new BotsError(502,'echoBots service did not confirm the deletion');
+  const reply=await this.request('/v2/bots/'+id,35000,{method:'DELETE'},signal,true);
+  if(reply.bot_id!==id||reply.deleted!==true)throw new BotsError(502,'echoBots service did not confirm the deletion; outcome unknown','invalid_receipt',true);
   debug('%j',{event:'prime_bots_action',action:'delete',botId:id});
-  return {botId:id,deleted:true};
+  return {botId:id,deleted:true,...(reply.cleanup?{cleanup:sanitize(reply.cleanup)}:{})};
  }
  /** Queues one bot turn. A paused bot still accepts the message and answers when resumed; the answer arrives through its run. */
  async message(botId:string,input:unknown,signal?:AbortSignal){
@@ -225,6 +336,17 @@ export class BotsClient {
   if(typeof reply.message_id!=='string'||!HEX.test(reply.message_id)||typeof reply.run_id!=='string'||!HEX.test(reply.run_id))throw new BotsError(502,'echoBots service returned an invalid message or run id');
   debug('%j',{event:'prime_bots_message_accepted',botId:id,messageId:reply.message_id,runId:reply.run_id,textChars:text.length});
   return {botId:id,messageId:reply.message_id,runId:reply.run_id};
+ }
+ /** Delivers an idempotent external event without changing the bot's status or permissions. */
+ async event(botId:string,input:unknown,signal?:AbortSignal){
+  const id=hexId(botId,'bot'),data=record(input,'bot event');
+  onlyKeys(data,['event_id','source','text'],'bot event');
+  const eventId=requiredText(data.event_id,'event id',128),source=requiredText(data.source,'event source',64),text=requiredText(data.text,'event text',10000);
+  if(!/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(eventId)||!/^[a-z0-9][a-z0-9_.-]*$/.test(source))throw new BotsError(400,'Invalid bot event id or source');
+  const reply=await this.request('/v2/bots/'+id+'/events',this.timeouts.mutate,{method:'POST',body:{event_id:eventId,source,text}},signal);
+  const statusValid=reply.duplicate===true?typeof reply.status==='string'&&['queued','running','gated','done','failed','unavailable'].includes(reply.status):reply.status==='queued';
+  if(reply.event_id!==eventId||typeof reply.message_id!=='string'||!HEX.test(reply.message_id)||typeof reply.run_id!=='string'||!HEX.test(reply.run_id)||typeof reply.duplicate!=='boolean'||!statusValid)throw new BotsError(502,'echoBots service returned an invalid event receipt');
+  return {botId:id,messageId:reply.message_id,runId:reply.run_id,eventId,duplicate:reply.duplicate,status:reply.status};
  }
  async messages(botId:string,options:{since?:unknown;limit?:unknown}={},signal?:AbortSignal){
   const id=hexId(botId,'bot'),query:Record<string,string|undefined>={};
@@ -243,7 +365,7 @@ export class BotsClient {
   });
   return {botId:id,messages};
  }
- /** Group chat of 2 to 6 bots. Each bot answers through its own run with its own Lease; nothing is shared between them. */
+ /** Group chat of 2 to 6 bots. Each bot answers through its own governed run. */
  async createGroup(input:unknown,signal?:AbortSignal){
   const body=parseGroupCreate(input);
   debug('%j',{event:'prime_bots_group_submitting',bots:body.bots.length,promptChars:body.prompt.length});

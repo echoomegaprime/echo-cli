@@ -562,13 +562,13 @@ export interface CatalogReport {
  reason?:string;
 }
 /** A capability row as the browser Studio needs it to select a live-only pick (no secrets: the catalog's own public fields). */
-export interface CatalogRecord {id:string;registered:boolean;health:string;category:string;description:string;scope?:string;tier?:number}
+export interface CatalogRecord {id:string;registered:boolean;health:string;category:string;description:string;scope?:string;tier?:number|null}
 function liveRow(row:unknown,kind:GenerationKind):Capability|null{
  const r=obj(row);
  if(typeof r.id!=='string'||!CAPABILITY_ID.test(r.id))return null;
  const health=String(r.health??'unknown').toLowerCase().slice(0,32)||'unknown';
  return {id:r.id,registered:r.registered!==false,health,category:CATEGORY_OF_KIND[kind],description:typeof r.description==='string'?r.description.slice(0,600):'',
-  ...(typeof r.scope==='string'&&r.scope?{scope:r.scope.slice(0,120)}:{}),...(typeof r.tier==='number'&&Number.isFinite(r.tier)?{tier:r.tier}:{})};
+  ...(typeof r.scope==='string'&&r.scope?{scope:r.scope.slice(0,120)}:{}),...(r.tier===null||typeof r.tier==='number'&&Number.isFinite(r.tier)?{tier:r.tier}:{})};
 }
 /** Overlays live rows on the snapshot: the live record's registration, health, description and scope win; the snapshot's
  * Studio medium (category) and node are kept so the Studio filters still find the tool. A live row that carries no health

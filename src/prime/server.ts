@@ -7,10 +7,13 @@ import {PrimeHub,object,type PrimeRequest} from './hub.js';
 import {redact} from '../code/workspace.js';
 import {WorkspaceBridge,WorkspaceHttpError,type WorkspaceConfig} from './workspace.js';
 import {ARTIFACT_ID_RE,UPLOAD_ID_RE,UploadStore,parseUploadsConfig,type UploadsConfig} from './uploads.js';
+import {BOT_WORKSPACE_OPERATIONS} from './bot-workspace.js';
+import {BotsError} from './bots.js';
 const assets:Record<string,string>={'/':'index.html','/index.html':'index.html','/styles.css':'styles.css','/orb.js':'orb.js','/app.js':'app.js','/chat.js':'chat.js','/integrations.js':'integrations.js','/catalog.js':'catalog.js','/steward.js':'steward.js','/workspace-client.js':'workspace-client.js','/workspace.js':'workspace.js','/models.js':'models.js'};
 assets['/swarm.js']='swarm.js';assets['/swarm.css']='swarm.css';
 assets['/agents.js']='agents.js';assets['/agents.css']='agents.css';
 assets['/bots.js']='bots.js';assets['/bots.css']='bots.css';
+for(const name of ['bot-workspace.js','bots-oauth-callback.html','bots-oauth-callback.js'])assets['/'+name]=name;
 assets['/browser.js']='browser.js';assets['/browser.css']='browser.css';
 assets['/build.js']='build.js';assets['/build.css']='build.css';
 const debug=debuglog('echo-prime-server');
@@ -82,6 +85,7 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
   const expectedOrigin=externalOrigin??url;
   if(req.headers.host!==new URL(expectedOrigin).host){send(403,{error:'Unrecognized host'});return;}
   const path=new URL(req.url??'/',url).pathname;
+  if(path==='/bots-oauth-callback.html')res.setHeader('Content-Security-Policy',"default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; object-src 'none'");
   if(path.startsWith('/api/')){
    const started=Date.now(),requestId=randomUUID();
    const operation=path.startsWith('/api/prime/media/')?'media':path==='/api/prime/enhance'?'enhance':path.startsWith('/api/workspace/')?'workspace':path.startsWith('/api/steward/')?'steward':path.startsWith('/api/prime/swarm/')?'swarm':path.startsWith('/api/prime/voice/')?'voice':path.startsWith('/api/prime/adk/')?'adk':path.startsWith('/api/prime/bots/')?'bots':path.startsWith('/api/prime/browser/')?'browser':path.startsWith('/api/prime/build/')?'build':path.startsWith('/api/prime/video/')?'video':path==='/api/prime/uploads'||path.startsWith('/api/prime/uploads/')?'uploads':path==='/api/prime/artifacts'||path.startsWith('/api/prime/artifacts/')?'artifacts':path==='/api/session'?'session':'owner';
@@ -220,6 +224,13 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     // echoBots (owner-only like swarm): fixed routes first, then groups/:id, then :id/messages and :id. Ids are checked by the client before any URL is built.
     if(path==='/api/prime/bots/health'&&req.method==='GET'){send(200,await hub.botsHealth(abort.signal));return;}
     if(path==='/api/prime/bots/list'&&req.method==='GET'){send(200,await hub.botsList(abort.signal));return;}
+    const botWorkspace=/^\/api\/prime\/bots\/workspace\/([a-z.]{1,60})$/.exec(path);
+    if(botWorkspace&&req.method==='GET'){
+     if(!Object.hasOwn(BOT_WORKSPACE_OPERATIONS,botWorkspace[1])||BOT_WORKSPACE_OPERATIONS[botWorkspace[1]].method!=='GET')throw new WorkspaceHttpError(405,'This workspace operation requires JSON POST');
+     const query=new URL(req.url??'/',url).searchParams,params:Record<string,unknown>={};
+     for(const [key,value] of query){if(Object.hasOwn(params,key))throw new WorkspaceHttpError(400,'Duplicate query parameter');params[key]=['limit','before'].includes(key)?Number(value):value;}
+     send(200,await hub.botsWorkspace(botWorkspace[1],params,abort.signal));return;
+    }
     const botsGroup=/^\/api\/prime\/bots\/groups\/([^/]{1,80})$/.exec(path);
     if(botsGroup&&req.method==='GET'){send(200,await hub.botsGroup(decodeURIComponent(botsGroup[1]),abort.signal));return;}
     const botsMessages=/^\/api\/prime\/bots\/([^/]{1,80})\/messages$/.exec(path);
@@ -235,7 +246,8 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     if(browserSnap&&req.method==='GET'){send(200,await hub.browserSnapshot(Number(browserSnap[1]),new URL(req.url??'/',url).searchParams.get('shot')==='1',abort.signal));return;}
     if(path==='/api/steward/status'&&req.method==='GET'){send(200,await hub.stewardStatus());return;}
     if(req.method!=='POST'||!req.headers['content-type']?.startsWith('application/json')){send(405,{error:'JSON POST required'});return;}
-    const data=await body(req);
+    const data=await body(req,botWorkspace?1048576:131072);
+    if(botWorkspace){send(200,await hub.botsWorkspace(botWorkspace[1],data,abort.signal));return;}
     if(path==='/api/prime/voice/speak'){const out=await hub.voiceSpeak(data,abort.signal);res.writeHead(200,{'Content-Type':out.contentType,'Content-Length':out.bytes,'X-Echo-Voice-Provider':out.provider,'X-Echo-Voice-Label':encodeURIComponent(out.label),'X-Echo-Voice-Model':out.model,'X-Echo-Voice-Chars':String(out.chars)});res.end(out.audio);return;}
     if(path==='/api/prime/build/create'){send(202,await hub.buildCreate(data));return;}
     if(buildAction){
@@ -260,7 +272,7 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
      return;
     }
     // Delete is a JSON POST on purpose: the Origin check above applies to POST only, so a DELETE verb would skip it.
-    const botsAction=/^\/api\/prime\/bots\/([^/]{1,80})\/(pause|resume|delete|message)$/.exec(path);
+    const botsAction=/^\/api\/prime\/bots\/([^/]{1,80})\/(pause|resume|stop|update|delete|message|events)$/.exec(path);
     if(path==='/api/search')send(200,{capabilities:await hub.refresh(String(data.query??''))});
     else if(path==='/api/prepare')send(200,await hub.prepare(data as unknown as PrimeRequest));
     else if(path==='/api/execute')send(200,await hub.execute(String(data.id??''),String(data.digest??'')));
@@ -280,6 +292,8 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     else if(adkAgentAction)send(200,await hub.adkDeleteAgent(decodeURIComponent(adkAgentAction[1]),abort.signal));
     else if(path==='/api/prime/bots/create')send(201,await hub.botsCreate(data,abort.signal));
     else if(path==='/api/prime/bots/groups/create')send(202,await hub.botsGroupCreate(data,abort.signal));
+    else if(botsAction&&botsAction[2]==='update')send(200,await hub.botsUpdate(decodeURIComponent(botsAction[1]),data,abort.signal));
+    else if(botsAction&&botsAction[2]==='events')send(202,await hub.botsEvent(decodeURIComponent(botsAction[1]),data,abort.signal));
     else if(botsAction&&botsAction[2]==='message')send(202,await hub.botsMessage(decodeURIComponent(botsAction[1]),data,abort.signal));
     else if(botsAction)send(200,await hub.botsAction(decodeURIComponent(botsAction[1]),botsAction[2],abort.signal));
     else if(path==='/api/prime/browser/act')send(200,await hub.browserAct(data,abort.signal));
@@ -296,7 +310,7 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
      send(200,uploadStore?await uploadStore.usage(data.uid):{configured:false,count:0,bytes:0});
     }
     else send(404,{error:'Unknown route'});
-   }catch(e){if(res.headersSent)res.destroy();else send(e instanceof WorkspaceHttpError?e.status:400,{error:redact(e instanceof Error?e.message:'Request failed').slice(0,600)});}
+   }catch(e){if(res.headersSent)res.destroy();else send(e instanceof WorkspaceHttpError?e.status:400,{error:redact(e instanceof Error?e.message:'Request failed').slice(0,600),...(e instanceof BotsError?{source:'bot_service',code:e.code,outcome_unknown:e.outcomeUnknown,...(e.details?{details:e.details}:{})}:{})});}
    finally{res.removeListener('close',disconnected);if(mediaFileGet)mediaActive--;else if(admitted!==null)release(admitted);}
    return;
   }

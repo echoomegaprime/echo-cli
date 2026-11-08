@@ -9,7 +9,7 @@
  * them to the Echo SDK gate on loopback.
  *
  *   sdk_search  -> echo.caps.search   (reshaped to the broker's catalog rows)
- *   sdk_read    -> echo.caps.detail   (reshaped to the broker's cap record)
+ *   sdk_read    -> echo.caps.detail + exact active echo.caps.search verification
  *   sdk_invoke  -> the requested echo.* capability with its params
  *
  * Security properties:
@@ -17,12 +17,13 @@
  *     and is never written to stdout, stderr, or any result.
  *   - The gate URL (ECHO_GATE_URL) must be loopback; anything else refuses at
  *     startup.
- *   - 30 s per-call timeout, 1 MiB caps on gate bodies and emitted results.
+ *   - 30 s default gate deadline through body completion, 1 MiB streamed body and emitted-result caps.
  *   - Every tool result is returned as MCP text content (untrusted data that
  *     Prime's `unwrap` decodes); strings are redacted before they leave.
  *   - No npm dependencies: Node built-ins and the global fetch only.
  */
 import { readFileSync } from 'node:fs';
+import {createSdkHmacAuth,SDK_HMAC_SECRET_ENV,SDK_HMAC_UNCONFIGURED,type SdkHmacAuth} from './sdk-hmac.js';
 
 type Json = Record<string, unknown>;
 
@@ -56,6 +57,7 @@ function isLoopback(raw: string): boolean {
   let url: URL;
   try { url = new URL(raw); } catch { return false; }
   if (url.protocol !== 'http:' && url.protocol !== 'https:') return false;
+  if (url.username || url.password || url.search || url.hash) return false;
   const host = url.hostname.replace(/^\[/, '').replace(/\]$/, '').toLowerCase();
   return host === 'localhost' || host === '::1' || host === '0:0:0:0:0:0:0:1' || /^127(\.\d{1,3}){3}$/.test(host);
 }
@@ -64,6 +66,8 @@ function isLoopback(raw: string): boolean {
 function redact(text: string): string {
   let out = text;
   if (apiKey.length >= 6 && out.includes(apiKey)) out = out.split(apiKey).join('[REDACTED]');
+  const signingSecret=(process.env[SDK_HMAC_SECRET_ENV]??'').trim();
+  if(signingSecret.length>=6&&out.includes(signingSecret))out=out.split(signingSecret).join('[REDACTED]');
   out = out.replace(/((?:x-echo-api-key|authorization|api[_-]?key)\s*[:=]\s*)\S+/gi, '$1[REDACTED]');
   out = out.replace(/\b(sk-[A-Za-z0-9]{8,})\b/g, '[REDACTED]');
   return out;
@@ -74,8 +78,8 @@ function log(entry: Json): void {
   try { process.stderr.write(redact(JSON.stringify(entry)) + '\n'); } catch { /* best effort */ }
 }
 
-interface GateOk { ok: true; body: Json }
-interface GateErr { ok: false; error: string; required?: string }
+interface GateOk { ok: true; body: Json; receipt: Json }
+interface GateErr { ok: false; error: string; required?: string; receipt?: Json; code?: string; hmacRequired?: true }
 type GateResult = GateOk | GateErr;
 
 function detailOf(obj: Json): string {
@@ -85,33 +89,79 @@ function detailOf(obj: Json): string {
   return '';
 }
 
+/** Routing references returned by the gate, kept separate from capability-owned run IDs. These are not signed proof. */
+function gateReceipt(envelope: Json): Json {
+  return {
+    ...(typeof envelope.run_id === 'string' ? { run_id: envelope.run_id.slice(0, 200) } : {}),
+    ...(envelope.trace !== null && typeof envelope.trace === 'object' && !Array.isArray(envelope.trace) ? { trace: envelope.trace } : {}),
+    ...(typeof envelope.why_link === 'string' ? { why_link: envelope.why_link.slice(0, 2000) } : {}),
+  };
+}
+function failedGate(gate: GateErr): Json {
+  return { ok: false, error: gate.error, ...(gate.code ? { code: gate.code } : {}), ...(gate.required ? { required: gate.required } : {}), ...(gate.receipt && Object.keys(gate.receipt).length ? { sdk_gate: gate.receipt } : {}) };
+}
+
 /** Forward one envelope to the loopback gate and peel its result, failing closed. */
 async function callGate(capability: string, params: Json, context: Json, timeoutMs = GATE_TIMEOUT_MS): Promise<GateResult> {
-  const payload = JSON.stringify({ envelope_version: 1, capability, params, context });
+  const deadline=Date.now()+timeoutMs;
+  // Snapshot the actual JSON values once. The authenticated retry uses exactly the same params/context.
+  const wire=JSON.parse(JSON.stringify({params,context})) as {params:Json;context:Json};
+  const first=await callGateOnce(capability,wire.params,wire.context,Math.max(1,deadline-Date.now()));
+  if(first.ok||!first.hmacRequired)return first;
+  let auth:SdkHmacAuth;
+  try{auth=createSdkHmacAuth(apiKey,capability,wire.params);}
+  catch(error){
+    const unconfigured=error instanceof Error&&error.message===SDK_HMAC_UNCONFIGURED;
+    return {ok:false,error:unconfigured?SDK_HMAC_UNCONFIGURED:'SDK HMAC request cannot be canonicalized',code:unconfigured?'hmac_signer_unconfigured':'hmac_canonicalization_failed',receipt:first.receipt};
+  }
+  const remaining=deadline-Date.now();
+  if(remaining<=0)return {ok:false,error:'SDK gate timed out; outcome unknown'};
+  // Only the exact pre-dispatch HMAC challenge permits this one protocol retry. Never retry its outcome.
+  return callGateOnce(capability,wire.params,wire.context,remaining,auth);
+}
+async function callGateOnce(capability:string,params:Json,context:Json,timeoutMs:number,auth?:SdkHmacAuth):Promise<GateResult> {
+  const payload = JSON.stringify({ envelope_version: 1, capability, params, context, ...(auth?{auth}:{}) });
   if (Buffer.byteLength(payload) > MAX_BYTES) return { ok: false, error: 'SDK request exceeds bounded limit' };
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   const started = Date.now();
   let response: Response;
+  let text: string;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
     response = await fetch(GATE_URL, {
       method: 'POST',
+      redirect: 'error',
       headers: { 'X-Echo-API-Key': apiKey, 'Content-Type': 'application/json' },
       body: payload,
       signal: controller.signal,
     });
+    reader = response.body?.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    if (Number(response.headers.get('content-length')) > MAX_BYTES) {
+      controller.abort();
+      return { ok: false, error: 'SDK gate response exceeds bounded limit' };
+    }
+    if (reader) for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.length;
+      if (size > MAX_BYTES) {
+        log({ event: 'gate_error', capability, reason: 'response_too_large', bytes: size });
+        controller.abort();
+        return { ok: false, error: 'SDK gate response exceeds bounded limit' };
+      }
+      chunks.push(value);
+    }
+    text = Buffer.concat(chunks).toString('utf8');
   } catch (error) {
-    clearTimeout(timer);
-    const aborted = error instanceof Error && error.name === 'AbortError';
+    const aborted = controller.signal.aborted || error instanceof Error && error.name === 'AbortError';
     log({ event: 'gate_error', capability, ms: Date.now() - started, reason: aborted ? 'timeout' : 'unreachable' });
-    return { ok: false, error: aborted ? 'SDK gate timed out; outcome unknown' : 'SDK gate unreachable' };
-  }
-  clearTimeout(timer);
-
-  const text = await response.text();
-  if (Buffer.byteLength(text) > MAX_BYTES) {
-    log({ event: 'gate_error', capability, reason: 'response_too_large', bytes: Buffer.byteLength(text) });
-    return { ok: false, error: 'SDK gate response exceeds bounded limit' };
+    return { ok: false, error: aborted ? 'SDK gate timed out; outcome unknown' : 'SDK gate unreachable, redirect refused, or response interrupted; outcome unknown' };
+  } finally {
+    clearTimeout(timer);
+    await reader?.cancel().catch(() => undefined);
   }
   const parsed = safeParse(text);
   if (parsed === undefined || typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
@@ -119,78 +169,101 @@ async function callGate(capability: string, params: Json, context: Json, timeout
     return { ok: false, error: 'SDK gate returned an unrecognized response' };
   }
   const envelope = parsed as Json;
+  const receipt = gateReceipt(envelope);
 
   // Transport failure first — error envelopes do not carry the success shape.
   if (!response.ok) {
     const required = asString(envelope.required) || undefined;
+    const challenge=asObject(envelope.detail);
+    const hmacRequired=response.status===423&&challenge.error==='hmac_required_for_tier2_plus'&&challenge.capability===capability;
     log({ event: 'gate_error', capability, http: response.status, ms: Date.now() - started });
-    return { ok: false, error: detailOf(envelope) || 'SDK gate HTTP ' + response.status, ...(required ? { required } : {}) };
+    return { ok: false, error: detailOf(envelope) || 'SDK gate HTTP ' + response.status, ...(required ? { required } : {}), ...(hmacRequired?{hmacRequired:true as const}:{}), receipt };
   }
+  if (['ok', 'success'].some(key => key in envelope && typeof envelope[key] !== 'boolean')) return { ok: false, error: 'SDK gate returned an unrecognized success flag', receipt };
+  if (envelope.ok === false || envelope.success === false) return { ok: false, error: detailOf(envelope) || 'SDK gate reported failure', receipt };
+  if (envelope.status !== undefined && typeof envelope.status !== 'string') return { ok: false, error: 'SDK gate returned an unrecognized status', receipt };
   const status = asString(envelope.status).toLowerCase();
   if (status && !['ok', 'success', 'succeeded', 'completed', 'done'].includes(status)) {
     const warn = Array.isArray(envelope.warnings) && envelope.warnings.length ? redact(String(envelope.warnings[0])).slice(0, 600) : '';
     log({ event: 'gate_error', capability, status, ms: Date.now() - started });
-    return { ok: false, error: detailOf(envelope) || warn || 'SDK gate status ' + status };
+    return { ok: false, error: detailOf(envelope) || warn || 'SDK gate status ' + status, receipt };
   }
 
   // Extract the gate's result ({status_code, body}); tolerate a REST {success,data} shape.
   let result: Json | undefined;
   if (envelope.result !== undefined) {
+    if (!envelope.result || typeof envelope.result !== 'object' || Array.isArray(envelope.result)) return { ok: false, error: 'SDK gate returned an unrecognized result', receipt };
     result = asObject(envelope.result);
-  } else if (envelope.data !== undefined && 'success' in envelope) {
-    if (envelope.success === false) return { ok: false, error: detailOf(envelope) || 'SDK gate reported failure' };
+  } else if (envelope.data !== undefined && envelope.success === true) {
     result = { status_code: 200, body: envelope.data };
   }
   if (!result) {
     log({ event: 'gate_error', capability, reason: 'no_result' });
-    return { ok: false, error: 'SDK gate returned no result' };
+    return { ok: false, error: 'SDK gate returned no result', receipt };
   }
 
   const statusCode = result.status_code;
   let body: unknown = result.body;
-  if (typeof statusCode === 'number' && (statusCode < 200 || statusCode >= 300)) {
+  if (typeof statusCode !== 'number' || !Number.isInteger(statusCode)) return { ok: false, error: 'SDK gate returned an unrecognized result status', receipt };
+  if (statusCode < 200 || statusCode >= 300) {
     const parsedBody = typeof body === 'string' ? asObject(safeParse(body)) : asObject(body);
     const required = asString(parsedBody.required) || (statusCode === 401 || statusCode === 403 ? 'scope required' : '') || undefined;
     log({ event: 'gate_error', capability, status_code: statusCode, ms: Date.now() - started });
-    return { ok: false, error: detailOf(parsedBody) || 'SDK capability HTTP ' + statusCode, ...(required ? { required } : {}) };
+    return { ok: false, error: detailOf(parsedBody) || 'SDK capability HTTP ' + statusCode, ...(required ? { required } : {}), receipt };
   }
   if (typeof body === 'string') {
-    if (Buffer.byteLength(body) > MAX_BYTES) return { ok: false, error: 'SDK gate body exceeds bounded limit' };
+    if (Buffer.byteLength(body) > MAX_BYTES) return { ok: false, error: 'SDK gate body exceeds bounded limit', receipt };
     const decoded = safeParse(body);
-    if (decoded === undefined) return { ok: false, error: 'SDK gate returned an unrecognized body' };
+    if (decoded === undefined) return { ok: false, error: 'SDK gate returned an unrecognized body', receipt };
     body = decoded;
   }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, error: 'SDK gate returned an unrecognized body', receipt };
+  const value = body as Json;
+  if (['ok', 'success'].some(key => key in value && typeof value[key] !== 'boolean')) return { ok: false, error: 'SDK capability returned an unrecognized success flag', receipt };
+  if (value.ok === false || value.success === false || ['denied', 'gated', 'blocked'].includes(asString(value.verdict))) {
+    const required = asString(value.required) || undefined;
+    return { ok: false, error: detailOf(value) || 'SDK capability reported failure', ...(required ? { required } : {}), receipt };
+  }
   log({ event: 'gate_ok', capability, ms: Date.now() - started });
-  return { ok: true, body: asObject(body) };
+  return { ok: true, body: value, receipt };
+}
+
+function tierOf(cap: Json): number | null {
+  const metadata = asObject(cap.metadata), value = cap.tier ?? cap.danger_tier ?? metadata.danger_tier ?? metadata.tier;
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null;
+}
+function scopeOf(cap: Json): string {
+  return asString(cap.scope) || asString(cap.required_scope) || asString(asObject(cap.metadata).required_scope);
 }
 
 /** echo.caps.search body.caps[] -> the row shape sdkBroker.search maps. */
 function mapSearch(body: Json): Json {
-  const rows = Array.isArray(body.caps) ? body.caps : Array.isArray(body.results) ? body.results : [];
+  const rows = Array.isArray(body.caps) ? body.caps : Array.isArray(body.results) ? body.results : undefined;
+  if (!rows) return { ok: false, error: 'SDK catalog search returned an unrecognized result' };
   const results = rows.map((row) => {
     const cap = asObject(row);
-    const scope = asString(cap.scope) || asString(cap.required_scope);
-    const tier = Number(cap.tier ?? cap.danger_tier ?? 0);
+    const scope = scopeOf(cap), tier = tierOf(cap);
     return {
       id: asString(cap.id) || asString(cap.capability_id),
       description: asString(cap.description),
+      // echo.caps.search only selects lifecycle_status='active'; detail alone does not establish this.
       registered: typeof cap.registered === 'boolean' ? cap.registered : true,
       health_status: asString(cap.health) || asString(cap.health_status) || 'unknown',
-      metadata: { required_scope: scope, danger_tier: Number.isFinite(tier) ? tier : 0 },
+      metadata: { ...asObject(cap.metadata), required_scope: scope, danger_tier: tier },
     };
-  });
+  }).filter(row => CAP_ID_RE.test(row.id));
   return { results, sdk_catalog: { truncated: body.truncated === true } };
 }
 
-/** echo.caps.detail body.cap -> the record hub.ts/autoagents read (capability + registration_state + health_status). */
-function mapRead(body: Json): Json {
+/** Detail supplies metadata; a separate active search supplies registration for hub.ts/autoagents. */
+function mapRead(body: Json, registered: boolean): Json {
   const cap = asObject(body.cap ?? body.capability);
-  const scope = asString(cap.scope) || asString(cap.required_scope);
-  const capability: Json = { ...cap, required_scope: scope, metadata: { danger_tier: cap.tier, required_scope: scope } };
+  const scope = scopeOf(cap), tier = tierOf(cap);
+  const capability: Json = { ...cap, tier, danger_tier: tier, required_scope: scope, metadata: { ...asObject(cap.metadata), danger_tier: tier, required_scope: scope } };
   return {
     ok: true,
     capability,
-    registration_state: 'registered',
+    registration_state: registered ? 'registered' : 'unknown',
     health_status: asString(cap.health) || asString(cap.health_status) || 'unknown',
   };
 }
@@ -203,7 +276,7 @@ async function handleSearch(args: Json): Promise<Json> {
   if (!Number.isFinite(limit) || limit < 1) limit = 100;
   limit = Math.min(200, Math.floor(limit));
   const gate = await callGate('echo.caps.search', { command: 'search', options: { q: query, limit } }, {});
-  if (!gate.ok) return { ok: false, error: gate.error, ...(gate.required ? { required: gate.required } : {}) };
+  if (!gate.ok) return failedGate(gate);
   return mapSearch(gate.body);
 }
 
@@ -211,8 +284,17 @@ async function handleRead(args: Json): Promise<Json> {
   const capability = asString(args.capability).trim();
   if (!CAP_ID_RE.test(capability)) return { ok: false, error: 'read requires a valid echo.* capability id' };
   const gate = await callGate('echo.caps.detail', { command: 'detail', options: { capability } }, {});
-  if (!gate.ok) return { ok: false, error: gate.error, ...(gate.required ? { required: gate.required } : {}) };
-  return mapRead(gate.body);
+  if (!gate.ok) return failedGate(gate);
+  const cap = asObject(gate.body.cap ?? gate.body.capability);
+  if (cap.id !== capability) return { ok: false, error: 'SDK capability identity mismatch', sdk_gate: gate.receipt };
+  // Detail includes inactive definitions. Verify this exact ID in the active catalog before admitting it.
+  const active = await callGate('echo.caps.search', { command: 'search', options: { q: capability, limit: 200 } }, {});
+  const search = active.ok ? mapSearch(active.body) : undefined;
+  const registered = Array.isArray(search?.results) && search.results.some(row => asObject(row).id === capability && asObject(row).registered === true);
+  return {
+    ...mapRead(gate.body, registered), sdk_gate: gate.receipt,
+    registration_check: { verified: registered, ...(active.receipt ? { sdk_gate: active.receipt } : {}), ...(!registered ? { reason: !active.ok ? active.error : 'No exact active catalog entry was verified' } : {}) },
+  };
 }
 
 async function handleInvoke(args: Json): Promise<Json> {
@@ -236,8 +318,8 @@ async function handleInvoke(args: Json): Promise<Json> {
   if (idempotency) context.idempotency_key = idempotency.slice(0, 200);
   if (reason.length >= 50) context.bypass_reason = reason.slice(0, 600);
   const gate = await callGate(capability, params, context, timeoutMs);
-  if (!gate.ok) return { ok: false, error: gate.error, ...(gate.required ? { required: gate.required } : {}) };
-  return gate.body;
+  if (!gate.ok) return failedGate(gate);
+  return { ...gate.body, ...(Object.keys(gate.receipt).length ? { sdk_gate: gate.receipt } : {}) };
 }
 
 function toolDefinitions(): Json[] {

@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased -- per-bot workspaces (2026-11-08)
+
+- Add owner-admitted browser, app marketplace, OAuth callback, connection actions, memory revisions,
+  team import/export/templates/recovery and app-event watches to the echoBots workspace.
+- Extend scheduling controls with one-time, monthly, yearly and numeric five-field cron schedules.
+- Project the ADK's fixed resource schemas through the loopback client and existing owner/CSRF guards.
+  Preserve verified screenshot bytes and portable bundle hashes without display truncation.
+- Offer 32 bounded owner chat tools, including browser actions, connected operations, note editing and
+  app-watch creation/control. OAuth consent responses and credentials are never model tool arguments.
+- Report per-bot resource cleanup and provider revocation separately. Browser availability and app
+  consent remain actual service states; these changes do not mark unconfigured providers connected.
+
+## Unreleased -- bot autonomy hardening (2026-11-07)
+
+### Fixed
+
+- Advertise the host's validated chat deadline to the browser, which adds five seconds of transport
+  grace after its status check. Longer configured turns are no longer cancelled by the old fixed
+  125-second browser timer; Stop and account-change cancellation remain immediate.
+- Let a parent wait up to 25 seconds for a run's terminal output/proof in one read-only status
+  operation. Expiry remains incomplete; interrupted queries retain only the requested run ID.
+  Polling cannot resume or resubmit work and remains within the existing 30-second operation cap.
+- Allow an embedding host to configure the chat turn deadline from 1 to 300 seconds, retaining
+  the 120-second default and existing cancellation path. Browser/model requests cannot override it.
+- Reuse verified capability metadata within one delegation, with a 30-second expiry, to avoid
+  exhausting admission time on repeated catalog reads. Later operations re-read the catalog;
+  current bot state, leases, spending limits and the worker's SDK authorization still apply.
+- Preserve durable bot/run/message/event IDs when resume or result observation times out or is
+  cancelled. Unknown outcomes remain deduplicated and never claim completed output or proof.
+- A retained event whose run has been removed now reports `unavailable` with `done: false`;
+  it does not resume or resubmit the task.
+
 ## Unreleased -- consolidation pass (2026-08-11)
 
 ### Fixed
