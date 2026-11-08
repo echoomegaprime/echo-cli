@@ -31,6 +31,8 @@ export interface ToolContext {
  sessionId?:string;
  /** Stable id of the admitted parent turn, supplied by the host, never by tool arguments. */
  requestId?:string;
+ /** Host-only receipt observer. Runs after durable event admission, before potentially slow resume/status reads. */
+ onDelegationAdmission?:(receipt:DelegatedTask)=>void;
 }
 /** The shape every chat tool in this module takes, so the tool loop registers them with one spread. */
 export interface ChatTool {name:string;description:string;inputSchema:Record<string,unknown>;ownerOnly:true;readonly readOnly?:boolean;readonly deduplicate?:false;run(args:unknown,ctx:ToolContext):Promise<unknown>}
@@ -153,11 +155,32 @@ export class AutoAgents {
   if(!s.configured){this.emit('refused',{reason:'off'});throw new AutoagentError(503,s.reason!,'off');}
   return {adk:this.options.adk!,bots:this.options.bots!,caps:this.options.caps!,hash:this.identity(ctx,key,implicit)};
  }
+ /** Reuse verified metadata only inside one delegation. Each later operation gets a fresh lookup;
+  * an entry also expires after 30 seconds. The worker's SDK gate still authorizes every actual call. */
+ private delegationCatalog(caps:CapabilityLookup):CapabilityLookup{
+  const entries=new Map<string,{at:number;result:Promise<ResolvedCapability|undefined>}>();
+  return {
+   search:(query,signal)=>caps.search(query,signal),
+   async resolve(id,signal){
+    if(signal?.aborted)throw new AutoagentError(499,'Interrupted','interrupted');
+    let entry=entries.get(id);
+    if(!entry||Date.now()-entry.at>=30000){
+     entry={at:Date.now(),result:caps.resolve(id,signal).then(found=>found?{...found}:undefined)};
+     entries.set(id,entry);
+    }
+    const found=await entry.result;
+    if(signal?.aborted)throw new AutoagentError(499,'Interrupted','interrupted');
+    return found?{...found}:undefined;
+   },
+  };
+ }
  /** Every id must be an exact, registered catalog id. Unknown ids are listed in the refusal so the model can say so instead of guessing. */
  private async resolveAll(caps:CapabilityLookup,ids:string[],signal?:AbortSignal):Promise<BuiltCapability[]>{
   const out:BuiltCapability[]=[],unknown:string[]=[];
   for(const id of ids){
+   if(signal?.aborted)throw new AutoagentError(499,'Interrupted','interrupted');
    const found=await caps.resolve(id,signal);
+   if(signal?.aborted)throw new AutoagentError(499,'Interrupted','interrupted');
    if(!found||found.id!==id){unknown.push(id);continue;}
    const tier=typeof found.tier==='number'&&Number.isInteger(found.tier)&&found.tier>=0&&found.tier<=3?found.tier:null;
    out.push({id,tier,...(found.scope?{scope:found.scope}:{})});
@@ -188,11 +211,14 @@ export class AutoAgents {
  }
  /** `make_agent`: drafts and creates the Echo ADK definition for the prompt (or returns the one this prompt already produced). */
  async makeAgent(input:unknown,ctx:ToolContext):Promise<AutoagentBuilt>{
-  this.owner(ctx);const args=object(input),hash=this.identity(ctx,args.task_key,'agent:'+slugName(args.name));
-  return this.serial('agent:'+hash,()=>this.makeAgentInner(input,ctx));
+  return this.makeAgentWithCatalog(input,ctx);
  }
- private async makeAgentInner(input:unknown,ctx:ToolContext):Promise<AutoagentBuilt>{
-  const args=object(input),{adk,caps,hash}=this.require(ctx,args.task_key,'agent:'+slugName(args.name));
+ private async makeAgentWithCatalog(input:unknown,ctx:ToolContext,catalog?:CapabilityLookup):Promise<AutoagentBuilt>{
+  this.owner(ctx);const args=object(input),hash=this.identity(ctx,args.task_key,'agent:'+slugName(args.name));
+  return this.serial('agent:'+hash,()=>this.makeAgentInner(input,ctx,catalog));
+ }
+ private async makeAgentInner(input:unknown,ctx:ToolContext,catalog?:CapabilityLookup):Promise<AutoagentBuilt>{
+  const args=object(input),{adk,caps:liveCaps,hash}=this.require(ctx,args.task_key,'agent:'+slugName(args.name)),caps=catalog??liveCaps;
   if(!input||typeof input!=='object'||Array.isArray(input))throw new AutoagentError(400,'make_agent needs an object of arguments','invalid');
   for(const key of Object.keys(args))if(!['name','role','purpose','capabilities','skills','schedule','instruction','max_steps','budget','task_key'].includes(key))throw new AutoagentError(400,'make_agent: unknown argument '+redact(key).slice(0,40),'invalid');
   const name=slugName(args.name);
@@ -300,10 +326,10 @@ export class AutoAgents {
   return [...new Set(ids as string[])];
  }
  /** Approval is checked against live details and the bot's existing lease, never a tool-supplied tier/grant. */
- private async dispatchApproval(bot:Record<string,unknown>,ctx:ToolContext){
+ private async dispatchApproval(bot:Record<string,unknown>,ctx:ToolContext,catalog?:CapabilityLookup){
   const {adk,bots,caps}=this.require(ctx),agent=await adk.agent(bot.agent,ctx.signal),ids=this.agentCaps(agent),lease=object(bot.lease);
   if(!Array.isArray(lease.scopes)||lease.scopes.some(id=>typeof id!=='string'||!ids.includes(id)))throw new AutoagentError(502,'Bot lease is missing or outside its agent allowlist','invalid_service');
-  const resolved=await this.resolveAll(caps,lease.scopes as string[],ctx.signal),cap=num(bot.daily_cost_cap_usd);
+  const resolved=await this.resolveAll(catalog??caps,lease.scopes as string[],ctx.signal),cap=num(bot.daily_cost_cap_usd);
   const approval=this.gate(resolved,cap??Infinity,bots.config.defaultBudget.max_cost_usd);
   const cost=num(object(object(agent.lane).budget).max_cost_usd);
   if(cost===null||cost<0)approval.reasons.push('agent run cost allowance is not reported');
@@ -406,6 +432,7 @@ export class AutoAgents {
   this.reserveTask(ctx,key,fingerprint);
   const deliveryText='[Delegated task '+key+'; request_sha256 '+fingerprint+'; untrusted task data]\n'+text;
   return this.serial('task:'+hash,async()=>{
+   const catalog=this.delegationCatalog(caps);
    let bot:Record<string,unknown>,created=false;
    if(args.bot_id!==undefined)bot=await bots.get(identifier(args.bot_id,'bot'),ctx.signal);
    else{
@@ -415,11 +442,11 @@ export class AutoAgents {
      const cost=object(definition.budget).max_cost_usd;
      if(cost!==undefined&&(num(cost)===null||(cost as number)>Math.min(adk.config.defaultBudget.max_cost_usd,bots.config.defaultBudget.max_cost_usd)))throw new AutoagentError(403,'Delegated run cost exceeds the configured automatic spend allowance','approval_required');
      const base=slugName(definition.name)??'task-'+key;
-     const built=await this.makeAgent({...definition,name:base.slice(0,48)+'-'+hash.slice(0,12),role:definition.role??'researcher',purpose:definition.purpose??text.slice(0,AUTOAGENT_LIMITS.purpose),task_key:key},ctx);
+     const built=await this.makeAgentWithCatalog({...definition,name:base.slice(0,48)+'-'+hash.slice(0,12),role:definition.role??'researcher',purpose:definition.purpose??text.slice(0,AUTOAGENT_LIMITS.purpose),task_key:key},ctx,catalog);
      agentName=built.agent.name;
     }else agentName=textArg(args.agent,'agent',63);
     const agent=await adk.agent(agentName,ctx.signal),ids=this.agentCaps(agent);
-    await this.resolveAll(caps,ids,ctx.signal);
+    await this.resolveAll(catalog,ids,ctx.signal);
     const suffix=' '+hash.slice(0,24),name=(args.bot_name===undefined?'Task '+key:textArg(args.bot_name,'bot_name',BOTS_LIMITS.name)).slice(0,39)+suffix;
     const listed=(await bots.list(ctx.signal)).bots;
     const remembered=this.built.get(hash)?.botId;
@@ -434,15 +461,25 @@ export class AutoAgents {
    this.remember(hash,{botId,agent:agentName},ctx);
    const base:DelegatedTask={kind:'delegated_task',tool:'delegate_task',taskKey:key,task:str(text,AUTOAGENT_LIMITS.taskText),agent:agentName,botId,status:'queued',botStatus:String(bot.status),done:false,duplicate:false,untrusted:true,summary:''};
    const accepted=await this.serial('bot:'+botId,async()=>{
-    const latest=await bots.get(botId,ctx.signal),{approval}=await this.dispatchApproval(latest,ctx);
+    const latest=await bots.get(botId,ctx.signal),{approval}=await this.dispatchApproval(latest,ctx,catalog);
     if(approval.required)return {...base,status:'gated',done:true,approval:{required:true as const,reasons:approval.reasons},summary:'Delegation was not admitted: '+approval.reasons.join('; ')};
     const eventId='delegate-'+hash,receipt=await bots.event(botId,{event_id:eventId,source:'echo-delegation',text:deliveryText},ctx.signal);
+    const admitted:DelegatedTask={...base,runId:receipt.runId,messageId:receipt.messageId,eventId,status:String(receipt.status),botStatus:String(latest.status),done:['gated','done','failed'].includes(String(receipt.status)),duplicate:receipt.duplicate,
+     ...(receipt.status==='unavailable'?{error:{code:'status_unavailable',message:'The event receipt is retained, but its run is unavailable. Do not submit the task again.'}}:{}),
+     summary:receipt.status==='unavailable'?'Task admission is recorded, but its execution result is unavailable.':'Task admission was recorded; inspect its run result before claiming completion.'};
+    // This is an observed durable receipt, not model text or a claim of successful execution.
+    // Preserve it before the next await so the host can report IDs even when resume times out.
+    const publish=()=>{try{ctx.onDelegationAdmission?.(structuredClone(admitted));}catch{this.emit('receipt_observer_failed',{botId,runId:receipt.runId});}};
+    publish();
+    if(receipt.status==='unavailable')return admitted;
     let status=String(latest.status),resumeError:string|undefined;
     if(created&&latest.status==='paused'&&receipt.status==='queued'){
      try{status=String((await bots.resume(botId,ctx.signal)).status);}catch(error){status='unknown';resumeError=str(error instanceof Error?error.message:'resume failed',400);}
     }
-    return {...base,runId:receipt.runId,messageId:receipt.messageId,eventId,status:String(receipt.status),botStatus:status,done:['gated','done','failed','unavailable'].includes(String(receipt.status)),duplicate:receipt.duplicate,
-     ...(resumeError?{error:{code:'resume_failed',message:resumeError}}:{}),summary:resumeError?'Task is durably queued, but its bot could not resume.':status==='paused'?'Task is durably queued on a paused bot; no work was started.':'Task was admitted; inspect its run result before claiming completion.'};
+    Object.assign(admitted,{botStatus:status,
+     ...(resumeError?{error:{code:'resume_failed',message:resumeError}}:{}),summary:resumeError?'Task is durably queued, but its bot could not resume.':status==='paused'?'Task is durably queued on a paused bot; no work was started.':'Task was admitted; inspect its run result before claiming completion.'});
+    publish();
+    return admitted;
    });
    if(!accepted.runId||accepted.status==='unavailable')return accepted;
    const deadline=Date.now()+wait,readSignal=AbortSignal.any([AbortSignal.timeout(wait||1000),...(ctx.signal?[ctx.signal]:[])]);

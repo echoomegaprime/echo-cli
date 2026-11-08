@@ -1,11 +1,12 @@
 import {describe,expect,it,vi} from 'vitest';
 import {OwnerBotTools} from '../src/prime/bot-tools.js';
 import {DEFAULT_TOOLS,ToolKit,type ToolModule} from '../src/code/tools/index.js';
-import {AutoagentError,type ChatTool,type ToolContext} from '../src/code/tools/autoagents.js';
+import {AutoagentError,type ChatTool,type DelegatedTask,type ToolContext} from '../src/code/tools/autoagents.js';
 
 const ctx:ToolContext={owner:true,prompt:'Manage my worker',sessionId:'parent-session',requestId:'parent-request'};
 const action=(tool:string,args:Record<string,unknown>={})=>({action:'tool' as const,tool,args});
 const definition=(name:string,run:ChatTool['run'],readOnly=false):ChatTool=>({name,description:name,inputSchema:{type:'object'},ownerOnly:true,readOnly,run});
+const admittedTask=():DelegatedTask=>({kind:'delegated_task',tool:'delegate_task',taskKey:'catalog-task',task:'Inspect one catalog entry',agent:'catalog-reader',botId:'a'.repeat(32),runId:'b'.repeat(32),messageId:'c'.repeat(32),eventId:'delegate-original',status:'queued',botStatus:'paused',done:false,duplicate:false,untrusted:true,summary:'Task was admitted.'});
 
 describe('OwnerBotTools public execution contract',()=>{
  it('deduplicates identical mutations while preserving case-sensitive arguments',async()=>{
@@ -70,5 +71,60 @@ describe('OwnerBotTools public execution contract',()=>{
   const tools=new OwnerBotTools({tools:()=>[definition('list_bots',ownerRun,true)]},ctx,base,{calls:2,wallMs:10000,resultChars:6000});
   await tools.execute(action('fixture_read'));await tools.execute(action('list_bots'));const exhausted=await tools.execute(action('list_bots'));
   expect(baseRun).toHaveBeenCalledOnce();expect(ownerRun).toHaveBeenCalledOnce();expect(tools.used).toBe(2);expect(tools.budgetExhausted).toBe(true);expect(JSON.stringify(exhausted.result)).toMatch(/budget/i);
+ });
+ it('preserves durable admission IDs at the 30-second boundary without waiting or replaying the mutation',async()=>{
+  vi.useFakeTimers();
+  try{
+   const receipt=admittedTask();let admittedSignal:AbortSignal|undefined;
+   const run=vi.fn(async(_input:unknown,host:ToolContext)=>{
+    admittedSignal=host.signal;host.onDelegationAdmission?.(receipt);
+    receipt.runId='d'.repeat(32);receipt.summary='Later mutation must not replace the captured receipt';
+    return await new Promise<never>(()=>{});
+   });
+   const tools=new OwnerBotTools({tools:()=>[definition('delegate_task',run)]},ctx,undefined,{calls:8,wallMs:90000,resultChars:12000});
+   const args={task_key:'catalog-task',text:'Inspect one catalog entry',agent:'catalog-reader'};
+   const pending=tools.execute(action('delegate_task',args));
+   await vi.advanceTimersByTimeAsync(30001);
+   const result=(await pending).result;
+   expect(result).toMatchObject({kind:'delegated_task',taskKey:'catalog-task',runId:'b'.repeat(32),messageId:'c'.repeat(32),eventId:'delegate-original',status:'unavailable',done:false,botStatus:'unknown',state:'unknown',error:{code:'status_unavailable'}});
+   expect(result).not.toHaveProperty('output');expect(result).not.toHaveProperty('proof');
+   expect(admittedSignal?.aborted).toBe(true);expect(tools.delegatedTasks).toEqual([result]);
+   expect((await tools.execute(action('delegate_task',args))).result).toMatchObject({runId:'b'.repeat(32),deduplicated:true});
+   expect(run).toHaveBeenCalledOnce();expect(tools.used).toBe(1);
+  }finally{vi.useRealTimers();}
+ });
+ it('returns recorded admission after owner cancellation while leaving the current run outcome unknown',async()=>{
+  const controller=new AbortController();let publish:(receipt:DelegatedTask)=>void=()=>{};
+  const run=vi.fn(async(_input:unknown,host:ToolContext)=>{publish=host.onDelegationAdmission??(()=>{});publish(admittedTask());return await new Promise<never>(()=>{});});
+  const tools=new OwnerBotTools({tools:()=>[definition('delegate_task',run)]},ctx);
+  const pending=tools.execute(action('delegate_task',{task_key:'catalog-task'}),undefined,controller.signal);
+  controller.abort();
+  expect((await pending).result).toMatchObject({kind:'delegated_task',runId:'b'.repeat(32),status:'unavailable',done:false,state:'unknown'});
+  const snapshot=JSON.stringify(tools.delegatedTasks);
+  publish({...admittedTask(),status:'done',done:true,output:'Late callback'});
+  expect(JSON.stringify(tools.delegatedTasks)).toBe(snapshot);
+  expect(run).toHaveBeenCalledOnce();
+ });
+ it('does not invent admission IDs when cancellation wins before any receipt was published',async()=>{
+  const controller=new AbortController();let publish:(receipt:DelegatedTask)=>void=()=>{};
+  const run=vi.fn(async(_input:unknown,host:ToolContext)=>{publish=host.onDelegationAdmission??(()=>{});return await new Promise<never>(()=>{});});
+  const tools=new OwnerBotTools({tools:()=>[definition('delegate_task',run)]},ctx);
+  const pending=tools.execute(action('delegate_task',{task_key:'catalog-task'}),undefined,controller.signal);controller.abort();
+  const result=(await pending).result;
+  expect(result).toMatchObject({ok:false,state:'unknown'});expect(result).not.toHaveProperty('runId');
+  publish(admittedTask());expect(tools.delegatedTasks).toEqual([]);expect(run).toHaveBeenCalledOnce();
+ });
+ it('rejects a callback receipt for a different task instead of presenting false recovery evidence',async()=>{
+  const run=vi.fn(async(_input:unknown,host:ToolContext)=>{host.onDelegationAdmission?.({...admittedTask(),taskKey:'another-task'});throw new Error('Admission failed');});
+  const tools=new OwnerBotTools({tools:()=>[definition('delegate_task',run)]},ctx);
+  const result=(await tools.execute(action('delegate_task',{task_key:'catalog-task'}))).result;
+  expect(result).toMatchObject({ok:false,state:'failed'});expect(result).not.toHaveProperty('runId');expect(tools.delegatedTasks).toEqual([]);
+ });
+ it('keeps a normal terminal result and its proof when the tool completes inside the deadline',async()=>{
+  const proof={events_sha256:'e'.repeat(64),verdict:'PASS'};
+  const run=vi.fn(async(_input:unknown,host:ToolContext)=>{host.onDelegationAdmission?.(admittedTask());return {...admittedTask(),status:'done',done:true,output:'Actual worker output',proof};});
+  const tools=new OwnerBotTools({tools:()=>[definition('delegate_task',run)]},ctx);
+  const result=(await tools.execute(action('delegate_task',{task_key:'catalog-task'}))).result;
+  expect(result).toMatchObject({status:'done',done:true,output:'Actual worker output',proof});expect(tools.delegatedTasks).toEqual([result]);
  });
 });

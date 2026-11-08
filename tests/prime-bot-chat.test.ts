@@ -8,7 +8,7 @@ import {Workspace} from '../src/code/workspace.js';
 import {SessionStore,type Message} from '../src/code/sessions.js';
 import {DEFAULT_MODELS,ModelRouter} from '../src/code/model-factory.js';
 import type {Action,Model} from '../src/code/model.js';
-import type {AutoAgents,ChatTool,ToolContext} from '../src/code/tools/autoagents.js';
+import type {AutoAgents,ChatTool,DelegatedTask,ToolContext} from '../src/code/tools/autoagents.js';
 
 const BOT='a'.repeat(32),RUN='b'.repeat(32),MESSAGE='c'.repeat(32),HASH='d'.repeat(64);
 const dirs:string[]=[];
@@ -53,5 +53,23 @@ describe('owner bot tools in the real SharedChat turn loop',()=>{
   const chat=new SharedChat({...f,models:router,autoagents});
   await expect(chat.submit({requestId:randomUUID(),prompt:'List bots',owner:true})).rejects.toThrow('Invalid chat request');
   expect(run).not.toHaveBeenCalled();expect(model.next).not.toHaveBeenCalled();
+ });
+ it('returns an admitted run receipt when the owner stops the parent during resume',async()=>{
+  const f=fixture(),controller=new AbortController();let admitted!:()=>void;
+  const ready=new Promise<void>(resolve=>{admitted=resolve;});
+  const receipt:DelegatedTask={kind:'delegated_task',tool:'delegate_task',taskKey:'release-check',task:'Check release readiness',agent:'release-scout',botId:BOT,runId:RUN,messageId:MESSAGE,eventId:'task:release-check',status:'queued',done:false,duplicate:false,untrusted:true,summary:'Queued'};
+  const delegate=vi.fn(async(_args:unknown,host:ToolContext)=>{host.onDelegationAdmission?.(receipt);admitted();return await new Promise<never>(()=>{});});
+  const autoagents={tools:()=>[{name:'delegate_task',description:'Delegate',inputSchema:{type:'object'},ownerOnly:true,run:delegate}]} as unknown as AutoAgents;
+  const model:Model={next:vi.fn(async()=>({action:'tool',tool:'delegate_task',args:{task_key:'release-check',text:'Check release readiness',bot_id:BOT}}))};
+  const router=new ModelRouter({...DEFAULT_MODELS}),info={...router.turn('qwen').info(),answered:true};
+  vi.spyOn(router,'turn').mockReturnValue({model,answered:()=>info,info:()=>info});
+  const chat=new SharedChat({...f,models:router,autoagents});
+  const pending=chat.submit({requestId:randomUUID(),prompt:'Delegate a release check.'},controller.signal);
+  await ready;controller.abort();const result=await pending;
+  expect(result.status).toBe('interrupted');expect(delegate).toHaveBeenCalledOnce();
+  expect(result.delegatedTasks).toEqual([expect.objectContaining({runId:RUN,messageId:MESSAGE,eventId:receipt.eventId,status:'unavailable',done:false,state:'unknown'})]);
+  expect(result.delegatedTasks?.[0]).not.toHaveProperty('proof');expect(result.delegatedTasks?.[0]).not.toHaveProperty('output');
+  expect(result.tools?.events.some(event=>event.type==='tool_result'&&JSON.stringify(event.result).includes(RUN))).toBe(true);
+  expect(f.store.get(result.sessionId).messages.some(message=>message.content.includes(RUN))).toBe(true);
  });
 });

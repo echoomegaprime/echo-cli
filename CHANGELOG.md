@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased -- bot autonomy hardening (2026-11-07)
+
+### Fixed
+
+- Reuse verified capability metadata within one delegation, with a 30-second expiry, to avoid
+  exhausting admission time on repeated catalog reads. Later operations re-read the catalog;
+  current bot state, leases, spending limits and the worker's SDK authorization still apply.
+- Preserve durable bot/run/message/event IDs when resume or result observation times out or is
+  cancelled. Unknown outcomes remain deduplicated and never claim completed output or proof.
+- A retained event whose run has been removed now reports `unavailable` with `done: false`;
+  it does not resume or resubmit the task.
+
 ## Unreleased -- consolidation pass (2026-08-11)
 
 ### Fixed

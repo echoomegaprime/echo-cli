@@ -2,7 +2,7 @@ import {createHash,randomUUID} from 'node:crypto';
 import {DEFAULT_TOOLS,type TurnExecutor,type ExecuteOutcome} from '../code/tools/index.js';
 import type {ToolAction,ToolCall,ToolEvent,ToolsBudget} from '../code/tools/types.js';
 import {compact,errorText,redactDeep,refuseSecrets} from '../code/tools/util.js';
-import {AUTOAGENTS_PROMPT_FRAGMENT,AutoagentError,type AutoAgents,type ChatTool,type ToolContext} from '../code/tools/autoagents.js';
+import {AUTOAGENTS_PROMPT_FRAGMENT,AutoagentError,type AutoAgents,type ChatTool,type DelegatedTask,type ToolContext} from '../code/tools/autoagents.js';
 
 const canonical=(value:unknown):unknown=>Array.isArray(value)?value.map(canonical):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).sort(([a],[b])=>a.localeCompare(b)).map(([key,item])=>[key,canonical(item)])):value;
 
@@ -53,10 +53,20 @@ export class OwnerBotTools implements TurnExecutor {
   const hostAbort=()=>controller.abort();this.context.signal?.addEventListener('abort',hostAbort,{once:true});
   const timer=setTimeout(()=>controller.abort(),Math.max(1,Math.min(30000,this.budget.wallMs-this.elapsed())));
   let abortReject:(()=>void)|undefined;
+  let admission:DelegatedTask|undefined,acceptingAdmission=true;
+  // Only the service can publish this receipt, after durable event admission.
+  // Capture immutable identity fields before a slow resume/status read can time
+  // out; the timeout path must never infer completion or issue another write.
+  const onDelegationAdmission=(receipt:DelegatedTask)=>{
+   const id=(value:unknown)=>typeof value==='string'&&/^[a-f0-9]{32}$/.test(value);
+   if(!acceptingAdmission||call.tool!=='delegate_task'||receipt.kind!=='delegated_task'||receipt.tool!=='delegate_task'||receipt.taskKey!==call.args.task_key||!id(receipt.botId)||!id(receipt.runId)||!id(receipt.messageId)||typeof receipt.eventId!=='string'||!receipt.eventId||receipt.eventId.length>160||typeof receipt.agent!=='string'||!receipt.agent||typeof receipt.task!=='string')return;
+   if(admission&&(admission.botId!==receipt.botId||admission.runId!==receipt.runId||admission.messageId!==receipt.messageId||admission.eventId!==receipt.eventId))return;
+   admission=redactDeep({kind:'delegated_task',tool:'delegate_task',taskKey:receipt.taskKey,task:receipt.task,agent:receipt.agent,botId:receipt.botId,runId:receipt.runId,messageId:receipt.messageId,eventId:receipt.eventId,duplicate:receipt.duplicate===true,untrusted:true,status:'unavailable',done:false,botStatus:'unknown',summary:'Task admission is recorded; inspect its run for the current outcome.'}) as DelegatedTask;
+  };
   try{
    if(controller.signal.aborted)throw new Error('Interrupted before bot operation');
    const interrupted=new Promise<never>((_,reject)=>{abortReject=()=>reject(new Error('Bot operation interrupted or timed out; outcome unknown. Inspect its state before retrying.'));controller.signal.addEventListener('abort',abortReject,{once:true});});
-   const result=redactDeep(await Promise.race([tool.run(call.args,{...this.context,signal:controller.signal}),interrupted]));
+   const result=redactDeep(await Promise.race([tool.run(call.args,{...this.context,signal:controller.signal,onDelegationAdmission:call.tool==='delegate_task'?onDelegationAdmission:undefined}),interrupted]));
    this.collect(result);
    emit({type:'tool_result',tool:call.tool,request_id:requestId,sha256,at:new Date().toISOString(),result:compact(result,this.budget.resultChars),duration_ms:Date.now()-started,evidence:{status:'returned'}});
    return result;
@@ -65,10 +75,11 @@ export class OwnerBotTools implements TurnExecutor {
    // before bot creation. All uncertain failures retain their admission cache.
    const notStarted=!controller.signal.aborted&&call.tool==='make_bot'&&error instanceof AutoagentError&&error.status===404&&error.code==='agent_not_found';
    if(notStarted)onNotStarted?.();
-   const result={ok:false,error:errorText(error),state:controller.signal.aborted?'unknown':notStarted?'not_started':'failed'};
-   emit({type:'tool_result',tool:call.tool,request_id:requestId,sha256,at:new Date().toISOString(),result,duration_ms:Date.now()-started,evidence:{status:'failed'}});
+   const result=admission?{...admission,state:'unknown',error:{code:'status_unavailable',message:'Task admission was recorded, but the current run outcome is unavailable. Inspect this run before retrying.'},summary:'Task admission is recorded. Current run status is unavailable; use these IDs to inspect it. No work was resubmitted.'}:{ok:false,error:errorText(error),state:controller.signal.aborted?'unknown':notStarted?'not_started':'failed'};
+   this.collect(result);
+   emit({type:'tool_result',tool:call.tool,request_id:requestId,sha256,at:new Date().toISOString(),result:compact(result,this.budget.resultChars),duration_ms:Date.now()-started,evidence:{status:'failed'}});
    return result;
-  }finally{clearTimeout(timer);signal?.removeEventListener('abort',abort);this.context.signal?.removeEventListener('abort',hostAbort);if(abortReject)controller.signal.removeEventListener('abort',abortReject);}
+  }finally{acceptingAdmission=false;clearTimeout(timer);signal?.removeEventListener('abort',abort);this.context.signal?.removeEventListener('abort',hostAbort);if(abortReject)controller.signal.removeEventListener('abort',abortReject);}
  }
  private async one(call:ToolCall,onEvent?:((event:ToolEvent)=>void),signal?:AbortSignal):Promise<unknown>{
   const tool=this.definitions.get(call.tool);

@@ -1,4 +1,4 @@
-import {afterEach, describe, expect, it} from 'vitest';
+import {afterEach, describe, expect, it, vi} from 'vitest';
 import {createServer, type Server} from 'node:http';
 import type {AddressInfo} from 'node:net';
 import {AdkClient, DEFAULT_ADK} from '../src/prime/agents.js';
@@ -7,7 +7,7 @@ import {AutoAgents, type CapabilityLookup, type ToolContext} from '../src/code/t
 
 type Doc=Record<string,any>;
 const servers:Server[]=[];
-afterEach(async()=>{for(const server of servers.splice(0)){server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}});
+afterEach(async()=>{vi.restoreAllMocks();for(const server of servers.splice(0)){server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}});
 const ctx=(requestId='turn-1',sessionId='session-1'):ToolContext=>({owner:true,prompt:'Review two independent parts of this task.',sessionId,requestId});
 const reasoning={capabilities:[],role:'researcher',purpose:'Analyze the supplied information without external tools.'};
 const task=(task_key='review-a',extra:Doc={})=>({task_key,text:'Analyze the first component.',agent_definition:reasoning,...extra});
@@ -58,7 +58,7 @@ async function fixture(){
     state.eventActive++;state.maxEventActive=Math.max(state.maxEventActive,state.eventActive);
     if(state.eventDelay)await new Promise(resolve=>setTimeout(resolve,state.eventDelay));
     const key=b.bot_id+':'+body.source+':'+body.event_id,previous=state.events.get(key);
-    if(previous){state.eventActive--;if(previous.text!==body.text){reply(409,{error:'conflict',message:'event id content differs'});return;}reply(202,{...previous,event_id:body.event_id,duplicate:true,status:state.runs.get(previous.run_id)!.status});return;}
+    if(previous){state.eventActive--;if(previous.text!==body.text){reply(409,{error:'conflict',message:'event id content differs'});return;}reply(202,{...previous,event_id:body.event_id,duplicate:true,status:state.runs.get(previous.run_id)?.status??'unavailable'});return;}
     const queued=queue(b,body.text);state.events.set(key,{...queued,text:body.text});state.eventActive--;reply(202,{...queued,event_id:body.event_id,duplicate:false,status:'queued'});return;
    }
   }
@@ -85,6 +85,72 @@ describe('delegated parent subtasks',()=>{
   expect(f.writes('/bots')[0].body).toMatchObject({schedule:null,lease:{scopes:[]},daily_cost_cap_usd:0});
   const mutations=f.state.seen.filter(r=>r.method==='POST').map(r=>r.path);
   expect(mutations).toEqual(['/agents','/bots',`/bots/${result.botId}/events`,`/bots/${result.botId}/resume`]);
+ });
+ it('admits an SDK task within one verified catalog read per id instead of spending the allowance on repeated lookups',async()=>{
+  const f=await fixture(),resolve=f.options.caps.resolve;let reads=0;
+  f.options.caps.resolve=async(id,signal)=>{
+   if(++reads>1)throw new Error('The bounded catalog-read allowance is exhausted');
+   return resolve(id,signal);
+  };
+  const result=await f.auto.delegateTask(task('catalog-bounded',{agent_definition:{...reasoning,capabilities:['echo.knowledge.search']}}),ctx());
+  expect(result).toMatchObject({status:'done',done:true,output:'Verified fixture result'});
+  expect(reads).toBe(1);expect(f.state.events.size).toBe(1);
+ });
+ it('rechecks capabilities in a separate delegation instead of carrying a previous operation snapshot forward',async()=>{
+  const f=await fixture(),definition={...reasoning,capabilities:['echo.knowledge.search']};
+  const first=await f.auto.delegateTask(task('first-catalog',{agent_definition:definition}),ctx());
+  expect(first.status).toBe('done');
+  f.state.tiers.set('echo.knowledge.search',2);
+  const gated=await f.auto.delegateTask(task('changed-catalog',{agent_definition:definition}),ctx());
+  expect(gated).toMatchObject({status:'gated',approval:{required:true}});
+  f.state.tiers.delete('echo.knowledge.search');
+  await expect(f.auto.delegateTask(task('removed-catalog',{agent_definition:definition}),ctx())).rejects.toMatchObject({code:'unknown_capability'});
+  expect(f.state.events.size).toBe(1);expect(f.state.runs.size).toBe(1);
+ });
+ it('refreshes an expired operation snapshot before admitting a capability whose tier has changed',async()=>{
+  const f=await fixture(),clock=vi.spyOn(Date,'now').mockReturnValue(1000),readAgent=f.options.adk.agent.bind(f.options.adk);
+  f.options.adk.agent=async(...args)=>{
+   const agent=await readAgent(...args);
+   clock.mockReturnValue(31001);f.state.tiers.set('echo.knowledge.search',2);
+   return agent;
+  };
+  const result=await f.auto.delegateTask(task('expired-catalog',{agent_definition:{...reasoning,capabilities:['echo.knowledge.search']}}),ctx());
+  expect(result).toMatchObject({status:'gated',approval:{required:true}});
+  expect(f.state.resolved).toEqual(['echo.knowledge.search','echo.knowledge.search']);
+  expect(f.state.events.size).toBe(0);
+ });
+ it('checks the latest agent allowlist before admission even when capability metadata was already resolved',async()=>{
+  const f=await fixture(),readAgent=f.options.adk.agent.bind(f.options.adk);let reads=0;
+  f.options.adk.agent=async(...args)=>{
+   const agent=await readAgent(...args);
+   return ++reads===2?{...agent,capabilities:['echo.shell.run']}:agent;
+  };
+  await expect(f.auto.delegateTask(task('changed-allowlist',{agent_definition:{...reasoning,capabilities:['echo.knowledge.search']}}),ctx())).rejects.toMatchObject({code:'invalid_service'});
+  expect(f.state.events.size).toBe(0);expect(f.state.runs.size).toBe(0);
+ });
+ it('publishes the authoritative event receipt before a slow or unavailable resume',async()=>{
+  const f=await fixture(),receipts:Doc[]=[];let observedBeforeResume:Doc[]=[];
+  f.options.bots.resume=async()=>{observedBeforeResume=structuredClone(receipts);throw new Error('Resume response unavailable');};
+  const result=await f.auto.delegateTask(task(),{...ctx(),onDelegationAdmission:receipt=>receipts.push(structuredClone(receipt))});
+  expect(observedBeforeResume).toHaveLength(1);
+  expect(observedBeforeResume[0]).toMatchObject({kind:'delegated_task',botId:result.botId,runId:result.runId,messageId:result.messageId,eventId:result.eventId,status:'queued',botStatus:'paused',done:false});
+  expect(observedBeforeResume[0].output).toBeUndefined();expect(observedBeforeResume[0].proof).toBeUndefined();
+  expect(result).toMatchObject({status:'queued',done:false,error:{code:'resume_failed'}});
+  expect(f.state.events.size).toBe(1);
+ });
+ it('retains admission IDs when cancelled after the event without resuming or duplicating it',async()=>{
+  const f=await fixture(),controller=new AbortController(),receipts:Doc[]=[];
+  const result=await f.auto.delegateTask(task(),{...ctx(),signal:controller.signal,onDelegationAdmission:receipt=>{receipts.push(structuredClone(receipt));controller.abort();}});
+  expect(receipts[0]).toMatchObject({runId:result.runId,messageId:result.messageId,eventId:result.eventId});
+  expect(result.runId).toBeTruthy();expect(result.done).toBe(false);
+  expect(f.writes(`/bots/${result.botId}/resume`)).toHaveLength(0);
+  expect(f.state.events.size).toBe(1);expect(f.state.runs.size).toBe(1);
+ });
+ it('makes no admission writes when cancellation arrives during capability lookup',async()=>{
+  const f=await fixture(),controller=new AbortController();
+  f.options.caps.resolve=async id=>{controller.abort();return {id,tier:0};};
+  await expect(f.auto.delegateTask(task('cancel-catalog',{agent_definition:{...reasoning,capabilities:['echo.knowledge.search']}}),{...ctx(),signal:controller.signal})).rejects.toBeTruthy();
+  expect(f.state.agents.size).toBe(0);expect(f.state.events.size).toBe(0);
  });
  it('gives distinct subtasks from the same prompt distinct durable identities',async()=>{
   const f=await fixture(),first=await f.auto.delegateTask(task('review-a'),ctx()),second=await f.auto.delegateTask(task('review-b',{text:'Analyze a different component.'}),ctx());
@@ -146,6 +212,14 @@ describe('delegated parent subtasks',()=>{
   expect(result).toMatchObject({status:'queued',error:{code:'status_unavailable'}});expect(result.runId).toBeTruthy();expect(f.state.runs.size).toBe(1);
   f.state.failStatus=false;expect(await f.auto.delegateTask(task(),ctx())).toMatchObject({runId:result.runId,status:'done',duplicate:true});
   expect(f.writes('/agents')).toHaveLength(1);expect(f.writes('/bots')).toHaveLength(1);
+ });
+ it('returns retained duplicate admission IDs without claiming completion when its run is no longer available',async()=>{
+  const f=await fixture(),first=await f.auto.delegateTask(task(),ctx());
+  f.state.runs.delete(first.runId!);
+  const retained=await new AutoAgents(f.options).delegateTask(task(),ctx());
+  expect(retained).toMatchObject({runId:first.runId,eventId:first.eventId,messageId:first.messageId,status:'unavailable',done:false,duplicate:true,error:{code:'status_unavailable'}});
+  expect(retained.output).toBeUndefined();expect(retained.proof).toBeUndefined();
+  expect(f.state.events.size).toBe(1);expect(f.state.runs.size).toBe(0);expect(f.state.messages).toHaveLength(1);
  });
  it('validates bounded waits and host cancellation before any request',async()=>{
   const f=await fixture();

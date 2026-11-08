@@ -75,6 +75,12 @@ The parent gathers unfinished work with `bot_run_status({run_id})`. Returned out
 
 If an operation times out or is interrupted, the wrapper reports an unknown outcome where appropriate. The parent must inspect the returned IDs or recover the same task identity before retrying. A queued receipt, a running status, or a proof object alone is not a successful task result.
 
+Immediately after durable event admission, a host-only callback records the returned bot, run,
+message and event IDs before resume or result reads begin. If the existing 30-second operation
+deadline or cancellation fires afterward, those IDs remain in the tool result and delegated card,
+with `status: "unavailable"`, `done: false`, and no claimed output or proof. The wrapper does not
+wait indefinitely or send a recovery mutation. Before admission is observed, it invents no IDs.
+
 ## 4. Identity, duplicate admission, and recovery
 
 Modern task identity combines the host's `sessionId` and `requestId` with `task_key`. Different keys identify independent subtasks, even when their text matches. Reusing a key for changed task arguments is a conflict. `wait_ms` affects observation only and is excluded from the task-content fingerprint.
@@ -90,6 +96,12 @@ Delegated event IDs are `delegate-<task identity hash>`. The service scopes idem
 ## 5. Capabilities, reasoning workers, and execution gates
 
 Nonempty capability lists must contain exact IDs discovered through the live SDK catalog. Before granting them, `brokerCapabilityLookup` reads each exact ID, requires verified registration, and refuses red/orphaned/unregistered health. The SDK bridge verifies registration using detail plus an exact match in the active search result: detail alone can describe inactive entries. Missing, malformed, or invalid tiers remain `null`; they are never coerced to tier 0. `resolveAll` accepts integer tiers 0 through 3 and treats anything else as unknown.
+
+One `delegate_task` invocation reuses that verified metadata across its agent creation and admission
+checks; each entry expires 30 seconds after lookup starts. The snapshot is private to that invocation
+and is never supplied by model arguments or reused by a later operation. Bot state, agent allowlists,
+leases and spend are read again before admission, and the worker's SDK gate independently validates
+each actual capability call. This removes repeated catalog latency without granting execution scope.
 
 The paired current ADK service can resolve a capability missing from its local registry through its authenticated `GateBroker`: it verifies exact active membership and metadata, then registers that definition locally. Absence from the builtin registry is therefore not an unconditional refusal for a verified SDK capability. Unknown, inactive, unhealthy, conflicting, or incomplete metadata still fails closed. Catalog discovery does not prove that the configured credential has execution scope or that a downstream handler/provider works. It does not register new global SDK capabilities or manufacture scope names.
 
