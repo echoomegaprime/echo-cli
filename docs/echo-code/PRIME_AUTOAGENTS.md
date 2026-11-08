@@ -58,7 +58,18 @@ The parent model invokes the tools through the normal action protocol:
 {"action":"tool","tool":"list_bots","args":{"limit":20}}
 ```
 
-It may submit a batch with `action: "tools"` and a `calls` array. `OwnerBotTools` executes at most four calls from a batch, sequentially, and reports how many were omitted. Bot operations share the existing turn's tool allowance; registering them does not create a second allowance. Defaults are 12 tool calls, 60 seconds of tool time, and 6,000 characters per model-facing result, tunable through the reviewed tools configuration. Each owner operation is also bounded by the remaining allowance and a 30-second maximum. The chat itself defaults to a 120-second deadline and permits up to 30 model steps when bot tools are attached. An embedding host may set `SharedChatOptions.turnTimeoutMs` to an integer from 1,000 to 300,000 milliseconds; this uses the existing cancellation path and cannot be overridden in browser/model requests. These are admission and observation limits, not a guarantee that child work finishes during the parent turn.
+It may submit a batch with `action: "tools"` and a `calls` array. `OwnerBotTools` executes at most four calls from a batch, sequentially, and reports how many were omitted. Bot operations share the existing turn's tool allowance; registering them does not create a second allowance. Defaults are 12 tool calls, 60 seconds of tool time, and 6,000 characters per model-facing result, tunable through the reviewed tools configuration. Each owner operation is also bounded by the remaining allowance and a 30-second maximum. The chat itself defaults to a 120-second deadline and permits up to 30 model steps when bot tools are attached. The ordinary `echo-code prime --config <file>` command accepts `chat.turnTimeoutMs` as an integer from 1,000 to 300,000 milliseconds. An embedding host may set the same limit through `SharedChatOptions.turnTimeoutMs`. Both paths use the same validation and cancellation behavior; browser/model requests cannot override it. These are admission and observation limits, not a guarantee that child work finishes during the parent turn.
+
+For tasks that need several model and tool steps, merge the following into the reviewed local configuration. The `models` section still has to be configured separately to attach chat. A chat deadline does not change an individual model's timeout, child-bot limits or the tool budget; the example sets the tool budget explicitly as well.
+
+```json
+{
+  "chat": {"turnTimeoutMs": 300000},
+  "tools": {"budget": {"calls": 8, "wallMs": 240000}}
+}
+```
+
+Omitting `chat` or using an empty object preserves 120,000 milliseconds. Unknown chat fields, non-object sections, fractional values and values outside the allowed range fail startup before any owner connection or session state is opened. A chat section alone does not enable models, SDK access or bot capabilities.
 
 The authenticated `/api/status` response advertises that validated limit as `chat.turnTimeoutMs`. After its bounded status/admission check, the browser starts one response timer using the advertised host limit plus 5,000 milliseconds of transport grace. The default remains 125,000 milliseconds; a missing, non-integer, or out-of-range status value uses that default. Activity does not extend the timer, and Stop, account changes, and page exit still cancel the request. The browser never sends a deadline override to the host.
 

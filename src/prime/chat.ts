@@ -15,6 +15,16 @@ import type {AutoAgents} from '../code/tools/autoagents.js';
 import {OwnerBotTools} from './bot-tools.js';
 import {PrimeAutonomyHooks,type BeforeTurn,type AutonomyActivity} from './autonomy-hooks.js';
 import {isPrimeRole,type PrimeRole,type RoleState} from './roles.js';
+export interface ChatConfig {turnTimeoutMs:number}
+/** Reviewed host configuration only; a chat section never enables a model or owner connection. */
+export function parseChatConfig(value:unknown):ChatConfig{
+ const input=value===undefined?{}:value;
+ if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(key=>key!=='turnTimeoutMs'))throw new Error('Invalid chat configuration: only turnTimeoutMs is supported');
+ const requested=(input as Record<string,unknown>).turnTimeoutMs;
+ const turnTimeoutMs=requested===undefined?120000:requested;
+ if(typeof turnTimeoutMs!=='number'||!Number.isInteger(turnTimeoutMs)||turnTimeoutMs<1000||turnTimeoutMs>300000)throw new Error('chat.turnTimeoutMs must be an integer between 1000 and 300000');
+ return {turnTimeoutMs};
+}
 /** Either the authenticated host path (invoke + admission) or a reviewed model router (Qwen on loopback, or a vendor CLI). `tools` = the always-on live tools (web, Wolfram, knowledge, skills, MCP) for router turns. */
 export interface SharedChatOptions {
  workspace:Workspace;store:SessionStore;invoke?:CodingInvoker;admission?:CodingAdmission;models?:ModelRouter;personality?:PersonalityForge;tools?:ToolKit;autonomyHooks?:PrimeAutonomyHooks;autoagents?:AutoAgents;
@@ -47,9 +57,7 @@ export class SharedChat {
  private busy=false;private used=new Set<string>();private options:SharedChatOptions;private readonly turnTimeoutMs:number;
  constructor(options:SharedChatOptions){
   if(!options.models&&!(typeof options.invoke==='function'&&options.admission))throw new Error('Shared chat needs a model router or an authenticated host invoker with owner admission');
-  const timeout=options.turnTimeoutMs===undefined?120000:options.turnTimeoutMs;
-  if(typeof timeout!=='number'||!Number.isInteger(timeout)||timeout<1000||timeout>300000)throw new Error('turnTimeoutMs must be an integer between 1000 and 300000');
-  this.turnTimeoutMs=timeout;
+  this.turnTimeoutMs=parseChatConfig({turnTimeoutMs:options.turnTimeoutMs}).turnTimeoutMs;
   this.options={...options,...(options.admission?{admission:{...options.admission}}:{})};
  }
  get personality():PersonalityForge|undefined{return this.options.personality;}

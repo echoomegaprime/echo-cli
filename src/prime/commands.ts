@@ -5,7 +5,7 @@ import {homedir} from 'node:os';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {PrimeHub,type Capability,type Json} from './hub.js';
-import {SharedChat} from './chat.js';
+import {SharedChat,parseChatConfig} from './chat.js';
 import {PersonalityForge} from './personality.js';
 import {Workspace} from '../code/workspace.js';
 import {SessionStore} from '../code/sessions.js';
@@ -32,7 +32,7 @@ import {PrimeAutonomyHooks} from './autonomy-hooks.js';
 import {FleetRoles,parseRolesConfig} from './roles.js';
 import {parseMediaConfig,resolveMediaHost} from './media-collect.js';
 import {MediaOutcomes,prepareOutcomesFile} from './media-outcomes.js';
-interface PrimeConfig {esh?:StdioConfig;sdk?:StdioConfig&{tools:SdkTools;fixedArguments?:Json};steward?:StdioConfig&{tools:StewardTools};workspace?:WorkspaceConfig;publicOrigin?:string;models?:unknown;swarm?:unknown;voice?:unknown;adk?:unknown;bots?:unknown;browser?:unknown;uploads?:unknown;tools?:unknown;build?:unknown;autonomy?:unknown;roles?:unknown;media?:unknown}
+interface PrimeConfig {esh?:StdioConfig;sdk?:StdioConfig&{tools:SdkTools;fixedArguments?:Json};steward?:StdioConfig&{tools:StewardTools};workspace?:WorkspaceConfig;publicOrigin?:string;models?:unknown;chat?:unknown;swarm?:unknown;voice?:unknown;adk?:unknown;bots?:unknown;browser?:unknown;uploads?:unknown;tools?:unknown;build?:unknown;autonomy?:unknown;roles?:unknown;media?:unknown}
 export function registerPrimeCommands(code:Command){
  code.command('prime').description('Open the local ECHO Prime interface with explicitly configured owner connections')
  .option('--config <file>','Reviewed local MCP connection configuration; never imported automatically')
@@ -41,6 +41,7 @@ export function registerPrimeCommands(code:Command){
  .option('--code-state-dir <path>','Private local session directory for the code agent',join(process.env.LOCALAPPDATA||join(homedir(),'.local','share'),'EchoCode','sessions'))
  .action(async(opts:{config?:string;port:string;codeWorkspace:string;codeStateDir:string})=>{
   const config:PrimeConfig=opts.config?JSON.parse(await readFile(opts.config,'utf8')):{};
+  const chatConfig=parseChatConfig(config.chat);
   const autonomy=parseAutonomyConfig(config.autonomy),rolesConfig=parseRolesConfig(config.roles);
   // Media: call kinds the gate runs, time limits and where generated files may be read from. Outcomes of real Studio runs
   // persist beside the code sessions unless the section names another file.
@@ -78,7 +79,7 @@ export function registerPrimeCommands(code:Command){
    const autoagents=adk&&bots&&broker?new AutoAgents({adk,bots,caps:brokerCapabilityLookup(broker)}):undefined;
    let chat:SharedChat|undefined;
    // Personality Forge settings (off switch, pinned profile) are an owner setting kept beside the code sessions.
-   if(router){const store=new SessionStore(opts.codeStateDir);chat=new SharedChat({workspace:new Workspace(opts.codeWorkspace,[store.directory]),store,models:router,tools,personality:new PersonalityForge({file:join(store.directory,'personality-settings.json')}),autonomyHooks,autoagents:toolsConfig.enabled?autoagents:undefined});}
+   if(router){const store=new SessionStore(opts.codeStateDir);chat=new SharedChat({workspace:new Workspace(opts.codeWorkspace,[store.directory]),store,models:router,tools,personality:new PersonalityForge({file:join(store.directory,'personality-settings.json')}),autonomyHooks,autoagents:toolsConfig.enabled?autoagents:undefined,turnTimeoutMs:chatConfig.turnTimeoutMs});}
    builds=config.build!==undefined?new BuildRunner(parseBuildConfig(config.build)):undefined;
    const uploads=config.uploads!==undefined?new UploadStore(parseUploadsConfig(config.uploads)):undefined;
    // The reviewed `adk` section (loopback echo-adk-api, default 127.0.0.1:8378) is opt-in like `swarm`: absent = Agents view says it is off.
