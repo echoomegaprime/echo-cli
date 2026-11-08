@@ -1,5 +1,7 @@
 # Parity and intentional limits
 
+**Historical coding-agent preview comparison.** This table records the ECHO 0.1 preview described below, before the current bot workspace implementation. Its missing-feature rows are not the current Prime/ADK feature inventory. See [Echo bot workspaces](ECHO_BOT_WORKSPACES.md) and [owner bot controls and delegation](PRIME_AUTOAGENTS.md) for current source behavior and remaining activation requirements. These source guides do not establish live deployment or comparative model superiority.
+
 The reference column describes observed documentation/source/help, not verified paid-provider behavior. ECHO entries refer to this local preview's tests and smoke evidence. No blanket parity claim is made.
 
 | Capability | Muse reference | ECHO 0.1 result |

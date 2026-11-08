@@ -59,7 +59,7 @@
    // is refused by design and a 405 from a route this host does not serve is not an identity event.
    const ws=workspace();
    if((response.status===401||response.status===403)&&(!data||data.source!=='bot_service')&&owner&&ws&&typeof ws.invalidate==='function'){ws.invalidate();debug('invalidated',{status:response.status,url});}
-   const error=new Error(data&&typeof data.error==='string'?data.error:'echoBots request failed (HTTP '+response.status+')');error.status=response.status;error.outcomeUnknown=data&&data.outcome_unknown===true;throw error;
+   const error=new Error(data&&typeof data.error==='string'?data.error:'echoBots request failed (HTTP '+response.status+')');error.status=response.status;error.outcomeUnknown=data&&typeof data.outcome_unknown==='boolean'?data.outcome_unknown:undefined;error.code=data&&typeof data.code==='string'?data.code:undefined;error.source=data&&data.source==='bot_service'?'bot_service':undefined;throw error;
   }
   if(!data||typeof data!=='object')throw new Error('echoBots returned an unrecognized response');
   return data;

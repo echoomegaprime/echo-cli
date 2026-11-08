@@ -14,6 +14,7 @@
  function mount(container,options){
   const controller=new AbortController(),bot=options.bot,botId=bot&&bot.bot_id;
   let current=options.mode==='teams'?'teams':'browser',epoch=0,busy=false,closed=false;
+  let continuityDraft={title:'',detail:'',key:'',pending:false,captureId:'',state:''};
   const title=el('h3',bot?bot.name+' · workspace':'Teams & templates'),tabs=el('div',undefined,'bots-toolbar');
   const notice=el('p','', 'bots-notice');notice.setAttribute('role','status');notice.setAttribute('aria-live','polite');
   const content=el('section',undefined,'bot-workspace-content');
@@ -158,6 +159,63 @@
     act('Save notes',async()=>{const saved=await scoped('memory.edit',{text:notes.value,expected_revision:value.revision});Object.assign(value,saved);notes.value=saved.text;meta.textContent='Revision '+saved.revision;say('Memory saved.');}),
     act('Revision history',async()=>{const revisions=await scoped('memory.revisions',{limit:50});if(closed||mine!==epoch)return;history.replaceChildren();for(const revision of revisions.revisions||[]){const row=el('div',undefined,'bot-browser-control');row.append(el('span','Revision '+revision.revision+' · '+(revision.created_at||revision.updated_at||'')),act('Restore this revision',async()=>{await scoped('memory.restore',{revision:revision.revision,expected_revision:value.revision});say('A new revision restored the selected notes.');await memory(mine);}));history.append(row);}}),history);
   }
+  async function continuity(mine){
+   const status=await scoped('continuity.status');if(closed||mine!==epoch)return;
+   const captures=Array.isArray(status.captures)?status.captures.slice(0,128):[];
+   const matching=captures.filter(row=>row.request_ref===continuityDraft.key);
+   if(continuityDraft.key&&matching.length===1&&HEX.test(matching[0].capture_id)){
+    continuityDraft.captureId=matching[0].capture_id;continuityDraft.state=matching[0].state;
+   }
+   const labels={prepared:'Not yet confirmed',uncertain:'Outcome unconfirmed',saved:'Saved; content verification pending',verified:'Saved and verified',blocked:'Capture blocked',conflict:'Capture conflict'};
+   const label=row=>row.verified===true&&row.state==='verified'?'Saved and verified':labels[row.state]||'Status unavailable';
+   const configured=status.configured===true,permitted=status.lease_permits_capture===true;
+   const availability=el('p',!configured?'Continuity is not configured for this bot.':!permitted?'This bot does not have the required continuity permissions.':'Continuity is configured. Each capture still requires service authorization and verification.','bots-meta');
+   const noteTitle=input(continuityDraft.title);noteTitle.maxLength=200;
+   const detail=area(continuityDraft.detail,6);detail.maxLength=4000;
+   noteTitle.disabled=detail.disabled=continuityDraft.pending;
+   noteTitle.addEventListener('input',()=>{if(!continuityDraft.pending)continuityDraft.title=noteTitle.value;});
+   detail.addEventListener('input',()=>{if(!continuityDraft.pending)continuityDraft.detail=detail.value;});
+   const submit=act('Capture note',async()=>{
+    if(continuityDraft.pending)throw new Error('Inspect the existing capture before submitting another note');
+    if(!noteTitle.value.trim()||!detail.value.trim())throw new Error('Enter a title and note');
+    if(typeof window.crypto?.randomUUID!=='function')throw new Error('This browser cannot create a capture identifier');
+    continuityDraft={title:noteTitle.value,detail:detail.value,key:window.crypto.randomUUID(),pending:true,captureId:'',state:'uncertain'};
+    submit.dataset.unavailable='true';noteTitle.disabled=detail.disabled=true;
+    let receipt;
+    try{receipt=await scoped('continuity.capture',{request_ref:continuityDraft.key,title:continuityDraft.title,detail:continuityDraft.detail});}
+    catch(error){
+     // The capture contract's typed invalid/400 response is pre-dispatch.
+     // All other failures retain the original identity and require inspection.
+     if(error.source==='bot_service'&&error.status===400&&error.code==='invalid'&&error.outcomeUnknown===false){
+      continuityDraft={...continuityDraft,key:'',pending:false,captureId:'',state:''};
+      submit.dataset.unavailable=String(!configured||!permitted);noteTitle.disabled=detail.disabled=false;
+     }
+     throw error;
+    }
+    continuityDraft.captureId=receipt.capture_id;continuityDraft.state=receipt.state;
+    await continuity(mine);say(label(receipt)+'.');
+   });
+   submit.dataset.unavailable=String(!configured||!permitted||continuityDraft.pending);submit.disabled=submit.dataset.unavailable==='true';
+   const form=el('section');form.append(field('Capture title',noteTitle),field('Continuity note',detail),submit);
+   if(continuityDraft.pending){
+    form.append(el('p','This note has already been submitted. Refresh the capture list and reconcile its existing entry if the outcome is unconfirmed.','bots-meta'));
+    if(continuityDraft.captureId&&['verified','blocked','conflict'].includes(continuityDraft.state))form.append(act('Start a separate note',async()=>{continuityDraft={title:'',detail:'',key:'',pending:false,captureId:'',state:''};await continuity(mine);}));
+   }
+   const history=el('section');history.append(el('h4','Capture history'));
+   for(const receipt of captures){
+    if(!receipt||!HEX.test(receipt.capture_id)||receipt.bot_id!==botId)continue;
+    const card=el('article',undefined,'bots-card');card.append(el('h4',text(receipt.title)),el('p',label(receipt),'bots-meta'));
+    if(receipt.reason)card.append(el('p',text(receipt.reason),'bots-meta'));
+    const details=el('details');details.append(el('summary','Capture receipt'),el('pre',json(receipt),'bot-workspace-output'));card.append(details);
+    if(receipt.state!=='verified'){
+     const reconcile=act('Reconcile capture',async()=>{const result=await scoped('continuity.reconcile',{capture_id:receipt.capture_id});await continuity(mine);say(label(result)+'.');});
+     reconcile.dataset.unavailable=String(!configured||!permitted);reconcile.disabled=reconcile.dataset.unavailable==='true';card.append(reconcile);
+    }
+    history.append(card);
+   }
+   if(!captures.length)history.append(el('p','No continuity captures for this bot.','bots-meta'));
+   content.replaceChildren(el('h4','Continuity'),availability,el('p','Captures use shared continuity storage and are attributed to this bot. Only the note you enter here is submitted.','bots-meta'),form,el('p','Reconciliation uses the original capture identity and may finish the same submission. Refreshing this view only reads status.','bots-meta'),history);
+  }
   async function teams(mine){
    const catalog=await api('team.templates');if(closed||mine!==epoch)return;
    const bundle=area('',8);bundle.maxLength=262144;bundle.setAttribute('aria-label','Portable team JSON');bundle.placeholder='Paste an exported team or choose a template';
@@ -190,9 +248,9 @@
   async function render(tab){
    if(busy||closed)return;current=tab;const mine=++epoch;say('Loading…');content.replaceChildren();
    for(const node of tabs.children)node.setAttribute('aria-pressed',String(node.dataset.tab===tab));
-   try{await ({browser,apps,memory,teams}[tab])(mine);if(!closed&&mine===epoch)say('');}catch(error){if(!closed&&mine===epoch&&error.name!=='AbortError')say(error.message);}
+   try{await ({browser,apps,memory,continuity,teams}[tab])(mine);if(!closed&&mine===epoch)say('');}catch(error){if(!closed&&mine===epoch&&error.name!=='AbortError')say(error.message);}
   }
-  for(const [key,label] of (bot?[['browser','Browser'],['apps','Apps'],['memory','Memory'],['teams','Teams']]:[['teams','Teams & templates']])){const tab=button(label,()=>render(key));tab.dataset.tab=key;tabs.append(tab);}
+  for(const [key,label] of (bot?[['browser','Browser'],['apps','Apps'],['memory','Memory'],['continuity','Continuity'],['teams','Teams']]:[['teams','Teams & templates']])){const tab=button(label,()=>render(key));tab.dataset.tab=key;tabs.append(tab);}
   tabs.append(button('Refresh',()=>render(current)));
   void render(current);
   return {destroy(){closed=true;controller.abort();epoch++;}};

@@ -192,10 +192,25 @@ export class BotsClient {
  /** Fixed, versioned workspace contracts; never a caller-provided path or host. */
  async workspace(operation:string,input:unknown={},signal?:AbortSignal){
   const {route,method,query,body}=botWorkspaceRequest(operation,input);
-  const result=await this.request(route,35000,{method,query,body},signal,true);
+  const timeoutMs=['continuity.capture','continuity.reconcile'].includes(operation)?55000:35000;
+  const result=await this.request(route,timeoutMs,{method,query,body},signal,true,operation==='continuity.capture');
   const params=input as Record<string,unknown>;
   if(params.bot_id!==undefined&&result.bot_id!==params.bot_id)throw new BotsError(502,'Bot workspace answered for a different bot'+(method!=='GET'?'; outcome unknown':''),'invalid_receipt',method!=='GET');
   const refuse=()=>{throw new BotsError(502,'Bot workspace did not return a valid operation receipt'+(method!=='GET'?'; outcome unknown':''),'invalid_receipt',method!=='GET');};
+  if(operation.startsWith('continuity.')){
+   const bounded=(value:unknown,max:number)=>typeof value==='string'&&value.length>0&&value.length<=max;
+   const hex64=(value:unknown)=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
+   const validCapture=(value:unknown)=>{
+    const row=obj(value),receipt=obj(row.receipt);
+    if(row.bot_id!==params.bot_id||typeof row.capture_id!=='string'||!HEX.test(row.capture_id)||!bounded(row.request_ref,100)||!/^[A-Za-z0-9_.:-]+$/.test(row.request_ref as string)||!bounded(row.title,200)||!bounded(row.project_id,512)||!bounded(row.request_id,300)||!hex64(row.content_sha256)||!['prepared','uncertain','saved','verified','blocked','conflict'].includes(String(row.state))||typeof row.saved!=='boolean'||typeof row.verified!=='boolean'||row.untrusted!==true||row.shared_remote_ledger!==true||!Number.isSafeInteger(row.attempts)||Number(row.attempts)<0||Number(row.attempts)>8||!Array.isArray(row.routing_ids)||row.routing_ids.length>16||!row.routing_ids.every(id=>typeof id==='string'&&/^[A-Za-z0-9_-]{1,100}$/.test(id))||(row.reason!==null&&!bounded(row.reason,1000)))return false;
+    if(row.verified!==(row.state==='verified')||row.saved!==(row.state==='saved'||row.state==='verified')||(row.receipt===null)!==!row.saved)return false;
+    if(row.receipt===null)return row.saved===false&&row.verified===false;
+    return ['id','eventId'].every(key=>typeof receipt[key]==='string'&&/^[A-Za-z0-9_-]{1,100}$/.test(receipt[key] as string))&&receipt.kind==='note'&&receipt.requestId===row.request_id&&receipt.contentSha256===row.content_sha256&&receipt.saved===true&&receipt.verified===true&&receipt.receiptState==='capture_verified'&&typeof receipt.duplicate==='boolean';
+   };
+   if(operation==='continuity.status'){
+    if(typeof result.configured!=='boolean'||typeof result.lease_permits_capture!=='boolean'||result.remote_authorization_verified!==false||result.shared_remote_ledger!==true||result.untrusted!==true||!Array.isArray(result.captures)||result.captures.length>128||!result.captures.every(validCapture)||new Set(result.captures.map(row=>obj(row).capture_id)).size!==result.captures.length)refuse();
+   }else if(!validCapture(result)||(operation==='continuity.capture'&&result.request_ref!==params.request_ref)||(operation==='continuity.reconcile'&&result.capture_id!==params.capture_id))refuse();
+  }
   if(operation==='browser.status'&&typeof result.available!=='boolean')refuse();
   if(operation==='browser.act'&&(result.action!==params.action||result.untrusted!==true||result.status!=='ready'))refuse();
   if(operation==='browser.close'&&result.closed!==true)refuse();
@@ -225,7 +240,7 @@ export class BotsClient {
   }
   return clean;
  }
- private async request(route:string,ms:number,init:RequestInit={},signal?:AbortSignal,preserveErrors=false):Promise<Record<string,unknown>>{
+ private async request(route:string,ms:number,init:RequestInit={},signal?:AbortSignal,preserveErrors=false,requireExplicitOutcome=false):Promise<Record<string,unknown>>{
   const url=new URL(route,this.origin);
   if(url.origin!==this.origin.origin||url.pathname!==route)throw new BotsError(400,'echoBots route refused');
   for(const [key,value] of Object.entries(init.query??{}))if(value!==undefined)url.searchParams.set(key,value);
@@ -261,7 +276,7 @@ export class BotsClient {
     if(needs)detail+=' (needs: '+needs+')';
     if(typeof body.how==='string')detail+=' (how: '+redact(body.how).slice(0,200)+')';
    }
-   const outcomeUnknown=body.outcome_unknown===true||body.outcome==='unknown'||(uncertain&&response.status>=500&&body.outcome_unknown!==false&&body.outcome!=='not_started'&&body.outcome!=='failed');
+   const outcomeUnknown=body.outcome_unknown===true||body.outcome==='unknown'||(uncertain&&(response.status>=500||requireExplicitOutcome)&&body.outcome_unknown!==false&&body.outcome!=='not_started'&&body.outcome!=='failed');
    if(outcomeUnknown&&!detail.toLowerCase().includes('outcome unknown'))detail+='; outcome unknown';
    const status=preserveErrors?response.status:response.status===404||response.status===409?response.status:response.status<500?400:502;
    throw new BotsError(status,'echoBots service answered HTTP '+response.status+(code?': '+code:'')+detail,code,outcomeUnknown,body.cleanup?sanitize({cleanup:body.cleanup}):undefined);
