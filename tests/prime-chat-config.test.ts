@@ -33,12 +33,12 @@ afterEach(async()=>{
  roots.splice(0).forEach(path=>rmSync(path,{recursive:true,force:true}));
 });
 
-function fixture(config:Record<string,unknown>){
+function fixture(config?:Record<string,unknown>){
  const root=mkdtempSync(join(tmpdir(),'prime-chat-config-'));roots.push(root);
  const workspace=join(root,'workspace'),state=join(root,'state'),file=join(root,'prime.json');
- mkdirSync(workspace);writeFileSync(file,JSON.stringify(config));
+ mkdirSync(workspace);if(config!==undefined)writeFileSync(file,JSON.stringify(config));
  const command=new Command().exitOverride();registerPrimeCommands(command);
- return {root,state,run:()=>command.parseAsync(['prime','--config',file,'--port','0',
+ return {root,state,run:()=>command.parseAsync(['prime',...(config===undefined?[]:['--config',file]),'--port','0',
   '--code-workspace',workspace,'--code-state-dir',state],{from:'user'})};
 }
 
@@ -54,13 +54,20 @@ async function status(){
 }
 
 it.each([
- ['omitted',undefined,120000],['empty',{},120000],['minimum',{turnTimeoutMs:1000},1000],
+ ['omitted',undefined,120000],['empty',{},120000],['explicit default',{turnTimeoutMs:120000},120000],['minimum',{turnTimeoutMs:1000},1000],
  ['longer',{turnTimeoutMs:180000},180000],['maximum',{turnTimeoutMs:300000},300000],
 ])('ordinary CLI startup advertises the %s reviewed deadline through real authenticated HTTP',async(_name,chat,expected)=>{
  const model=vi.spyOn(ModelRouter.prototype,'turn');
  const connect=vi.spyOn(StdioMcp,'connect');
  const f=fixture({models:{},chat});await f.run();
  expect((await status()).chat).toMatchObject({state:'attached',routing:true,turnTimeoutMs:expected});
+ expect(model).not.toHaveBeenCalled();expect(connect).not.toHaveBeenCalled();
+});
+
+it('ordinary CLI startup without --config stays disconnected and makes no owner or model connection',async()=>{
+ const model=vi.spyOn(ModelRouter.prototype,'turn'),connect=vi.spyOn(StdioMcp,'connect');
+ await fixture().run();
+ expect((await status()).chat).toMatchObject({state:'disconnected'});
  expect(model).not.toHaveBeenCalled();expect(connect).not.toHaveBeenCalled();
 });
 

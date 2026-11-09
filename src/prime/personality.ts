@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname } from 'node:path';
 import { debuglog } from 'node:util';
 import type { Persona } from '../code/agent.js';
+import { abortable, throwIfAborted } from '../code/cancellation.js';
 
 /**
  * Personality Forge auto-selection (Commander directive 2026-11-04: "Personality Forge autonomously selects
@@ -82,7 +83,7 @@ const debug = debuglog('echo-prime');
 const isPersonalityId = (v: unknown): v is PersonalityId => typeof v === 'string' && (PERSONALITY_IDS as readonly string[]).includes(v);
 
 export interface CatalogEntry { id: PersonalityId; name: string; registered: boolean }
-export type CatalogLoader = () => Promise<unknown>;
+export type CatalogLoader = (signal?: AbortSignal) => Promise<unknown>;
 export interface Turn { role: string; content: string }
 export interface PersonalitySettings { enabled: boolean; pinned: PersonalityId | null }
 export interface Selection { id: PersonalityId; name: string; reason: string; fragment: string; pinned: boolean; intent: Intent | null; tone: Tone | null; scores: Record<PersonalityId, number> }
@@ -187,25 +188,30 @@ export class PersonalityForge {
     return this.settings();
   }
   /** The Workspace catalog through the supplied loader, cached 60 s; the built-in list (nothing marked registered) when there is no loader or it fails. */
-  async catalog(loader?: CatalogLoader): Promise<{ entries: CatalogEntry[]; source: 'workspace' | 'builtin'; reason?: string }> {
+  async catalog(loader?: CatalogLoader, signal?: AbortSignal): Promise<{ entries: CatalogEntry[]; source: 'workspace' | 'builtin'; reason?: string }> {
+    throwIfAborted(signal);
     const now = this.now();
     if (this.cache && now - this.cache.at < CACHE_MS) return { entries: this.cache.entries, source: this.cache.source };
     if (!loader) return { entries: builtinCatalog(), source: 'builtin', reason: 'no Workspace catalog loader' };
     try {
-      const entries = parseCatalog(await loader());
+      const entries = parseCatalog(await abortable(() => loader(signal), signal));
+      throwIfAborted(signal);
       if (!entries.length) throw new Error('the Workspace listed no personalities');
       this.cache = { at: now, entries, source: 'workspace' };
       return { entries, source: 'workspace' };
     } catch (error) {
+      throwIfAborted(signal);
       const reason = error instanceof Error ? error.message.slice(0, 200) : 'Workspace catalog unavailable';
       debug('%j', { event: 'prime_personality_catalog_failed', reason });
       return { entries: builtinCatalog(), source: 'builtin', reason };
     }
   }
   /** Picks the personality for one turn: null when auto-selection is off; the pinned profile when one is locked; otherwise the scorer's best. */
-  async select(input: { prompt: string; history?: readonly Turn[]; loader?: CatalogLoader }): Promise<Selection | null> {
+  async select(input: { prompt: string; history?: readonly Turn[]; loader?: CatalogLoader; signal?: AbortSignal }): Promise<Selection | null> {
+    throwIfAborted(input.signal);
     if (!this.state.enabled) return null;
-    const { entries } = await this.catalog(input.loader);
+    const { entries } = await this.catalog(input.loader, input.signal);
+    throwIfAborted(input.signal);
     const names = new Map(entries.map(e => [e.id, e.name]));
     const { ranked, intent, tone } = scorePersonalities(input.prompt, input.history ?? [], entries);
     const scores = Object.fromEntries(ranked.map(r => [r.id, r.score])) as Record<PersonalityId, number>;
