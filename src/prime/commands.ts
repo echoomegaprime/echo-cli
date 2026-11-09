@@ -59,7 +59,7 @@ export function registerPrimeCommands(code:Command){
    const esh=config.esh?await StdioMcp.connect(config.esh):undefined;if(esh)connections.push(esh);
    const sdk=config.sdk?await StdioMcp.connect(sdkConnectionConfig(config.sdk)):undefined;if(sdk)connections.push(sdk);
    const broker=sdk&&config.sdk?await sdkBroker(sdk,config.sdk.tools,config.sdk.fixedArguments):undefined;
-   const ecf=new EcfTools(new ContinuityClient(broker?request=>broker.invoke({capability:request.capability,params:{...request.params},reason:request.reason,idempotency_key:request.idempotencyKey??randomUUID()}):undefined));
+   const ecf=new EcfTools(new ContinuityClient(broker?request=>broker.invoke({capability:request.capability,params:{...request.params},reason:request.reason,idempotency_key:request.idempotencyKey??randomUUID()},{signal:request.signal}):undefined));
    const autonomyHooks=new PrimeAutonomyHooks(ecf,rolesConfig?new FleetRoles(rolesConfig):undefined);
    let steward:StewardOwner|undefined;
    if(config.steward){

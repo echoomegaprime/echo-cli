@@ -652,10 +652,10 @@ describe('Prime tools bridge', () => {
       call: vi.fn<McpConnection['call']>(async () => ({ result: { status_code: 200, body: { state: 'ready' } }, status: 'ok' })) } satisfies McpConnection;
   }
   it('sends flat SDK params, reason and idempotency key and unwraps the HTTP body', async () => {
-    const broker = brokerFixture();
-    expect(await sdkToolInvoke(broker)('echo.websearch.query', 'query', { query: 'x', max_results: 3 }, signal())).toEqual(searchBody());
+    const broker = brokerFixture(), abort = signal();
+    expect(await sdkToolInvoke(broker)('echo.websearch.query', 'query', { query: 'x', max_results: 3 }, abort)).toEqual(searchBody());
     expect(broker.invoke).toHaveBeenCalledExactlyOnceWith({ capability: 'echo.websearch.query', params: { command: 'query', query: 'x', max_results: 3 },
-      reason: expect.stringContaining('ECHO Prime live tool call'), idempotency_key: expect.stringMatching(/^[a-f0-9-]{36}$/) });
+      reason: expect.stringContaining('ECHO Prime live tool call'), idempotency_key: expect.stringMatching(/^[a-f0-9-]{36}$/) }, { signal: abort });
     expect(broker.read).not.toHaveBeenCalled(); expect(broker.search).not.toHaveBeenCalled();
   });
   it('rejects an options command override before sending an SDK request', async () => {
@@ -682,8 +682,8 @@ describe('Prime tools bridge', () => {
     expect(esh.call).not.toHaveBeenCalled();
   });
   it('calls an advertised tool and unwraps its result', async () => {
-    const esh = connectionFixture('esh_status'), gateway = connectionGateway({ esh });
-    expect(await gateway.call('esh', 'esh_status', { detail: true }, signal())).toEqual({ state: 'ready' });
-    expect(esh.call).toHaveBeenCalledExactlyOnceWith('esh_status', { detail: true });
+    const esh = connectionFixture('esh_status'), gateway = connectionGateway({ esh }), abort = signal();
+    expect(await gateway.call('esh', 'esh_status', { detail: true }, abort)).toEqual({ state: 'ready' });
+    expect(esh.call).toHaveBeenCalledExactlyOnceWith('esh_status', { detail: true }, { signal: abort });
   });
 });

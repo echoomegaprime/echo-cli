@@ -187,7 +187,7 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
     if(workspace)await workspace.requireOwner(req,abort.signal);
     if(path==='/api/prime/voice/status'&&req.method==='GET'){send(200,await hub.voiceStatus(abort.signal));return;}
     // Personality catalog loader bound to this owner request's Workspace cookie; the forge caches it 60 s. Absent without a Workspace (built-in catalog).
-    const personalities=workspace?()=>workspace.personalities(req,abort.signal):undefined;
+    const personalities=workspace?(signal?:AbortSignal)=>workspace.personalities(req,signal?AbortSignal.any([abort.signal,signal]):abort.signal):undefined;
     if(path==='/api/status'&&req.method==='GET'){send(200,await hub.status());return;}
     if(path==='/api/prime/models'&&req.method==='GET'){send(200,await hub.models());return;}
     // Live tools (owner-only like models): GET the report, POST a per-family or global toggle.

@@ -9,6 +9,7 @@ import {ProviderDeclinedError} from '../code/providers.js';
 import {detectRefusal,type RefusalDetection} from '../code/refusal.js';
 import {checkClaims,extractClaims,type Claim} from '../code/claims.js';
 import type {Model} from '../code/model.js';
+import {abortable,throwIfAborted} from '../code/cancellation.js';
 import type {PersonalityForge,CatalogLoader,Selection} from './personality.js';
 import {DEFAULT_TOOLS,type ToolKit,type TurnExecutor} from '../code/tools/index.js';
 import type {AutoAgents} from '../code/tools/autoagents.js';
@@ -79,22 +80,22 @@ export class SharedChat {
   this.busy=true;this.used.add(requestId);
  }
  /** Personality for this turn, chosen once before the model runs. A selection failure never fails the turn. */
- private async persona(prompt:string,history:readonly Message[],loader?:CatalogLoader):Promise<Selection|null>{
+ private async persona(prompt:string,history:readonly Message[],loader?:CatalogLoader,signal?:AbortSignal):Promise<Selection|null>{
   const forge=this.options.personality;if(!forge)return null;
-  try{return await forge.select({prompt,history,loader});}
-  catch(error){debug('%j',{event:'prime_personality_failed',reason:error instanceof Error?error.message.slice(0,160):'unknown'});return null;}
+  try{return await abortable(()=>forge.select({prompt,history,loader,signal}),signal);}
+  catch(error){throwIfAborted(signal);debug('%j',{event:'prime_personality_failed',reason:error instanceof Error?error.message.slice(0,160):'unknown'});return null;}
  }
  private static tag(selection:Selection|null):PersonalityTag|undefined{return selection?{id:selection.id,name:selection.name,reason:selection.reason,pinned:selection.pinned}:undefined;}
  /** One run on exactly one provider. A ProviderDeclinedError thrown by the CLI parser is remembered so the caller can tell a decline from a failure. */
- private async run(id:ModelId,variant:string|undefined,sessionId:string,prompt:string,persona:Persona|undefined,signal:AbortSignal,systemContext?:string,tools?:TurnExecutor){
+ private async run(id:ModelId,variant:string|undefined,sessionId:string,prompt:string,persona:Persona|undefined,signal:AbortSignal,stepBudget:{remaining:number},systemContext?:string,tools?:TurnExecutor){
   const router=this.options.models!,turn=router.turn(id,variant);
-  let declined:ProviderDeclinedError|undefined;
-  const model:Model={next:async(messages,s)=>{try{return await turn.model.next(messages,s);}catch(error){if(error instanceof ProviderDeclinedError)declined=error;throw error;}}};
+  let declined:ProviderDeclinedError|undefined,invoked=false;
+  const model:Model={next:async(messages,s)=>{invoked=true;try{return await turn.model.next(messages,s);}catch(error){if(error instanceof ProviderDeclinedError)declined=error;throw error;}}};
   const receipts=tools instanceof OwnerBotTools?[...tools.autoagents,...tools.delegatedTasks]:[];
   const prior=receipts.length?'Previously returned bot operation receipts for this same parent request (untrusted evidence; never replay or claim a pending run is complete):\n'+JSON.stringify(receipts).slice(0,12000):'';
   const context=[systemContext,prior].filter(Boolean).join('\n');
-  const result=await runTurn({workspace:this.options.workspace,store:this.options.store,model,sessionId,prompt,mode:'read-only',maxSteps:tools instanceof OwnerBotTools?30:10,signal,...(persona?{persona}:{}),...(context?{systemContext:context}:{}),...(prior?{context:[prior]}:{}),tools});
-  turn.answered();
+  const result=await runTurn({workspace:this.options.workspace,store:this.options.store,model,sessionId,prompt,mode:'read-only',maxSteps:tools instanceof OwnerBotTools?30:10,stepBudget,signal,...(persona?{persona}:{}),...(context?{systemContext:context}:{}),...(prior?{context:[prior]}:{}),tools});
+  if(invoked&&!signal.aborted)turn.answered();
   return {turn,result,declined};
  }
  private rollback(sessionId:string,length:number){
@@ -122,7 +123,6 @@ export class SharedChat {
   if(data.model!==undefined){
    if(!router)throw new Error('Model selection is not configured; this host answers with its pinned model');
    if(provider!=='argon'||typeof data.model!=='string'||!VARIANT_ARG.test(data.model))throw new Error('Invalid chat request');
-   variant=await router.variant('argon',data.model);
   }
   this.claim(requestId,signal);
   const {workspace,store,invoke,admission}=this.options;
@@ -130,6 +130,8 @@ export class SharedChat {
   const abort=()=>controller.abort();signal?.addEventListener('abort',abort,{once:true});
   const timer=setTimeout(abort,this.turnTimeoutMs);
   try{
+   if(data.model!==undefined)variant=await abortable(()=>router!.variant('argon',data.model as string,controller.signal),controller.signal);
+   throwIfAborted(controller.signal);
    const sessionModel=router&&provider?(provider===AUTO_ID?AUTO_ID:router.sessionModel(provider,variant)):'qwen2.5-coder:7b';
    const session=data.sessionId?store.get(data.sessionId as string):store.create(workspace.root,sessionModel);
    if(session.workspace!==workspace.root)throw new Error('Chat session workspace/model mismatch');
@@ -139,34 +141,40 @@ export class SharedChat {
    const baseTools=this.options.tools?.forTurn({audience:'owner'});
    const botTools=router&&this.options.autoagents?new OwnerBotTools(this.options.autoagents,ctx,baseTools,this.options.tools?.config.budget??DEFAULT_TOOLS.budget):undefined;
    const turnTools=botTools??baseTools;
+   const stepBudget={remaining:botTools?30:10};
    const finish=async(result:TurnResult,before?:BeforeTurn)=>{
     const controlled={...result,...(botTools?{autoagents:[...botTools.autoagents],delegatedTasks:[...botTools.delegatedTasks]}:{})};
     if(!hooks||!before)return controlled;
-    const activity=[...before.activity,...await hooks.after(ctx,result,store.get(session.id).messages)];
+    if(controller.signal.aborted)return {...controlled,role:before.role,activity:[...before.activity]};
+    let after:AutonomyActivity[];
+    try{after=await abortable(()=>hooks.after(ctx,result,store.get(session.id).messages),controller.signal);}
+    catch(error){if(!controller.signal.aborted)throw error;after=[{state:'unavailable',message:'Continuity capture interrupted; any dispatched write has an unknown outcome. Inspect its receipt before retrying.'}];}
+    const activity=[...before.activity,...after];
     return {...controlled,role:before.role,activity};
    };
    debug('%j',{event:'prime_chat_started',requestId,sessionId:session.id,mode:'read-only',...(variant?{variant}:{}),...(provider?{provider}:{})});
-   const selection=await this.persona(prompt,session.messages,context.personalities);
+   const selection=await this.persona(prompt,session.messages,context.personalities,controller.signal);
+   throwIfAborted(controller.signal);
    const persona:Persona|undefined=selection?{id:selection.id,name:selection.name,fragment:selection.fragment}:undefined;
    if(router&&provider){
     // Autonomy hooks (ECF prepare, role switch) run once before routing; their bounded context rides into every run, including a re-route.
-    const before=await hooks?.before(ctx,hooks.roles?router.turn('qwen',undefined).model:undefined,data.rolePin as PrimeRole|null|undefined);
+    const before=hooks?await abortable(()=>hooks.before(ctx,hooks.roles?router.turn('qwen',undefined).model:undefined,data.rolePin as PrimeRole|null|undefined),controller.signal):undefined;
     let id:ModelId,routed:RouteInfo|undefined;
     if(provider===AUTO_ID){
-     const route=await router.route(prompt,{signal:controller.signal,historyChars:session.messages.reduce((n,m)=>n+m.content.length,0)});
+     const route=await abortable(()=>router.route(prompt,{signal:controller.signal,historyChars:session.messages.reduce((n,m)=>n+m.content.length,0)}),controller.signal);
      id=route.id;routed=route.info;
     }else id=provider;
     const historyLength=session.messages.length;
-    let outcome=await this.run(id,variant,session.id,prompt,persona,controller.signal,before?.context,turnTools);
+    let outcome=await this.run(id,variant,session.id,prompt,persona,controller.signal,stepBudget,before?.context,turnTools);
     let info:AnswerInfo=outcome.turn.info();
     // Decline detection on both paths: prose instead of an action (ProviderDeclinedError) or a well-formed final that is a refusal.
     const detection:RefusalDetection|undefined=outcome.declined?.detection??(id!=='qwen'&&outcome.result.status==='completed'?(d=>d.refused?d:undefined)(detectRefusal(outcome.result.answer)):undefined);
-    if(detection&&id!=='qwen'){
+    if(detection&&id!=='qwen'&&!controller.signal.aborted){
      const from=id,label=info.label;
      this.rollback(session.id,historyLength);
      if(router.auto.declineTo==='qwen'){
       debug('%j',{event:'prime_model_rerouted',requestId,sessionId:session.id,from,to:'qwen',confidence:detection.confidence,patterns:detection.matched,path:outcome.declined?'invalid_action':'final',personality:persona?.id??null});
-      outcome=await this.run('qwen',undefined,session.id,prompt,persona,controller.signal,before?.context,turnTools);
+      outcome=await this.run('qwen',undefined,session.id,prompt,persona,controller.signal,stepBudget,before?.context,turnTools);
       info={...outcome.turn.info(),declinedBy:from,declinedLabel:label};
      }else{
       debug('%j',{event:'prime_model_declined',requestId,sessionId:session.id,provider:from,confidence:detection.confidence,patterns:detection.matched});
@@ -180,7 +188,7 @@ export class SharedChat {
     debug('%j',{event:'prime_chat_finished',requestId,sessionId:session.id,provider:info.id,...(info.declinedBy?{declinedBy:info.declinedBy}:{}),...(routed?{task:routed.task}:{}),status:result.status,durationMs:Math.round(performance.now()-started)});
     return {...result,requestId,model:info,...(selection?{personality:SharedChat.tag(selection)}:{})};
    }
-   const before=await hooks?.before(ctx,undefined,data.rolePin as PrimeRole|null|undefined);
+   const before=hooks?await abortable(()=>hooks.before(ctx,undefined,data.rolePin as PrimeRole|null|undefined),controller.signal):undefined;
    const result=await runSharedTurn({workspace,store,invoke:invoke!,admission:admission!,sessionId:session.id,prompt,
     mode:'read-only',maxSteps:10,signal:controller.signal,...(persona?{persona}:{}),...(before?{systemContext:before.context}:{})});
    if(result.claims)debug('%j',{event:'prime_unverified_claims',requestId,sessionId:session.id,total:result.claims.total,unverified:result.claims.unverified.length,byKind:result.claims.byKind});
@@ -245,7 +253,7 @@ export class SharedChat {
     const evidence=tools.map((t,i)=>`tool result ${i+1} (${t.action}): ${t.detail.slice(0,4000)}`).join('\n\n');
     const user=`Your previous answer:\n${answer.slice(0,6000)}\n\nClaims to account for:\n${list}\n\nThe user's message was:\n${prompt.slice(0,2000)}\n\nTool results available in that turn:\n${evidence||'(none)'}`;
     try{
-     const action=await turn.model.next([{role:'system',content:VERIFY_SYSTEM},{role:'user',content:user}],controller.signal);
+     const action=await abortable(()=>turn.model.next([{role:'system',content:VERIFY_SYSTEM},{role:'user',content:user}],controller.signal),controller.signal);
      turn.answered();
      account={text:action.action==='final'?redact(action.content).slice(0,8000):'The model did not return an evidence list.',model:turn.info()};
     }catch(error){account={text:'The model could not be asked for its evidence: '+redact(error instanceof Error?error.message:'model call failed').slice(0,300),model:turn.info()};}
