@@ -6,7 +6,7 @@ This document specifies the opt-in streaming uploads subsystem (`src/prime/uploa
 
 ## 1. Opt-In Configuration (`uploads`)
 
-Uploads and Artifact Center persistence are strictly **opt-in** in the reviewed Prime JSON configuration (`echo prime --config <file>`). When `uploads` is omitted, no upload directory is opened, `GET /api/prime/uploads/list` and `GET /api/prime/artifacts` report `{ "configured": false }`, and mutating routes return `503`.
+Uploads and Artifact Center persistence are strictly **opt-in** in the reviewed Prime JSON configuration (`echo-code prime --config <file>`, or `node dist/code-main.js prime --config <file>` from a built checkout). When `uploads` is omitted, no upload directory is opened, `GET /api/prime/uploads/list` and `GET /api/prime/artifacts` report `{ "configured": false }`, and mutating routes return `503`.
 
 ```json
 {
@@ -37,7 +37,8 @@ Uploads and Artifact Center persistence are strictly **opt-in** in the reviewed 
 ```
 
 ### Configuration Rules (`parseUploadsConfig`)
-- **Unknown keys refused**: only `root`, `maxBytes`, and `types` are accepted; any extra field throws immediately at startup.
+- **Unknown keys refused**: only `root`, `maxBytes`, `types`, and `quota` are accepted; any extra field throws immediately at startup.
+- **Aggregate quotas**: finite defaults apply to account/store bytes and item counts, shared by uploads and artifacts. Cross-process writes use exclusive admission and preserve existing data when full. See [storage quotas and offline recovery](PRIME_UPLOAD_QUOTAS.md).
 - **`root`** (required): non-empty directory path (filesystem roots such as `/` or `C:\` are refused).
 - **`maxBytes`** (optional): default `209715200` (200 MiB), integer `1 .. 2147483648` (2 GiB ceiling).
 - **`types`** (optional): subset of the v1 allowlist (`ALLOWED_UPLOAD_TYPES`). Short aliases `docx`, `xlsx`, and `pptx` normalize to their canonical OOXML MIME types (`application/vnd.openxmlformats-officedocument.*`). HTML (`text/html`), SVG (`image/svg+xml`), archives (`application/zip`), and executables are never permitted.

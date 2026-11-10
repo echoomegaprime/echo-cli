@@ -21,6 +21,10 @@ export interface Answered { provider: ProviderId; requested: string | null; mode
 export class ProviderUnavailableError extends Error {
   constructor(readonly provider: ProviderId, readonly detail: string) { super(`${PROVIDER_LABEL[provider]} is unavailable: ${detail}; no fallback was used`); this.name = 'ProviderUnavailableError'; }
 }
+/** Fixed safe diagnostic, never a vendor-supplied error or a claim that remote work was rolled back. */
+export class ProviderProcessCleanupError extends Error {
+  constructor() { super('Provider process group cleanup could not be confirmed; outcome unknown'); this.name = 'ProviderProcessCleanupError'; }
+}
 /**
  * The vendor answered, but with a refusal instead of an action (its classifier declined the request).
  * Distinct from ProviderUnavailableError on purpose: an outage is never re-routed; a decline is re-run on
@@ -35,6 +39,13 @@ export class ProviderDeclinedError extends Error {
 }
 export const PROVIDER_LABEL: Record<ProviderId, string> = { claude: 'Claude (claude CLI)', gpt: 'GPT (codex CLI)', grok: 'Grok (grok CLI)', argon: 'Argon (agy CLI)' };
 export const PROVIDER_BIN: Record<ProviderId, string> = { claude: 'claude', gpt: 'codex', grok: 'grok', argon: 'agy' };
+const WINDOWS_EXECUTION_BLOCK = 'native Windows CLI execution is unavailable until owned Job Object process-tree containment is qualified';
+/** Native execution admission only. Injected runners are a trusted host integration, never a browser/config setting. */
+export function providerExecutionBlock(provider: ProviderId, platform: NodeJS.Platform = process.platform): string | undefined {
+  if (platform === 'win32') return WINDOWS_EXECUTION_BLOCK;
+  if (provider === 'gpt') return 'native GPT execution is unavailable until a model-only Codex tool contract is qualified';
+  return undefined;
+}
 const MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$/;
 // Only what a CLI needs to find its own login and run. Nothing named like a key, token or secret ever passes through.
 const ENV_ALLOW = ['PATH', 'Path', 'PATHEXT', 'SystemRoot', 'SYSTEMROOT', 'windir', 'ComSpec', 'TEMP', 'TMP', 'TMPDIR', 'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'APPDATA', 'LOCALAPPDATA', 'USERNAME', 'LANG', 'TERM'];
@@ -120,32 +131,111 @@ const SPECS: Record<ProviderId, Spec> = {
     },
   },
 };
+/**
+ * The supervisor remains the POSIX group leader even after the vendor exits. Its live PID anchors the
+ * group until the parent kills it, including descendants that kept output pipes open. Vendor arguments
+ * are argv entries, never interpolated into this fixed program. The vendor receives no IPC descriptor.
+ * On parent disconnect the supervisor kills its own group while it still owns that identity.
+ */
+const PROCESS_SUPERVISOR = String.raw`
+const { spawn } = require('node:child_process');
+const stop = () => { try { process.kill(-process.pid, 'SIGKILL'); } catch { process.exit(1); } };
+process.on('disconnect', stop);
+process.on('SIGTERM', stop);
+process.on('SIGINT', stop);
+process.on('SIGHUP', stop);
+process.on('uncaughtException', stop);
+process.on('unhandledRejection', stop);
+const env = { ...process.env };
+delete env.NODE_CHANNEL_FD;
+delete env.NODE_CHANNEL_SERIALIZATION_MODE;
+const child = spawn(process.argv[1], process.argv.slice(2), { env, shell: false, stdio: ['pipe', 'pipe', 'pipe'] });
+process.stdin.pipe(child.stdin);
+child.stdin.on('error', () => {});
+child.stdout.pipe(process.stdout, { end: false });
+child.stderr.pipe(process.stderr, { end: false });
+child.on('error', () => { if (process.connected) process.send({ type: 'spawn-error' }); });
+child.on('close', code => {
+  process.stdout.end();
+  process.stderr.end();
+  if (process.connected) process.send({ type: 'completed', code });
+});
+`;
 export const run: Runner = (cmd, args, o) => new Promise((resolve, reject) => {
-  const child = spawn(cmd, args, { cwd: o.cwd, env: o.env, shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-  const out: Buffer[] = [], err: Buffer[] = []; let size = 0, timedOut = false, done = false;
-  const finish = (r: RunResult | Error) => { if (done) return; done = true; clearTimeout(timer); o.signal?.removeEventListener('abort', onAbort); if (r instanceof Error) reject(r); else resolve(r); };
-  const timer = setTimeout(() => { timedOut = true; child.kill(); }, o.timeoutMs);
-  const onAbort = () => { child.kill(); finish(new Error('Interrupted')); };
-  if (o.signal?.aborted) onAbort(); else o.signal?.addEventListener('abort', onAbort, { once: true });
-  child.stdout.on('data', (d: Buffer) => { size += d.length; if (size > o.maxBytes) child.kill(); else out.push(d); });
-  child.stderr.on('data', (d: Buffer) => { if (err.reduce((n, b) => n + b.length, 0) < 8000) err.push(d); });
-  child.on('error', e => finish(Object.assign(e, { spawnFailed: true })));
-  child.on('close', code => finish({ code, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8'), timedOut: timedOut || size > o.maxBytes }));
-  child.stdin.on('error', () => { /* child exited before reading */ });
-  child.stdin.end(o.input ?? '');
+  if (o.signal?.aborted) { reject(new Error('Interrupted')); return; }
+  // taskkill cannot contain descendants after their parent exits; no unqualified Windows dispatch.
+  if (process.platform === 'win32') { reject(new Error(WINDOWS_EXECUTION_BLOCK)); return; }
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(process.execPath, ['--input-type=commonjs', '-e', PROCESS_SUPERVISOR, '--', cmd, ...args], {
+      cwd: o.cwd, env: o.env, shell: false, windowsHide: true, detached: true, stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+    });
+  } catch (error) { reject(Object.assign(error as Error, { spawnFailed: true })); return; }
+  const out: Buffer[] = [], err: Buffer[] = [];
+  let size = 0, errSize = 0, done = false, completed = false, code: number | null = null;
+  let stdoutEnded = false, stderrEnded = false;
+  const result = (timedOut: boolean): RunResult => ({ code, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8'), timedOut });
+  const finish = (value: RunResult | Error) => {
+    if (done) return;
+    done = true; clearTimeout(timer); o.signal?.removeEventListener('abort', onAbort);
+    // Signal only the still-live supervisor's owned group, once, with no delayed PID/group reuse window.
+    // Immediate termination is intentional: graceful vendor shutdown and remote rollback are not claimed.
+    if (child.pid && child.exitCode === null && child.signalCode === null) {
+      try { process.kill(-child.pid, 'SIGKILL'); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ESRCH') value = new ProviderProcessCleanupError();
+      }
+    }
+    child.stdin?.destroy(); child.stdout?.destroy(); child.stderr?.destroy();
+    if (child.connected) child.disconnect();
+    child.unref();
+    if (value instanceof Error) reject(value); else resolve(value);
+  };
+  const onAbort = () => finish(new Error('Interrupted'));
+  const finishCompleted = () => { if (completed && stdoutEnded && stderrEnded) finish(result(false)); };
+  const timer = setTimeout(() => finish(result(true)), o.timeoutMs);
+  child.stdout!.on('data', (data: Buffer) => {
+    if (done) return;
+    size += data.length;
+    if (size > o.maxBytes) { finish(result(true)); return; }
+    out.push(data);
+  });
+  child.stderr!.on('data', (data: Buffer) => {
+    if (done || errSize >= 8000) return;
+    const kept = data.subarray(0, 8000 - errSize); err.push(kept); errSize += kept.length;
+  });
+  child.stdout!.on('end', () => { stdoutEnded = true; finishCompleted(); });
+  child.stderr!.on('end', () => { stderrEnded = true; finishCompleted(); });
+  child.on('message', message => {
+    if (done || !message || typeof message !== 'object') return;
+    const event = message as { type?: unknown; code?: unknown };
+    if (event.type === 'spawn-error') finish(Object.assign(new Error('Provider process could not start'), { spawnFailed: true }));
+    else if (event.type === 'completed' && (event.code === null || Number.isInteger(event.code))) {
+      completed = true; code = event.code as number | null; finishCompleted();
+    }
+  });
+  child.on('error', error => finish(Object.assign(error, { spawnFailed: true })));
+  child.on('exit', () => { if (!done) finish(new ProviderProcessCleanupError()); });
+  child.stdin!.on('error', () => { /* vendor exited before reading */ });
+  o.signal?.addEventListener('abort', onAbort, { once: true });
+  if (o.signal?.aborted) { onAbort(); return; }
+  child.stdin!.end(o.input ?? '');
 });
 export interface CliModelOptions { model?: string; runner?: Runner; bin?: string; timeoutMs?: number }
 export class CliModel implements Model {
   last?: Answered;
-  private runner: Runner; private bin: string; private timeoutMs: number; private requested: string | null;
+  private runner: Runner; private bin: string; private timeoutMs: number; private requested: string | null; private nativeRunner: boolean;
   constructor(readonly provider: ProviderId, options: CliModelOptions = {}) {
     if (!SPECS[provider]) throw new Error('Unknown provider');
     if (options.model !== undefined && !MODEL_NAME.test(options.model)) throw new Error('Invalid model name');
     const timeout = options.timeoutMs ?? 180000;
     if (!Number.isFinite(timeout) || timeout < 1 || timeout > 600000) throw new Error('Invalid model timeout');
-    this.requested = options.model ?? null; this.runner = options.runner ?? run; this.bin = options.bin ?? PROVIDER_BIN[provider]; this.timeoutMs = timeout;
+    this.requested = options.model ?? null; this.runner = options.runner ?? run; this.nativeRunner = this.runner === run; this.bin = options.bin ?? PROVIDER_BIN[provider]; this.timeoutMs = timeout;
   }
   async next(messages: Message[], signal?: AbortSignal): Promise<Action> {
+    if (signal?.aborted) throw new Error('Interrupted');
+    const blocked = this.nativeRunner ? providerExecutionBlock(this.provider) : undefined;
+    if (blocked) throw new ProviderUnavailableError(this.provider, blocked);
     if (Buffer.byteLength(JSON.stringify(messages)) > 180000) throw new Error('Context limit reached; start a focused session');
     const spec = SPECS[this.provider], prompt = render(messages);
     if (spec.maxPromptChars && prompt.length > spec.maxPromptChars) throw new ProviderUnavailableError(this.provider, `the prompt is too large for this CLI's command line (${prompt.length} > ${spec.maxPromptChars} characters); start a focused session`);
@@ -155,17 +245,21 @@ export class CliModel implements Model {
       if (!spec.stdin) writeFileSync(join(dir, 'prompt.txt'), prompt, { mode: 0o600 });
       result = await this.runner(this.bin, spec.args(this.requested, dir, prompt), { cwd: dir, env: childEnv(), input: spec.stdin ? prompt : undefined, timeoutMs: this.timeoutMs, signal, maxBytes: 4_000_000 });
     } catch (error) {
+      if (error instanceof ProviderProcessCleanupError) throw new ProviderUnavailableError(this.provider, error.message);
       if (signal?.aborted) throw new Error('Interrupted');
       throw new ProviderUnavailableError(this.provider, (error as { spawnFailed?: boolean }).spawnFailed ? `could not start "${this.bin}"` : 'could not run');
     } finally { rmSync(dir, { recursive: true, force: true }); }
+    if (signal?.aborted) throw new Error('Interrupted');
     if (result.timedOut) throw new ProviderUnavailableError(this.provider, 'timed out or returned too much output');
+    // A signal-terminated vendor may already have printed valid-looking JSON or refusal text.
+    // Only an explicit successful exit may be parsed, attributed, or considered for decline rerouting.
+    if (result.code !== 0) throw new ProviderUnavailableError(this.provider, result.code === null ? 'terminated without a successful exit' : `exited with code ${result.code}`);
     let parsed: Parsed;
     try { parsed = spec.parse(result.stdout, this.provider); }
     catch (error) {
       if (error instanceof ProviderUnavailableError) throw error;
-      throw new ProviderUnavailableError(this.provider, result.code ? `exited with code ${result.code}` : 'returned no usable answer');
+      throw new ProviderUnavailableError(this.provider, 'returned no usable answer');
     }
-    if (result.code) throw new ProviderUnavailableError(this.provider, `exited with code ${result.code}`);
     let action: Action;
     try { action = parseAction(JSON.parse(extractJson(redact(parsed.text)))); }
     catch {

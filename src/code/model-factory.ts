@@ -1,7 +1,7 @@
 import { tmpdir } from 'node:os';
 import { debuglog } from 'node:util';
 import { LocalModel, validateEndpoint, type Model } from './model.js';
-import { CliModel, PROVIDER_BIN, PROVIDER_LABEL, ProviderUnavailableError, childEnv, run, type ProviderId, type Runner } from './providers.js';
+import { CliModel, PROVIDER_BIN, PROVIDER_LABEL, ProviderProcessCleanupError, ProviderUnavailableError, childEnv, providerExecutionBlock, run, type ProviderId, type Runner } from './providers.js';
 import { TASK_CLASSES, classifyTask, type TaskClass } from './task-classifier.js';
 import { abortable, throwIfAborted } from './cancellation.js';
 
@@ -136,7 +136,7 @@ export interface AnswerInfo {
 export interface FailureInfo { at: string; reason: string; signedOut: boolean }
 export interface ProviderStatus {
   id: ModelId; label: string; kind: 'local' | 'cli'; available: boolean; reason?: string;
-  check: 'model-listed' | 'installed' | 'signed-in'; checkedAt: string; requested: string | null;
+  check: 'model-listed' | 'installed' | 'signed-in' | 'execution-blocked'; checkedAt: string; requested: string | null;
   /** Argon only: the Gemini ids agy offers right now (empty with a reason when listing failed; never invented). */
   variants?: Variant[]; variantsReason?: string;
   endpoint?: string; contextTokens?: number; last: AnswerInfo | null; lastFailure: FailureInfo | null;
@@ -294,6 +294,10 @@ export class ModelRouter {
   }
   private probe(id: ModelId, signal?: AbortSignal): Promise<Probe> {
     throwIfAborted(signal);
+    // A login/version probe cannot qualify process containment or a vendor's
+    // native tool boundary. Trusted host runner injection is not JSON-configurable.
+    const blocked = id === 'qwen' || this.runner !== run ? undefined : providerExecutionBlock(id);
+    if (blocked) return Promise.resolve({ available: false, reason: blocked, check: 'execution-blocked', checkedAt: this.stamp() });
     const cached = this.probes.get(id), now = this.now();
     if (cached && now - cached.at < CACHE_MS) return abortable(() => cached.probe, signal);
     const probe = id === 'qwen' ? this.probeLocal(signal) : id === 'argon' ? this.probeArgon(signal) : this.probeCli(id, signal);
@@ -320,13 +324,13 @@ export class ModelRouter {
     let result: Pick<Probe, 'variants' | 'variantsReason'>;
     try {
       const r = await abortable(() => this.runner(bin, ['models'], { cwd: tmpdir(), env: childEnv(), timeoutMs: this.probeTimeoutMs, maxBytes: 64000, ...(signal ? { signal } : {}) }), signal);
-      const variants = r.timedOut || r.code ? [] : parseAgyModels(r.stdout);
+      const variants = r.timedOut || r.code !== 0 ? [] : parseAgyModels(r.stdout);
       result = r.timedOut ? { variants, variantsReason: `"${bin} models" timed out or returned too much output` }
-        : r.code ? { variants, variantsReason: `"${bin} models" exited with code ${r.code}` }
+        : r.code !== 0 ? { variants, variantsReason: `"${bin} models" exited with code ${r.code}` }
         : variants.length ? { variants } : { variants, variantsReason: `"${bin} models" listed no Gemini models` };
     } catch (error) {
       throwIfAborted(signal);
-      result = { variants: [], variantsReason: (error as { spawnFailed?: boolean }).spawnFailed ? `could not start "${bin}"` : `could not run "${bin} models"` };
+      result = { variants: [], variantsReason: error instanceof ProviderProcessCleanupError ? error.message : (error as { spawnFailed?: boolean }).spawnFailed ? `could not start "${bin}"` : `could not run "${bin} models"` };
     }
     debug('%j', { event: 'prime_argon_variants', count: result.variants!.length, reason: result.variantsReason });
     return { ...probe, ...result };
@@ -337,10 +341,12 @@ export class ModelRouter {
     try {
       const result = await abortable(() => this.runner(bin, signIn ? signIn.args : ['--version'], { cwd: tmpdir(), env: childEnv(), timeoutMs: this.probeTimeoutMs, maxBytes: 20000, ...(signal ? { signal } : {}) }), signal);
       if (result.timedOut) return { ...base, available: false, reason: `"${bin}" timed out` };
+      if (result.code === null) return { ...base, available: false, reason: `"${bin}" exited without a success code; provider process outcome is unknown` };
       if (result.code) return { ...base, available: false, reason: signIn ? `not signed in ("${bin} ${signIn.args.join(' ')}" exited with code ${result.code}); sign in on the Prime host with "${signIn.login}"` : `"${bin}" exited with code ${result.code}` };
       return { ...base, available: true };
     } catch (error) {
       throwIfAborted(signal);
+      if (error instanceof ProviderProcessCleanupError) return { ...base, available: false, reason: error.message };
       const install = INSTALL[id];
       return { ...base, available: false, reason: (error as { spawnFailed?: boolean }).spawnFailed ? `could not start "${bin}" (not installed or not on PATH)${install ? '; ' + install : ''}` : `could not run "${bin}"` };
     }
