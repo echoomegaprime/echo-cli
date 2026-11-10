@@ -67,16 +67,42 @@ const decode = (text: string) => text.replace(/&(#x?[0-9a-f]+|[a-z]+\d*);/gi, (m
   if (lower.startsWith('#')) { const code = parseInt(lower.slice(1), 10); return Number.isFinite(code) && code > 31 && code < 0x10ffff ? String.fromCodePoint(code) : ''; }
   return m;
 });
+/**
+ * Drop every HTML comment opener (`<!--`) from a string, repeating to a
+ * fixpoint. A single `replace(/<!--/g, '')` pass is NOT complete: deleting
+ * one opener can join the text around it into a fresh one — `<!<!---->`
+ * becomes `<!-->` after one pass. Each pass deletes at least one opener,
+ * so the loop terminates, and at the fixpoint the result provably contains
+ * no `<!--` at all.
+ */
+const stripCommentOpeners = (text: string): string => {
+  let out = text;
+  while (out.includes('<!--')) out = out.replace(/<!--/g, '');
+  return out;
+};
+/**
+ * Strip HTML comments — complete ones, plus a trailing unterminated one —
+ * repeating to a fixpoint: deleting a comment can join the text around it
+ * into a fresh opener, which the next pass removes. It is a single replace
+ * (alternation, not two chained replaces) whose result flows straight back
+ * into `out`, so at the fixpoint no `<!--` remains. Every iteration removes
+ * at least one comment, so the loop terminates.
+ */
+const stripComments = (text: string): string => {
+  let out = text;
+  while (out.includes('<!--')) out = out.replace(/<!--[\s\S]*?-->|<!--[\s\S]*$/g, '');
+  return out;
+};
 /** Readable text: scripts, styles, templates and comments removed; block tags become line breaks. */
 export function pageText(html: string): { title: string | null; text: string } {
   const title = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html);
-  let body = html.replace(/<!--[\s\S]*?-->/g, '').replace(/<!--[\s\S]*$/g, ''); // complete comments, plus a trailing unterminated one
+  let body = stripComments(html);
   body = body.replace(/<(script|style|noscript|template|svg|head)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ');
   body = body.replace(/<(?:br|hr)\b[^>]*\/?>/gi, '\n').replace(/<\/?(?:p|div|li|ul|ol|h[1-6]|tr|td|th|table|section|article|header|footer|nav|blockquote|pre|dd|dt|dl|figure|figcaption|main|aside)\b[^>]*>/gi, '\n');
   body = body.replace(/<[^>]{0,2000}>/g, ' ');
   // decode() runs after stripping, so entity-encoded markup (e.g. &lt;!--) can reappear: drop any comment opener it reintroduces.
-  const text = decode(body).replace(/<!--/g, '').replace(/[ \t\r\f\v]+/g, ' ').replace(/ ?\n ?/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
-  return { title: title ? decode(title[1]).replace(/<!--/g, '').replace(/\s+/g, ' ').trim().slice(0, 300) || null : null, text };
+  const text = stripCommentOpeners(decode(body)).replace(/[ \t\r\f\v]+/g, ' ').replace(/ ?\n ?/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  return { title: title ? stripCommentOpeners(decode(title[1])).replace(/\s+/g, ' ').trim().slice(0, 300) || null : null, text };
 }
 export const webFetch: ToolModule = {
   spec: {

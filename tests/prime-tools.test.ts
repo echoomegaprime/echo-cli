@@ -439,6 +439,11 @@ describe('web_fetch', () => {
   it('decodes ampersands and preserves paragraph breaks in pageText', () => {
     expect(pageText('<p>A &amp; B</p><p>C</p>')).toEqual({ title: null, text: 'A & B\n\nC' });
   });
+  it('drops comment openers that re-form after entity decoding in pageText', () => {
+    expect(pageText('<p>&lt;!&lt;!----&gt;</p>').text).not.toContain('<!--');
+    expect(pageText('<title>&lt;!&lt;!----&gt;</title><p>ok</p>').title).not.toContain('<!--');
+    expect(pageText('<p>a &lt;!-- b</p>').text).not.toContain('<!--');
+  });
 });
 
 describe('wolfram', () => {
