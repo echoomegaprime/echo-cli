@@ -73,7 +73,10 @@ export function parseBuildConfig(value: unknown): BuildConfig {
  return {root:resolve(v.root), engines:[...v.engines] as BuildEngine[], previewBase, maxConcurrent, ...(deploy?{deploy}:{})};
 }
 /** Includes bearer/cookie forms the shared code redactor does not cover. Never log raw CLI chunks. */
+const REDACT_TRIGGER = /(?:api[_-]?key|access[_-]?token|secret|password|authorization|cookie|bearer|sk-|gh[pousr]_|eyJ|-----BEGIN|PRIVATE KEY|:\/\/)/i;
+/** Fast path: a line with no redaction trigger is returned untouched. Every pattern below (and in the shared redactor) requires one of these substrings, so skipping the seven regex passes cannot change the result; it only keeps flood-sized logs inside the wall budget. */
 export function redactBuild(text: string): string {
+ if (!REDACT_TRIGGER.test(text)) return text;
  return redact(text.replace(/\b(?:authorization|proxy-authorization|cookie|set-cookie)["']?\s*[=:][^\r\n]*/gi,'[REDACTED HEADER]')
   .replace(/\bBearer\s+[^\s"']+/gi,'Bearer [REDACTED]')
   .replace(/((?:[a-z0-9_]*token|[a-z0-9_]*secret|[a-z0-9_]*password|[a-z0-9_]*api_key)["']?\s*[:=]\s*["']?)[^\s"',;}]+/gi,'$1[REDACTED]')

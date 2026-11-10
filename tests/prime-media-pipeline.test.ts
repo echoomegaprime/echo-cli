@@ -4,7 +4,7 @@ import {createHash, randomBytes} from 'node:crypto';
 import {mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {createServer, type Server} from 'node:http';
 import {tmpdir} from 'node:os';
-import {dirname, join} from 'node:path';
+import {dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {deflateSync} from 'node:zlib';
 import {PrimeHub, type Capability, type SdkBroker} from '../src/prime/hub.js';
@@ -306,7 +306,7 @@ describe('review fixes: media that is actually stored',()=>{
   const off=resolveMediaHost(parseMediaConfig(undefined),undefined,()=>false);
   expect(off.config.localRoots).toEqual([]);expect(off.warnings.join(' ')).toMatch(/media\.localRoots/);
   const explicit=resolveMediaHost(parseMediaConfig({localRoots:['/srv/out']}),{localRoots:['/srv/out']},()=>true);
-  expect(explicit.config.localRoots).toEqual(['/srv/out']);
+  expect(explicit.config.localRoots).toEqual([resolve('/srv/out')]);
   const none=resolveMediaHost(parseMediaConfig({origins:[]}),{origins:[]},()=>false);
   expect(none.warnings.join(' ')).toMatch(/media\.origins/);
  });
