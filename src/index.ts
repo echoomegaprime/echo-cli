@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * @echo-prime/cli v3.3.0
+ * @echo-prime/cli
  * Echo Prime Technologies CLI — Query engines, search knowledge, manage doctrines, deploy workers.
  * Commander: Bobby Don McWilliams II | Authority 11.0 SUPREME SOVEREIGN
  */
@@ -11,7 +11,7 @@ import { config, getApiKey } from './config.js';
 import { EchoClient, EchoApiError } from './client.js';
 import { formatOutput, printSuccess, printError, printHeader, printWarning } from './formatters.js';
 
-const VERSION = '3.4.0';
+import { PACKAGE_VERSION as VERSION } from './version.js';
 
 const program = new Command();
 program

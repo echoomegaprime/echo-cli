@@ -1,5 +1,6 @@
 import {type Capability,type Json,type McpConnection,type SdkBroker,object,unwrap} from './hub.js';
 import type {StdioConfig} from './stdio.js';
+import {throwIfAborted} from '../code/cancellation.js';
 export interface SdkTools {search:string;read:string;invoke:string}
 /** Forward the secret-store injected signer only to the explicitly configured SDK child, never other MCP connections. */
 export function sdkConnectionConfig<T extends StdioConfig>(config:T):T {
@@ -24,6 +25,11 @@ export async function sdkBroker(connection:McpConnection,names:SdkTools,fixed:Js
   },
   read:capability=>call(names.read,{target:'sdk_cap',capability}),
   // The bridge reads `timeout_ms` as its own gate wait for this call (src/bridge/sdk-stdio.ts); it is never forwarded to the gate.
-  invoke:(request,options)=>connection.call(names.invoke,{...fixed,...request,...(options?.timeoutMs?{timeout_ms:Math.round(options.timeoutMs)}:{})},{timeoutMs:(options?.timeoutMs??30000)+5000}),
+  async invoke(request,options){
+   throwIfAborted(options?.signal);
+   const result=await connection.call(names.invoke,{...fixed,...request,...(options?.timeoutMs?{timeout_ms:Math.round(options.timeoutMs)}:{})},{timeoutMs:(options?.timeoutMs??30000)+5000,...(options?.signal?{signal:options.signal}:{})});
+   throwIfAborted(options?.signal);
+   return result;
+  },
  };
 }

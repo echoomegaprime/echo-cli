@@ -1,6 +1,7 @@
 import {createHash} from 'node:crypto';
 import type {McpConnection,PrimeRequest} from '../../prime/hub.js';
 import {type ChatTool,type ToolContext,type AutonomyEvents,record,envelope,exactArgs,textArg,owner,timed,toolCall} from './autonomy.js';
+import {abortable,throwIfAborted} from '../cancellation.js';
 
 export interface AutonomyConfig {esh:{autoTierMax:1|2;standingGrantRef?:string}}
 export function parseAutonomyConfig(value:unknown):AutonomyConfig{
@@ -14,9 +15,10 @@ export interface EshTicket {id:string;digest:string;request:PrimeRequest;expires
 export interface EshAutonomyOptions {
  connection?:McpConnection;config?:AutonomyConfig;events?:AutonomyEvents;
  /** Host-owned prepare/execute, not model-supplied functions or approval values. */
- prepare(request:PrimeRequest):Promise<EshTicket>;
- execute(id:string,digest:string):Promise<unknown>;
+ prepare(request:PrimeRequest,signal?:AbortSignal):Promise<EshTicket>;
+ execute(id:string,digest:string,signal?:AbortSignal):Promise<unknown>;
 }
+const callOptions=(signal?:AbortSignal):[]|[{signal:AbortSignal}]=>signal?[{signal}]:[];
 const verbs=new Set(['ls','cat','grep','git','disk','ps','ports','http_get']);
 const irreversibleClasses=new Set(['delete','kill','remote','network-write','device','service-control','registry','send','publish','payment','sql-write','container','github-write','infra','git-discard','git-push','http-write','write-outside','other','irreversible']);
 export class EshAutonomy {
@@ -29,7 +31,8 @@ export class EshAutonomy {
   if(node&&!/^[A-Za-z0-9_.-]+$/.test(node))throw new Error('Invalid node');
   const connection=await this.ready(ctx,'esh_run'),session=this.session(ctx);
   const arguments_={cmd:command,session,timeout:15,budget_bytes:16384,...(node?{node}:{})};
-  const preview=envelope(await timed(()=>connection.call('esh_run',{...arguments_,dry_run:true}),ctx.signal));
+  const preview=envelope(await timed(()=>connection.call('esh_run',{...arguments_,dry_run:true},...callOptions(ctx.signal)),ctx.signal));
+  owner(ctx);
   const tier=typeof preview.tier==='number'&&Number.isInteger(preview.tier)&&preview.tier>=0?preview.tier:null;
   const classification=record(record(preview.data).classification);
   const irreversible=classification.irreversible===true||[classification.class,...(Array.isArray(classification.classes)?classification.classes:[])].some(c=>irreversibleClasses.has(String(c)));
@@ -38,12 +41,19 @@ export class EshAutonomy {
   const request:PrimeRequest={target:'esh',name:'esh_run',arguments:arguments_};
   // Freeze the observed persistent-session version as well as command/node.
   if(typeof preview.session_version==='number')request.arguments.expect_version=preview.session_version;
-  owner(ctx);const ticket=await this.options.prepare(request);owner(ctx);
+  owner(ctx);const ticket=await abortable(()=>this.options.prepare(request,ctx.signal),ctx.signal);owner(ctx);
   const granted=tier===2&&this.config.esh.autoTierMax===2&&!!this.config.esh.standingGrantRef;
   // Tier 3 and unknown classes always need the owner. A reference is not an ESH grant token.
   const automatic=!irreversible&&(tier<=1||granted)&&preview.ok===true&&preview.verdict==='explain'&&preview.authorised===true;
   if(!automatic)return {...this.result('review_required',preview),review:{...ticket,tier,reason:preview.verdict==='gated'?'Existing ESH owner grant required':'Owner review required'},message:'Review the exact request, then select Run. No command executed.'};
-  const executed=record(await this.options.execute(ticket.id,ticket.digest));
+  let executed:Record<string,unknown>;
+  try{
+   executed=record(await abortable(()=>ctx.signal?this.options.execute(ticket.id,ticket.digest,ctx.signal):this.options.execute(ticket.id,ticket.digest),ctx.signal));
+   throwIfAborted(ctx.signal);
+  }catch(error){
+   if(!ctx.signal?.aborted)throw error;
+   executed={state:'uncertain',requestId:ticket.requestId,detail:'Connection interrupted; outcome unknown. Inspect the owner using this request ID before retrying.'};
+  }
   const receipt=record(executed.result);
   return {...this.result(String(executed.state??'uncertain'),Object.keys(receipt).length?receipt:executed),requestId:ticket.requestId,tier,...(granted?{standingGrantRef:this.config.esh.standingGrantRef}:{})};
  });}
@@ -54,16 +64,18 @@ export class EshAutonomy {
   if(Buffer.byteLength(JSON.stringify(parameters))>8000||/"(?:grant|api_key|access_token|authorization|confirm|session|bypass_reason)"\s*:/i.test(JSON.stringify(parameters)))throw new Error('ESH verb arguments refused');
   // The typed owner validates verb-specific args; no shell or command conversion here.
   const connection=await this.ready(ctx,'esh_verb');owner(ctx);
-  const receipt=envelope(await timed(()=>connection.call('esh_verb',{name:verb,args:parameters,session:this.session(ctx)}),ctx.signal));
+  const receipt=envelope(await timed(()=>connection.call('esh_verb',{name:verb,args:parameters,session:this.session(ctx)},...callOptions(ctx.signal)),ctx.signal));
+  owner(ctx);
   return this.result(receipt.ok===true?'returned':'blocked',receipt);
  });}
  private session(ctx:ToolContext){return 'prime-'+createHash('sha256').update(ctx.sessionId??ctx.prompt).digest('hex').slice(0,24);}
  private result(state:string,receipt:Record<string,unknown>){return {untrusted:true,audit_id:typeof receipt.audit_id==='string'?receipt.audit_id:null,receipt,state};}
  private async ready(ctx:ToolContext,name:string){
   const c=this.options.connection;if(!c)throw new Error('ESH host not connected');
-  const status=envelope(await timed(()=>c.call('esh_status',{}),ctx.signal));
+  const status=envelope(await timed(()=>c.call('esh_status',{},...callOptions(ctx.signal)),ctx.signal));
+  owner(ctx);
   if(status.ok!==true||typeof status.version!=='string'||status.killed||status.deadman_expired||record(status.ledger).ok!==true)throw new Error('ESH identity, policy or ledger unavailable');
-  const tools=await timed(()=>c.listTools(),ctx.signal),tool=tools.find(t=>t.name===name);if(!tool)throw new Error('ESH tool not advertised');
+  const tools=await timed(()=>c.listTools(ctx.signal),ctx.signal),tool=tools.find(t=>t.name===name);if(!tool)throw new Error('ESH tool not advertised');
   if(name==='esh_run'&&record(record(tool.inputSchema.properties).dry_run).type!=='boolean')throw new Error('ESH does not advertise bounded dry-run classification');
   owner(ctx);return c;
  }

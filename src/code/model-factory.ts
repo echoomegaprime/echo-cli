@@ -1,8 +1,9 @@
 import { tmpdir } from 'node:os';
 import { debuglog } from 'node:util';
 import { LocalModel, validateEndpoint, type Model } from './model.js';
-import { CliModel, PROVIDER_BIN, PROVIDER_LABEL, ProviderUnavailableError, childEnv, run, type ProviderId, type Runner } from './providers.js';
+import { CliModel, PROVIDER_BIN, PROVIDER_LABEL, ProviderProcessCleanupError, ProviderUnavailableError, childEnv, providerExecutionBlock, run, type ProviderId, type Runner } from './providers.js';
 import { TASK_CLASSES, classifyTask, type TaskClass } from './task-classifier.js';
+import { abortable, throwIfAborted } from './cancellation.js';
 
 /**
  * The one place a Model is built from a provider id.
@@ -135,7 +136,7 @@ export interface AnswerInfo {
 export interface FailureInfo { at: string; reason: string; signedOut: boolean }
 export interface ProviderStatus {
   id: ModelId; label: string; kind: 'local' | 'cli'; available: boolean; reason?: string;
-  check: 'model-listed' | 'installed' | 'signed-in'; checkedAt: string; requested: string | null;
+  check: 'model-listed' | 'installed' | 'signed-in' | 'execution-blocked'; checkedAt: string; requested: string | null;
   /** Argon only: the Gemini ids agy offers right now (empty with a reason when listing failed; never invented). */
   variants?: Variant[]; variantsReason?: string;
   endpoint?: string; contextTokens?: number; last: AnswerInfo | null; lastFailure: FailureInfo | null;
@@ -199,21 +200,24 @@ export class ModelRouter {
    * before any call; a provider that then fails still fails the turn (no fallback for outages).
    */
   async route(prompt: string, options: RouteOptions = {}): Promise<Route> {
+    throwIfAborted(options.signal);
     if (!this.auto.enabled) throw new Error('Auto model mode is not enabled in the reviewed models configuration');
     const rules = classifyTask(prompt);
     let task = rules.task, classifier: RouteInfo['classifier'] = 'rules', confidence = rules.confidence;
     let reason = rules.reasons.length ? `${task} (rules: ${rules.reasons.map(r => r.split(': ')[1]).join(', ')})` : `${task} (rules: no strong cue, default)`;
-    if (this.auto.classifier === 'rules+qwen' && rules.confidence < 0.6 && (await this.probe('qwen')).available) {
+    if (this.auto.classifier === 'rules+qwen' && rules.confidence < 0.6 && (await this.probe('qwen', options.signal)).available) {
       try {
-        const label = await new LocalModel(this.config.endpoint, this.config.model, 8000, Math.min(this.config.contextTokens, 8192)).classify(prompt, TASK_CLASSES, options.signal);
+        const label = await abortable(() => new LocalModel(this.config.endpoint, this.config.model, 8000, Math.min(this.config.contextTokens, 8192)).classify(prompt, TASK_CLASSES, options.signal), options.signal);
         if ((TASK_CLASSES as readonly string[]).includes(label)) { task = label as TaskClass; classifier = 'qwen'; confidence = 0.75; reason = `${task} (qwen classifier; rules said ${rules.task} at ${rules.confidence})`; }
-      } catch (error) { debug('%j', { event: 'prime_auto_classifier_failed', reason: error instanceof Error ? error.message.slice(0, 120) : 'unknown' }); }
+      } catch (error) { throwIfAborted(options.signal); debug('%j', { event: 'prime_auto_classifier_failed', reason: error instanceof Error ? error.message.slice(0, 120) : 'unknown' }); }
     }
     const considered: RouteInfo['considered'] = [];
     const promptChars = (options.historyChars ?? 0) + prompt.length;
     for (const id of routingChains(this.auto)[task]) {
+      throwIfAborted(options.signal);
       if (id === 'argon' && promptChars > ARGON_PROMPT_BUDGET) { considered.push({ id, available: false, reason: `the conversation (${promptChars} characters) exceeds agy's command-line prompt cap` }); continue; }
-      const probe = await this.status(id);
+      const probe = await this.status(id, options.signal);
+      throwIfAborted(options.signal);
       considered.push({ id, available: probe.available, ...(probe.reason ? { reason: probe.reason } : {}) });
       if (probe.available) {
         const info: RouteInfo = { task, reason, classifier, confidence, considered };
@@ -236,10 +240,12 @@ export class ModelRouter {
     return model;
   }
   /** Checks a requested Argon model against what agy lists right now. Unknown or unverifiable ids are refused; the default is never substituted. */
-  async variant(id: ModelId, model: string): Promise<string> {
+  async variant(id: ModelId, model: string, signal?: AbortSignal): Promise<string> {
+    throwIfAborted(signal);
     if (id !== 'argon') throw new Error('A model variant is only for Argon (Gemini); other providers use their configured model');
     if (typeof model !== 'string' || !VARIANT_ARG.test(model)) { debug('%j', { event: 'prime_argon_variant_rejected', reason: 'invalid' }); throw new Error('Invalid Argon model id'); }
-    const probe = await this.probe('argon'), listed = probe.variants ?? [];
+    const probe = await this.probe('argon', signal), listed = probe.variants ?? [];
+    throwIfAborted(signal);
     if (listed.some(v => v.id === model)) return model;
     if (!listed.length) {
       debug('%j', { event: 'prime_argon_variant_rejected', reason: 'unverifiable' });
@@ -277,8 +283,8 @@ export class ModelRouter {
     };
   }
   /** The probe, overridden by a signed-out failure younger than SIGNED_OUT_MS: what the picker, Enhance, Echo Build and auto routing read. */
-  private async status(id: ModelId): Promise<Probe> {
-    const probe = await this.probe(id), failure = this.failures.get(id);
+  private async status(id: ModelId, signal?: AbortSignal): Promise<Probe> {
+    const probe = await this.probe(id, signal), failure = this.failures.get(id);
     if (id === 'qwen' || !probe.available || !failure?.signedOut || this.now() - failure.atMs >= SIGNED_OUT_MS) return probe;
     return { ...probe, available: false, reason: `signed out: the last call (${failure.at}) failed with "${failure.reason}"; sign in again on the Prime host with "${LOGIN[id]}"` };
   }
@@ -286,49 +292,61 @@ export class ModelRouter {
     const failure = this.failures.get(id);
     return failure ? { at: failure.at, reason: failure.reason, signedOut: failure.signedOut } : null;
   }
-  private probe(id: ModelId): Promise<Probe> {
+  private probe(id: ModelId, signal?: AbortSignal): Promise<Probe> {
+    throwIfAborted(signal);
+    // A login/version probe cannot qualify process containment or a vendor's
+    // native tool boundary. Trusted host runner injection is not JSON-configurable.
+    const blocked = id === 'qwen' || this.runner !== run ? undefined : providerExecutionBlock(id);
+    if (blocked) return Promise.resolve({ available: false, reason: blocked, check: 'execution-blocked', checkedAt: this.stamp() });
     const cached = this.probes.get(id), now = this.now();
-    if (cached && now - cached.at < CACHE_MS) return cached.probe;
-    const probe = id === 'qwen' ? this.probeLocal() : id === 'argon' ? this.probeArgon() : this.probeCli(id);
-    this.probes.set(id, { at: now, probe });
-    return probe;
+    if (cached && now - cached.at < CACHE_MS) return abortable(() => cached.probe, signal);
+    const probe = id === 'qwen' ? this.probeLocal(signal) : id === 'argon' ? this.probeArgon(signal) : this.probeCli(id, signal);
+    // A cancelled turn must not poison the shared status cache or cancel a
+    // report already in progress. New turn probes remain caller-scoped.
+    if (!signal) this.probes.set(id, { at: now, probe });
+    return abortable(() => probe, signal);
   }
   private stamp(): string { return new Date(this.now()).toISOString(); }
-  private async probeLocal(): Promise<Probe> {
+  private async probeLocal(signal?: AbortSignal): Promise<Probe> {
     const base = { check: 'model-listed' as const, checkedAt: this.stamp() };
     try {
-      const names = await new LocalModel(this.config.endpoint, this.config.model, 5000, this.config.contextTokens).models();
+      const names = await abortable(() => new LocalModel(this.config.endpoint, this.config.model, 5000, this.config.contextTokens).models(signal), signal);
       return names.includes(this.config.model) ? { ...base, available: true }
         : { ...base, available: false, reason: `model "${this.config.model}" is not installed on the local endpoint` };
-    } catch { return { ...base, available: false, reason: 'local model endpoint is unreachable or returned an invalid response' }; }
+    } catch { throwIfAborted(signal); return { ...base, available: false, reason: 'local model endpoint is unreachable or returned an invalid response' }; }
   }
   // Status commands only. Output is never returned: it can carry account details.
   // Argon also lists the Gemini ids agy offers: same Runner and minimal env; the listing is parsed, never returned raw.
-  private async probeArgon(): Promise<Probe> {
-    const bin = PROVIDER_BIN.argon, probe = await this.probeCli('argon');
+  private async probeArgon(signal?: AbortSignal): Promise<Probe> {
+    const bin = PROVIDER_BIN.argon, probe = await this.probeCli('argon', signal);
+    throwIfAborted(signal);
     if (!probe.available) return { ...probe, variants: [], variantsReason: `"${bin}" is not available` };
     let result: Pick<Probe, 'variants' | 'variantsReason'>;
     try {
-      const r = await this.runner(bin, ['models'], { cwd: tmpdir(), env: childEnv(), timeoutMs: this.probeTimeoutMs, maxBytes: 64000 });
-      const variants = r.timedOut || r.code ? [] : parseAgyModels(r.stdout);
+      const r = await abortable(() => this.runner(bin, ['models'], { cwd: tmpdir(), env: childEnv(), timeoutMs: this.probeTimeoutMs, maxBytes: 64000, ...(signal ? { signal } : {}) }), signal);
+      const variants = r.timedOut || r.code !== 0 ? [] : parseAgyModels(r.stdout);
       result = r.timedOut ? { variants, variantsReason: `"${bin} models" timed out or returned too much output` }
-        : r.code ? { variants, variantsReason: `"${bin} models" exited with code ${r.code}` }
+        : r.code !== 0 ? { variants, variantsReason: `"${bin} models" exited with code ${r.code}` }
         : variants.length ? { variants } : { variants, variantsReason: `"${bin} models" listed no Gemini models` };
     } catch (error) {
-      result = { variants: [], variantsReason: (error as { spawnFailed?: boolean }).spawnFailed ? `could not start "${bin}"` : `could not run "${bin} models"` };
+      throwIfAborted(signal);
+      result = { variants: [], variantsReason: error instanceof ProviderProcessCleanupError ? error.message : (error as { spawnFailed?: boolean }).spawnFailed ? `could not start "${bin}"` : `could not run "${bin} models"` };
     }
     debug('%j', { event: 'prime_argon_variants', count: result.variants!.length, reason: result.variantsReason });
     return { ...probe, ...result };
   }
-  private async probeCli(id: ProviderId): Promise<Probe> {
+  private async probeCli(id: ProviderId, signal?: AbortSignal): Promise<Probe> {
     const bin = PROVIDER_BIN[id], signIn = SIGN_IN[id];
     const base = { check: (signIn ? 'signed-in' : 'installed') as ProviderStatus['check'], checkedAt: this.stamp() };
     try {
-      const result = await this.runner(bin, signIn ? signIn.args : ['--version'], { cwd: tmpdir(), env: childEnv(), timeoutMs: this.probeTimeoutMs, maxBytes: 20000 });
+      const result = await abortable(() => this.runner(bin, signIn ? signIn.args : ['--version'], { cwd: tmpdir(), env: childEnv(), timeoutMs: this.probeTimeoutMs, maxBytes: 20000, ...(signal ? { signal } : {}) }), signal);
       if (result.timedOut) return { ...base, available: false, reason: `"${bin}" timed out` };
+      if (result.code === null) return { ...base, available: false, reason: `"${bin}" exited without a success code; provider process outcome is unknown` };
       if (result.code) return { ...base, available: false, reason: signIn ? `not signed in ("${bin} ${signIn.args.join(' ')}" exited with code ${result.code}); sign in on the Prime host with "${signIn.login}"` : `"${bin}" exited with code ${result.code}` };
       return { ...base, available: true };
     } catch (error) {
+      throwIfAborted(signal);
+      if (error instanceof ProviderProcessCleanupError) return { ...base, available: false, reason: error.message };
       const install = INSTALL[id];
       return { ...base, available: false, reason: (error as { spawnFailed?: boolean }).spawnFailed ? `could not start "${bin}" (not installed or not on PATH)${install ? '; ' + install : ''}` : `could not run "${bin}"` };
     }

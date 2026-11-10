@@ -7,6 +7,7 @@ import {debuglog} from 'node:util';
 import {deflateSync,inflateSync} from 'node:zlib';
 import {redact} from '../code/workspace.js';
 import {WorkspaceHttpError} from './workspace.js';
+import {acquireUploadQuota,parseUploadQuota,UploadQuotaError,type UploadQuota,type UploadQuotaLease} from './upload-quota.js';
 
 const debug=debuglog('echo-prime');
 
@@ -77,6 +78,7 @@ export interface UploadsConfig {
  root:string;
  maxBytes:number;
  types:AllowedUploadMime[];
+ quota:UploadQuota;
 }
 
 export interface UploadMeta {
@@ -148,7 +150,7 @@ export function parseUploadsConfig(value:unknown):UploadsConfig{
  }
  const input=value as Record<string,unknown>;
  for(const key of Object.keys(input)){
-  if(!['root','maxBytes','types'].includes(key)){
+  if(!['root','maxBytes','types','quota'].includes(key)){
    throw new Error('Invalid uploads configuration: unknown field '+key);
   }
  }
@@ -173,7 +175,7 @@ export function parseUploadsConfig(value:unknown):UploadsConfig{
   }
   types=[...new Set(input.types.map(normalizeConfiguredType))];
  }
- return {root,maxBytes,types};
+ return {root,maxBytes,types,quota:parseUploadQuota(input.quota)};
 }
 
 export function kindForMime(mime:string):UploadKind{
@@ -958,6 +960,7 @@ class StreamingFileWriter {
   private readonly fh:FileHandle,
   private readonly mime:AllowedUploadMime,
   private readonly maxBytes:number,
+  private readonly quota:UploadQuotaLease,
  ){
   if(mime==='image/jpeg'){
    this.jpeg=new JpegHeaderTransformer(out=>{this.enqueueWrite(out);});
@@ -983,6 +986,7 @@ class StreamingFileWriter {
   const copy=Buffer.from(chunk);
   this.writeChain=this.writeChain.then(async()=>{
    if(this.writeErr)return;
+   this.quota.reserveBytes(copy.length);
    let off=0;
    while(off<copy.length){
     const {bytesWritten}=await this.fh.write(copy,off,copy.length-off);
@@ -1042,16 +1046,14 @@ class StreamingFileWriter {
  }
 }
 
-async function atomicWriteJson(targetPath:string,value:unknown):Promise<void>{
- const tmp=`${targetPath}.${randomUUID()}.tmp`;
- await writeFile(tmp,JSON.stringify(value,null,2),'utf8');
- await rename(tmp,targetPath);
+async function atomicWriteJson(targetPath:string,value:unknown,quota:UploadQuotaLease):Promise<void>{
+ await quota.writeJson(targetPath,value);
 }
 
 export class UploadStore {
  readonly config:UploadsConfig;
  constructor(config:UploadsConfig){
-  this.config=config;
+  this.config=parseUploadsConfig(config);
  }
 
  private accountRoot(owner:string):string{
@@ -1073,10 +1075,10 @@ export class UploadStore {
  }
 
  async handleUpload(req:IncomingMessage,owner:string):Promise<UploadMeta>{
+  const quota=await acquireUploadQuota(this.config.root,safeAccountSegment(owner),this.config.quota,true);
   const id='upl_'+randomBytes(16).toString('hex');
   const acctDir=this.accountRoot(owner);
   const tmpDir=join(acctDir,`.tmp_${randomUUID()}`);
-  await mkdir(tmpDir,{recursive:true});
   const blobPath=join(tmpDir,'blob');
   const started=Date.now();
   debug('%j',{schemaVersion:1,event:'prime_upload_started',uploadId:id,owner:safeAccountSegment(owner)});
@@ -1089,6 +1091,7 @@ export class UploadStore {
   let rawTags='';
 
   try{
+   await mkdir(tmpDir,{recursive:true});
    const ct=String(req.headers['content-type']??'');
    const boundary=ct.toLowerCase().startsWith('multipart/form-data')?parseMultipartBoundary(ct):null;
 
@@ -1142,7 +1145,7 @@ export class UploadStore {
         finalName=sanitizeUploadName(parsed.filename);
         finalMime=resolveMime(parsed.contentType,finalName,this.config.types);
         fh=await open(blobPath,'w',0o600);
-        writer=new StreamingFileWriter(fh,finalMime,this.config.types.includes(finalMime)?this.config.maxBytes:0);
+        writer=new StreamingFileWriter(fh,finalMime,this.config.types.includes(finalMime)?this.config.maxBytes:0,quota);
         state='file';
        }else{
         currentField=parsed.name??'';
@@ -1201,7 +1204,7 @@ export class UploadStore {
      rawTags=(()=>{try{return decodeURIComponent(rawTagHdr);}catch{return rawTagHdr;}})();
     }
     fh=await open(blobPath,'w',0o600);
-    writer=new StreamingFileWriter(fh,finalMime,this.config.maxBytes);
+    writer=new StreamingFileWriter(fh,finalMime,this.config.maxBytes,quota);
     for await(const rawChunk of req){
      const chunk=Buffer.isBuffer(rawChunk)?rawChunk:Buffer.from(rawChunk);
      await writer.write(chunk);
@@ -1219,15 +1222,15 @@ export class UploadStore {
    const finished=await writer.finish();
    await fh!.close();
    fh=undefined;
-   return await this.finishUpload({id,owner,tmpDir,blobPath,finalName,finalMime,tags,finished,started});
+   return await this.finishUpload({id,owner,tmpDir,blobPath,finalName,finalMime,tags,finished,started,quota});
   }catch(error){
    if(fh)await fh.close().catch(()=>{});
    await rm(tmpDir,{recursive:true,force:true}).catch(()=>{});
-   const status=error instanceof UploadError?error.status:400;
+   const status=error instanceof UploadError||error instanceof UploadQuotaError?error.status:400;
    debug('%j',{schemaVersion:1,event:'prime_upload_refused',uploadId:id,status,durationMs:Date.now()-started});
-   if(error instanceof UploadError)throw error;
+   if(error instanceof UploadError||error instanceof UploadQuotaError)throw error;
    throw new UploadError(400,'Upload failed');
-  }
+  }finally{await quota.release();}
  }
 
  /** Stores bytes Prime fetched itself (a generated image, video or audio file) through the same checks as a browser
@@ -1241,17 +1244,19 @@ export class UploadStore {
   * held in memory whole. A failure of the source itself (over the media limit, a dropped link) is passed on unchanged, so
   * the caller can say why; the partial blob is removed either way. */
  async ingestStream(owner:string,input:{name:string;type:string;chunks:AsyncIterable<Buffer>;tags?:string[]}):Promise<UploadMeta>{
+  const quota=await acquireUploadQuota(this.config.root,safeAccountSegment(owner),this.config.quota,true);
   const id='upl_'+randomBytes(16).toString('hex');
   const tmpDir=join(this.accountRoot(owner),`.tmp_${randomUUID()}`);
-  await mkdir(tmpDir,{recursive:true});
   const blobPath=join(tmpDir,'blob'),started=Date.now();
   let fh:FileHandle|undefined,sourceError:unknown;
-  const source=input.chunks[Symbol.asyncIterator]();
+  let source:AsyncIterator<Buffer>|undefined;
   try{
+   source=input.chunks[Symbol.asyncIterator]();
+   await mkdir(tmpDir,{recursive:true});
    const finalName=sanitizeUploadName(input.name);
    const finalMime=resolveMime(input.type,finalName,this.config.types);
    fh=await open(blobPath,'w',0o600);
-   const writer=new StreamingFileWriter(fh,finalMime,this.config.maxBytes);
+   const writer=new StreamingFileWriter(fh,finalMime,this.config.maxBytes,quota);
    for(;;){
     let next:IteratorResult<Buffer>;
     try{next=await source.next();}catch(error){sourceError=error;throw error;}
@@ -1260,19 +1265,23 @@ export class UploadStore {
    }
    const finished=await writer.finish();
    await fh.close();fh=undefined;
-   return await this.finishUpload({id,owner,tmpDir,blobPath,finalName,finalMime,tags:sanitizeTags(input.tags??[]),finished,started});
+   return await this.finishUpload({id,owner,tmpDir,blobPath,finalName,finalMime,tags:sanitizeTags(input.tags??[]),finished,started,quota});
   }catch(error){
-   if(sourceError===undefined)await source.return?.().catch(()=>undefined);
+   // Source cleanup is best effort. An uncooperative/rejected return() cannot
+   // retain our file handle or the cross-process storage lock after rejection.
+   if(sourceError===undefined){
+    try{const close=source?.return;if(close)void Promise.resolve(close.call(source)).catch(()=>undefined);}catch{/* close owned state below */}
+   }
    if(fh)await fh.close().catch(()=>{});
    await rm(tmpDir,{recursive:true,force:true}).catch(()=>{});
-   debug('%j',{schemaVersion:1,event:'prime_upload_ingest_refused',uploadId:id,status:error instanceof UploadError?error.status:400,source:sourceError!==undefined,durationMs:Date.now()-started});
-   if(error instanceof UploadError||(sourceError!==undefined&&error===sourceError))throw error;
+   debug('%j',{schemaVersion:1,event:'prime_upload_ingest_refused',uploadId:id,status:error instanceof UploadError||error instanceof UploadQuotaError?error.status:400,source:sourceError!==undefined,durationMs:Date.now()-started});
+   if(error instanceof UploadError||error instanceof UploadQuotaError||(sourceError!==undefined&&error===sourceError))throw error;
    throw new UploadError(400,'Storing the generated file failed');
-  }
+  }finally{await quota.release();}
  }
 
- private async finishUpload(ctx:{id:string;owner:string;tmpDir:string;blobPath:string;finalName:string;finalMime:AllowedUploadMime;tags:string[];finished:{bytes:number;sha256:string;head:Buffer;width?:number;height?:number;pages?:number;exifStripped?:boolean};started:number}):Promise<UploadMeta>{
-   const {id,owner,tmpDir,blobPath,finalName,finalMime,tags,finished,started}=ctx;
+ private async finishUpload(ctx:{id:string;owner:string;tmpDir:string;blobPath:string;finalName:string;finalMime:AllowedUploadMime;tags:string[];finished:{bytes:number;sha256:string;head:Buffer;width?:number;height?:number;pages?:number;exifStripped?:boolean};started:number;quota:UploadQuotaLease}):Promise<UploadMeta>{
+   const {id,owner,tmpDir,blobPath,finalName,finalMime,tags,finished,started,quota}=ctx;
    // Post-stream format checks that inspect bounded slices on disk
    let duration:number|undefined;
    let width=finished.width;
@@ -1303,15 +1312,17 @@ export class UploadStore {
 
    let thumb=false;
    if(finalMime==='image/png'&&finished.bytes<=8*1024*1024){
+    let resized:Buffer|null=null;
     try{
      const pngBytes=await readFile(blobPath);
      // Also check UTF-8/CRC basic structure via thumb generator
-     const resized=tryResizePngThumbnail(pngBytes,160);
-     if(resized){
-      await writeFile(join(tmpDir,'thumb.png'),resized,{mode:0o600});
-      thumb=true;
-     }
-    }catch{thumb=false;}
+     resized=tryResizePngThumbnail(pngBytes,160);
+    }catch{/* A format without a supported thumbnail still retains its upload. */}
+    if(resized){
+     quota.reserveBytes(resized.length);
+     await writeFile(join(tmpDir,'thumb.png'),resized,{mode:0o600});
+     thumb=true;
+    }
    }
 
    if(finished.exifStripped){
@@ -1335,7 +1346,7 @@ export class UploadStore {
     ...(tags.length?{tags}:{}),
    };
 
-   await atomicWriteJson(join(tmpDir,'meta.json'),meta);
+   await atomicWriteJson(join(tmpDir,'meta.json'),meta,quota);
    const finalDir=this.uploadDir(owner,id);
    await rename(tmpDir,finalDir);
    debug('%j',{schemaVersion:1,event:'prime_upload_completed',uploadId:id,kind:meta.kind,type:meta.type,bytes:meta.bytes,durationMs:Date.now()-started});
@@ -1405,6 +1416,8 @@ export class UploadStore {
   if(!patch||typeof patch!=='object'||Array.isArray(patch))throw new UploadError(400,'Invalid upload update');
   const data=patch as Record<string,unknown>;
   for(const k of Object.keys(data))if(!['name','tags'].includes(k))throw new UploadError(400,'Unknown upload update field');
+  const quota=await acquireUploadQuota(this.config.root,safeAccountSegment(owner),this.config.quota,false);
+  try{
   const meta=await this.readMeta(owner,id);
   if(data.name!==undefined){
    const nextName=sanitizeUploadName(data.name);
@@ -1417,9 +1430,10 @@ export class UploadStore {
    meta.tags=sanitizeTags(data.tags);
   }
   meta.updated_at=new Date().toISOString();
-  await atomicWriteJson(join(this.uploadDir(owner,id),'meta.json'),meta);
+  await atomicWriteJson(join(this.uploadDir(owner,id),'meta.json'),meta,quota);
   debug('%j',{schemaVersion:1,event:'prime_upload_updated',uploadId:id});
   return meta;
+  }finally{await quota.release();}
  }
 
  async remove(owner:string,id:string):Promise<{id:string;deleted:true}>{
@@ -1586,12 +1600,14 @@ export class UploadStore {
   const id='art_'+randomBytes(16).toString('hex');
   const artRoot=this.artifactRoot(owner);
   const tmpDir=join(artRoot,`.tmp_${randomUUID()}`);
-  await mkdir(tmpDir,{recursive:true});
+  const quota=await acquireUploadQuota(this.config.root,safeAccountSegment(owner),this.config.quota,true);
 
   try{
+   await mkdir(tmpDir,{recursive:true});
    let bytes=linkedMeta?.bytes??0;
    let sha256=linkedMeta?.sha256;
    if(contentBuf){
+    quota.reserveBytes(contentBuf.length);
     await writeFile(join(tmpDir,'content'),contentBuf,{mode:0o600});
     bytes=contentBuf.length;
     sha256=createHash('sha256').update(contentBuf).digest('hex');
@@ -1611,14 +1627,14 @@ export class UploadStore {
     tags,
     provenance,
    };
-   await atomicWriteJson(join(tmpDir,'meta.json'),record);
+   await atomicWriteJson(join(tmpDir,'meta.json'),record,quota);
    await rename(tmpDir,this.artifactDir(owner,id));
    debug('%j',{schemaVersion:1,event:'prime_artifact_registered',artifactId:id,kind:record.kind,source:provenance.source});
    return record;
   }catch(err){
    await rm(tmpDir,{recursive:true,force:true}).catch(()=>{});
    throw err;
-  }
+  }finally{await quota.release();}
  }
 
  private async readArtifactMeta(owner:string,id:string):Promise<ArtifactRecord>{
