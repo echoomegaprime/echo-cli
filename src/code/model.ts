@@ -51,8 +51,8 @@ export class LocalModel implements Model {
     if (!Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > 300000) throw new Error('Invalid model timeout');
     if (!Number.isInteger(numCtx) || numCtx < 1024 || numCtx > 1048576) throw new Error('Invalid model context size');
   }
-  async models(): Promise<string[]> {
-    const value = await this.request('api/tags') as { models?: { name: string }[] };
+  async models(signal?: AbortSignal): Promise<string[]> {
+    const value = await this.request('api/tags', undefined, signal) as { models?: { name: string }[] };
     if (!Array.isArray(value.models)) throw new Error('Local model inventory unavailable');
     return value.models.map(m => m.name).filter(name => typeof name === 'string' && !/cloud/i.test(name));
   }

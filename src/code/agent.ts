@@ -4,6 +4,7 @@ import type { Session, Message } from './sessions.js';
 import type { Model } from './model.js';
 import type { ToolEvent, TurnExecutor } from './tools/index.js';
 import { checkClaims, type ClaimReport } from './claims.js';
+import { abortable } from './cancellation.js';
 
 export type TaskMode = 'read-only' | 'propose';
 
@@ -45,6 +46,8 @@ export interface TurnOptions {
   /** Applies only to this turn; prior prompts and sessions never grant proposal permission. */
   mode?: TaskMode;
   maxSteps?: number; signal?: AbortSignal; onEvent?: (event: { kind: string; detail: string }) => void;
+  /** Host-owned allowance shared by provider reroutes of one parent request. */
+  stepBudget?: { remaining: number };
   /** Live tools for this turn (web, Wolfram, Echo knowledge/memory, skills, MCP); from `ToolKit.forTurn`. Absent = no tools. */
   tools?: TurnExecutor; onToolEvent?: (event: ToolEvent) => void;
   /** Personality selected for this turn (Personality Forge auto-selection); injected once into the system text, never mid-reply. */
@@ -73,6 +76,7 @@ export async function runTurn(options: TurnOptions): Promise<TurnResult> {
   const given: string[] = [options.prompt, ...(options.context ?? []).filter(c => typeof c === 'string')];
   const maxSteps = options.maxSteps ?? 10;
   if (!Number.isInteger(maxSteps) || maxSteps < 1 || maxSteps > 30 || typeof options.prompt !== 'string' || !options.prompt.trim() || options.prompt.length > 12000) throw new Error('Prompt or step budget invalid');
+  if (options.stepBudget && (!Number.isInteger(options.stepBudget.remaining) || options.stepBudget.remaining < 0 || options.stepBudget.remaining > 30)) throw new Error('Shared step budget invalid');
   const release = store.lease(sessionId);
   let answer = '', status: Session['status'] = 'running';
   const reads = new Map<string, SourceEvidence>();
@@ -84,10 +88,12 @@ export async function runTurn(options: TurnOptions): Promise<TurnResult> {
     store.append(sessionId, { role: 'user', content: options.prompt });
     for (let step = 0; step < maxSteps; step++) {
       if (signal?.aborted) { status = 'interrupted'; break; }
+      if (options.stepBudget?.remaining === 0) { status = 'step_limit'; break; }
       const history = store.get(sessionId).messages;
       const messages: Message[] = [{ role: 'system', content: instructions }, ...history];
       if(options.systemContext)messages[0].content+='\n'+options.systemContext.slice(0,28000);
-      const action = await model.next(messages, signal);
+      if (options.stepBudget) options.stepBudget.remaining--;
+      const action = await abortable(() => model.next(messages, signal), signal);
       if (signal?.aborted) { status = 'interrupted'; break; }
       store.append(sessionId, { role: 'assistant', content: JSON.stringify(action) });
       if (action.action === 'final') { answer = redact(action.content); status = 'completed'; break; }
@@ -123,6 +129,9 @@ export async function runTurn(options: TurnOptions): Promise<TurnResult> {
       const detail = redact(JSON.stringify(result));
       given.push(detail);
       store.append(sessionId, { role: 'user', content: `UNTRUSTED TOOL RESULT (${label}):\n${detail}` });
+      // The executors settle cancellation as bounded unknown-outcome evidence.
+      // Preserve admitted run IDs before stopping; never request another step.
+      if (signal?.aborted) { status = 'interrupted'; break; }
       options.onEvent?.({ kind: action.action, detail: action.action === 'propose' ? detail : 'completed' });
       if (action.action === 'propose' && typeof result === 'object' && result !== null && 'status' in result && result.status === 'pending_approval') {
         status = 'pending_approval'; answer = 'Edit staged for explicit review and approval. No source file has been changed.'; break;

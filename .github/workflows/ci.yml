@@ -46,6 +46,40 @@ jobs:
       - name: Build
         run: npm run build
 
+  windows:
+    name: CI (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out exact source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.ECHO_SOURCE_SHA }}
+          persist-credentials: false
+      - name: Verify source identity
+        shell: pwsh
+        run: |
+          $echoActualSha = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $echoActualSha -ne $env:ECHO_SOURCE_SHA) {
+            throw "Source identity mismatch"
+          }
+          Write-Output "Verified source: $echoActualSha"
+      - name: Configure Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Run the test suite
+        run: npm test
+      - name: Build
+        run: npm run build
+
   codeql:
     name: CodeQL
     runs-on: ubuntu-latest

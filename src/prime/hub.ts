@@ -27,16 +27,17 @@ import {EshAutonomy,type AutonomyConfig} from '../code/tools/esh.js';
 import {EcfTools} from '../code/tools/ecf.js';
 import {ContinuityClient} from '../code/continuity.js';
 import {type AutonomyEvents,envelope} from '../code/tools/autonomy.js';
+import {abortable,throwIfAborted} from '../code/cancellation.js';
 const debugOwnerResponse=debuglog('echo-prime');
 export type Json=Record<string,unknown>;
 export interface Tool {name:string;description?:string;inputSchema:Json}
-export interface McpConnection {listTools():Promise<Tool[]>;call(name:string,args:Json,options?:{timeoutMs?:number}):Promise<unknown>}
+export interface McpConnection {listTools(signal?:AbortSignal):Promise<Tool[]>;call(name:string,args:Json,options?:{timeoutMs?:number;signal?:AbortSignal}):Promise<unknown>}
 export interface Capability {id:string;registered:boolean;health:string;scope?:string;tier?:number|null;category:string;description:string}
 export interface SdkBroker {
  search(query:string):Promise<Capability[]>;
  read(capability:string):Promise<unknown>;
  /** `timeoutMs` is how long this one call may take end to end (Prime's MCP wait and the bridge's gate wait). */
- invoke(request:{capability:string;params:Json;reason:string;idempotency_key:string},options?:{timeoutMs?:number}):Promise<unknown>;
+ invoke(request:{capability:string;params:Json;reason:string;idempotency_key:string},options?:{timeoutMs?:number;signal?:AbortSignal}):Promise<unknown>;
 }
 export interface PrimeRequest {target:'sdk'|'esh';name:string;arguments:Json}
 export interface PrimeOptions {
@@ -155,7 +156,7 @@ export class PrimeHub {
  /** Video-related part of the live catalog, re-read at most once a minute (plan, create and re-plan reuse it). */
  private videoCatalogCache?:{at:number;catalog:VideoCatalog};
  constructor(private options:PrimeOptions){this.catalog=new Map(options.capabilities.map(c=>[c.id,{...c}]));
-  this.eshAutonomy=new EshAutonomy({connection:options.esh,config:options.autonomy,events:options.autonomyEvents,prepare:r=>this.prepareTicket(r,true),execute:(id,hash)=>this.execute(id,hash)});
+  this.eshAutonomy=new EshAutonomy({connection:options.esh,config:options.autonomy,events:options.autonomyEvents,prepare:(r,signal)=>this.prepareTicket(r,true,signal),execute:(id,hash,signal)=>this.execute(id,hash,signal)});
   this.ecf=options.ecf??new EcfTools(new ContinuityClient(),options.autonomyEvents);
  }
  /** One additive registry spread for the lead's owner tool loop. Never browser-supplied tools. */
@@ -477,17 +478,21 @@ export class PrimeHub {
   for(const c of rows)if(/^echo\.[A-Za-z0-9_.-]+$/.test(c.id))this.catalog.set(c.id,{...c});
   return rows;
  }
- async status(){
+ async status(signal?:AbortSignal){
+  throwIfAborted(signal);
   const esh:{state:string;detail:string;version?:string;ledgerVerified?:boolean;tools?:Tool[]}={state:'disconnected',detail:'ESH host not connected'};
   if(this.options.esh){try{
-   const s=object(unwrap(await bounded(()=>this.options.esh!.call('esh_status',{}))));
+   const s=object(unwrap(await bounded(()=>abortable(()=>this.options.esh!.call('esh_status',{},signal?{signal}:undefined),signal))));
+   throwIfAborted(signal);
    if(s.ok!==true||typeof s.version!=='string')throw new Refused('ESH identity unverified');
-   this.tools=await bounded(()=>this.options.esh!.listTools());
-   if(!this.tools.some(t=>t.name==='esh_status'))throw new Refused('ESH tool contract missing');
+   const tools=await bounded(()=>abortable(()=>this.options.esh!.listTools(signal),signal));
+   throwIfAborted(signal);
+   if(!tools.some(t=>t.name==='esh_status'))throw new Refused('ESH tool contract missing');
+   this.tools=tools;
    esh.state=s.killed||s.deadman_expired?'blocked':'connected';
    esh.detail='Policy: '+String(s.policy_source??'unknown')+'; mode: '+String(s.policy_mode??'unknown');
    esh.version=s.version;esh.ledgerVerified=object(s.ledger).ok===true;esh.tools=this.tools;
-  }catch(e){this.tools=[];esh.state=e instanceof Refused?'blocked':'unavailable';esh.detail=e instanceof Refused?e.message:'ESH read failed; availability unknown';}}
+  }catch(e){throwIfAborted(signal);this.tools=[];esh.state=e instanceof Refused?'blocked':'unavailable';esh.detail=e instanceof Refused?e.message:'ESH read failed; availability unknown';}}
   return {observedAt:new Date().toISOString(),esh,chat:this.options.chat?.status()??{state:'disconnected',detail:'Shared chat host not connected; owner admission is required'},sdk:{state:this.options.sdk?'attached':'disconnected',detail:this.options.sdk?'Authenticated host attached; owner authorization still applies':'Authenticated SDK host not connected'},capabilities:this.capabilities()};
  }
  /** For an ElevenLabs binary generator, has the router save the audio under Prime's first media root (keyed by the request
@@ -525,8 +530,9 @@ export class PrimeHub {
   if(args.node!==undefined&&node!==ADULT_NODE&&node!=='')throw new Refused('Adult requests run on TEMPER only (node must be '+ADULT_NODE+'); nothing was sent.');
   args.node=ADULT_NODE;
  }
- async prepare(input:PrimeRequest){return this.prepareTicket(input,false);}
- private async prepareTicket(input:PrimeRequest,autonomyReview:boolean){
+ async prepare(input:PrimeRequest,signal?:AbortSignal){return this.prepareTicket(input,false,signal);}
+ private async prepareTicket(input:PrimeRequest,autonomyReview:boolean,signal?:AbortSignal){
+  if(input.target==='esh')throwIfAborted(signal);
   limited(input);const request=JSON.parse(JSON.stringify(input)) as PrimeRequest,requestId=randomUUID();
   if(!['sdk','esh'].includes(request.target)||typeof request.name!=='string'||!request.arguments||Array.isArray(request.arguments)||typeof request.arguments!=='object')throw new Refused('Invalid integration request');
   // _save_to/_timeout steer where the ElevenLabs router writes a file on FORGE and how long it waits: Prime sets them itself.
@@ -556,7 +562,8 @@ export class PrimeHub {
    this.elevenLabsFile(request.name,request.arguments,requestId);
   }else{
    if(!this.options.esh)throw new Refused('ESH host not connected');
-   const status=await this.status();
+   const status=await this.status(signal);
+   throwIfAborted(signal);
    if(status.esh.state!=='connected')throw new Refused(status.esh.detail);
    if(!this.tools.some(t=>t.name===request.name))throw new Refused('ESH tool not advertised');
    if(request.name==='esh_ledger')request.arguments.limit=Math.min(30,Math.max(1,Number(request.arguments.limit)||5));
@@ -564,25 +571,28 @@ export class PrimeHub {
     if(!autonomyReview)request.arguments.session='echo-prime';
     // Autonomy's tier policy already ran; any returned ticket still requires the
     // existing same-origin owner execute route. Browser requests cannot set this flag.
-    if(this.options.approveEsh?!await this.options.approveEsh(request,digest(request)):!autonomyReview)throw new Refused('ESH action requires the existing host approval boundary');
+    if(this.options.approveEsh?!await abortable(()=>this.options.approveEsh!(request,digest(request)),signal):!autonomyReview)throw new Refused('ESH action requires the existing host approval boundary');
    }
+   throwIfAborted(signal);
   }
   for(const [id,t] of this.tickets)if(t.expiresAt<Date.now())this.tickets.delete(id);
   if(this.tickets.size>=100)throw new Refused('Too many pending requests');
   const ticket:Ticket={id:randomUUID(),requestId,digest:digest(request),request,expiresAt:Date.now()+300000,submitted:false,scope,cost:request.target==='sdk'?'Provider charges or quota may apply. No automatic fallback.':'Governed by ESH owner policy.'};
   this.tickets.set(ticket.id,ticket);return {...ticket,request:JSON.parse(JSON.stringify(request)) as PrimeRequest};
  }
- async execute(id:string,hash:string){
+ async execute(id:string,hash:string,signal?:AbortSignal){
   const ticket=this.tickets.get(id);
   if(!ticket||ticket.expiresAt<Date.now()||ticket.digest!==hash)throw new Refused('Review the current exact request before execution');
   if(ticket.submitted)throw new Refused('Request already submitted; inspect the original receipt before any retry');
+  if(ticket.request.target==='esh')throwIfAborted(signal);
   ticket.submitted=true;
   // SDK requests run as server-side jobs: long generations keep going after this response, async provider jobs are
   // followed, and a finished media file is stored and registered (media-jobs.ts). ESH keeps its bounded receipt path.
   if(ticket.request.target==='sdk')return this.mediaJobs().execute(ticket.requestId,ticket.request.name,ticket.request.arguments) as Promise<{state:string;requestId:string;detail?:string;result?:unknown;untrusted?:boolean}>;
   try{
    const r=ticket.request;
-   const raw=await bounded(()=>this.options.esh!.call(r.name,{...r.arguments,...(!eshReads.has(r.name)?{idempotency_key:ticket.requestId}:{})}));
+   const raw=await bounded(()=>abortable(()=>this.options.esh!.call(r.name,{...r.arguments,...(!eshReads.has(r.name)?{idempotency_key:ticket.requestId}:{})},signal?{signal}:undefined),signal));
+   throwIfAborted(signal);
    const result=envelope(raw);limited(result,1048576);const body=object(result);
    if(body.ok===false||body.isError===true||['denied','gated','blocked'].includes(String(body.verdict)))return {state:'blocked',requestId:ticket.requestId,result,untrusted:true,detail:String(body.reason??'ESH owner refused the request')};
    return {state:body.job_id&&!['completed','succeeded','done'].includes(String(body.status))?'submitted':'returned',requestId:ticket.requestId,result:JSON.parse(redact(JSON.stringify(result))),untrusted:true};

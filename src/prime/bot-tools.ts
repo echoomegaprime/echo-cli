@@ -3,6 +3,7 @@ import {DEFAULT_TOOLS,type TurnExecutor,type ExecuteOutcome} from '../code/tools
 import type {ToolAction,ToolCall,ToolEvent,ToolsBudget} from '../code/tools/types.js';
 import {compact,errorText,redactDeep,refuseSecrets} from '../code/tools/util.js';
 import {AUTOAGENTS_PROMPT_FRAGMENT,AutoagentError,type AutoAgents,type ChatTool,type DelegatedTask,type ToolContext} from '../code/tools/autoagents.js';
+import {abortable,throwIfAborted} from '../code/cancellation.js';
 
 const canonical=(value:unknown):unknown=>Array.isArray(value)?value.map(canonical):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).sort(([a],[b])=>a.localeCompare(b)).map(([key,item])=>[key,canonical(item)])):value;
 
@@ -67,6 +68,7 @@ export class OwnerBotTools implements TurnExecutor {
    if(controller.signal.aborted)throw new Error('Interrupted before bot operation');
    const interrupted=new Promise<never>((_,reject)=>{abortReject=()=>reject(new Error('Bot operation interrupted or timed out; outcome unknown. Inspect its state before retrying.'));controller.signal.addEventListener('abort',abortReject,{once:true});});
    const result=redactDeep(await Promise.race([tool.run(call.args,{...this.context,signal:controller.signal,onDelegationAdmission:call.tool==='delegate_task'?onDelegationAdmission:undefined}),interrupted]));
+   throwIfAborted(controller.signal);
    this.collect(result);
    emit({type:'tool_result',tool:call.tool,request_id:requestId,sha256,at:new Date().toISOString(),result:compact(result,this.budget.resultChars),duration_ms:Date.now()-started,evidence:{status:'returned'}});
    return result;
@@ -95,9 +97,21 @@ export class OwnerBotTools implements TurnExecutor {
   if(this.used>=this.budget.calls||this.elapsed()>=this.budget.wallMs){this.exhausted=true;this.warned=true;return {ok:false,error:'Shared tool budget exhausted; finish with the returned evidence'};}
   if(!tool){
    if(!this.base)return {ok:false,error:'Unknown or disabled tool '+call.tool};
-   const result=await this.base.execute({action:'tool',...call},onEvent,signal);
-   if(result.stop)this.exhausted=true;
-   return result.result;
+    // The base executor may be seeing its first call long after an owner tool
+    // started this turn. Its own clock cannot renew the wrapper's allowance.
+    const controller=new AbortController(),abort=()=>controller.abort();
+    signal?.addEventListener('abort',abort,{once:true});
+    this.context.signal?.addEventListener('abort',abort,{once:true});
+    if(signal?.aborted||this.context.signal?.aborted)controller.abort();
+    const timer=setTimeout(()=>controller.abort(),Math.max(1,this.budget.wallMs-this.elapsed()));
+    try{
+     const result=await abortable(()=>this.base!.execute({action:'tool',...call},onEvent,controller.signal),controller.signal);
+     if(result.stop)this.exhausted=true;
+     return result.result;
+    }catch(error){
+     if(this.elapsed()>=this.budget.wallMs){this.exhausted=true;this.warned=true;}
+     return {ok:false,error:errorText(error),state:controller.signal.aborted?'unknown':'failed'};
+    }finally{clearTimeout(timer);signal?.removeEventListener('abort',abort);this.context.signal?.removeEventListener('abort',abort);}
   }
   this.calls++;
   let notStarted=false;
