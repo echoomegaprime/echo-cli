@@ -46,6 +46,8 @@ export function extractClaims(text: string): Claim[] {
 
 const norm = (s: string) => s.toLowerCase().replace(/\\/g, '/').replace(/[.,;:!?)]+$/, '');
 const digits = (s: string) => s.replace(/[^\d.]/g, '').replace(/\.$/, '');
+/** Escape every regex metacharacter so an interpolated value can only ever match itself. */
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /** True when the claim's value can be read from the evidence corpus (case-insensitive; paths also by basename; quantities by their number). */
 export function supported(claim: Claim, corpus: string): boolean {
@@ -59,10 +61,10 @@ export function supported(claim: Claim, corpus: string): boolean {
   if (claim.kind === 'quantity') {
     const n = digits(claim.value.replace(/,/g, ''));
     if (!n) return false;
-    const re = new RegExp(`(?<![\\d.])${n.replace(/\./g, '\\.')}(?![\\d])`);
+    const re = new RegExp(`(?<![\\d.])${escapeRegExp(n)}(?![\\d])`);
     return re.test(corpus.replace(/,(?=\d{3}\b)/g, ''));
   }
-  if (claim.kind === 'id' && value.startsWith('#')) return corpus.includes(value) || new RegExp(`(?<![\\w])${value.slice(1)}(?![\\w])`).test(corpus);
+  if (claim.kind === 'id' && value.startsWith('#')) return corpus.includes(value) || new RegExp(`(?<![\\w])${escapeRegExp(value.slice(1))}(?![\\w])`).test(corpus);
   return false;
 }
 

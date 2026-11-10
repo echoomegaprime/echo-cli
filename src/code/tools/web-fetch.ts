@@ -70,12 +70,13 @@ const decode = (text: string) => text.replace(/&(#x?[0-9a-f]+|[a-z]+\d*);/gi, (m
 /** Readable text: scripts, styles, templates and comments removed; block tags become line breaks. */
 export function pageText(html: string): { title: string | null; text: string } {
   const title = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html);
-  let body = html.replace(/<!--[\s\S]*?-->/g, '');
+  let body = html.replace(/<!--[\s\S]*?-->/g, '').replace(/<!--[\s\S]*$/g, ''); // complete comments, plus a trailing unterminated one
   body = body.replace(/<(script|style|noscript|template|svg|head)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ');
   body = body.replace(/<(?:br|hr)\b[^>]*\/?>/gi, '\n').replace(/<\/?(?:p|div|li|ul|ol|h[1-6]|tr|td|th|table|section|article|header|footer|nav|blockquote|pre|dd|dt|dl|figure|figcaption|main|aside)\b[^>]*>/gi, '\n');
   body = body.replace(/<[^>]{0,2000}>/g, ' ');
-  const text = decode(body).replace(/[ \t\r\f\v]+/g, ' ').replace(/ ?\n ?/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
-  return { title: title ? decode(title[1]).replace(/\s+/g, ' ').trim().slice(0, 300) || null : null, text };
+  // decode() runs after stripping, so entity-encoded markup (e.g. &lt;!--) can reappear: drop any comment opener it reintroduces.
+  const text = decode(body).replace(/<!--/g, '').replace(/[ \t\r\f\v]+/g, ' ').replace(/ ?\n ?/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  return { title: title ? decode(title[1]).replace(/<!--/g, '').replace(/\s+/g, ' ').trim().slice(0, 300) || null : null, text };
 }
 export const webFetch: ToolModule = {
   spec: {
