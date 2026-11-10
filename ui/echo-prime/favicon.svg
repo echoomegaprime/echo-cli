@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="ECHO Prime">
+  <!-- The Echo orb: the same deep teal sphere and three chrome orbit rings (#86ffda, #87ddff, #d1acff) the page draws. No external assets. -->
+  <defs>
+    <radialGradient id="orb" cx="38%" cy="32%" r="78%">
+      <stop offset="0" stop-color="#9dfbe4"/>
+      <stop offset="0.3" stop-color="#1d8f7a"/>
+      <stop offset="0.72" stop-color="#062a33"/>
+      <stop offset="1" stop-color="#030c10"/>
+    </radialGradient>
+  </defs>
+  <circle cx="32" cy="32" r="22" fill="url(#orb)"/>
+  <g fill="none" stroke-width="1.7" stroke-linecap="round">
+    <ellipse cx="32" cy="32" rx="29.5" ry="10.5" stroke="#86ffda" opacity="0.95" transform="rotate(-24 32 32)"/>
+    <ellipse cx="32" cy="32" rx="29.5" ry="10.5" stroke="#87ddff" opacity="0.8" transform="rotate(38 32 32)"/>
+    <ellipse cx="32" cy="32" rx="29.5" ry="10.5" stroke="#d1acff" opacity="0.7" transform="rotate(100 32 32)"/>
+  </g>
+  <circle cx="22.5" cy="20.5" r="2.4" fill="#e4fff8"/>
+</svg>

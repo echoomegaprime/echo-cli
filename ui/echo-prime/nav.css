@@ -1,0 +1,142 @@
+/* ECHO Prime sidebar polish (2026-11-04): palette tokens, Echo mark, wordmark, grouped navigation, sign-in card.
+   The palette signal is `data-palette` on <html> (set by app.js next to the orb wordmark); the orb's own
+   `.orb-wordmark` rules in styles.css are untouched. */
+:root{--wm-a:#86ffda;--wm-b:#87ddff;--wm-c:#d1acff;--wm-glow:#76e9d5;--wm-glow-soft:#76e9d566;--wm-deep:#13303a}
+:root[data-palette=emerald]{--wm-a:#bdffc7;--wm-b:#7df5cf;--wm-c:#dfef9c;--wm-glow:#8df7b8;--wm-glow-soft:#8df7b866;--wm-deep:#123a2a}
+:root[data-palette=aurora]{--wm-a:#c8deff;--wm-b:#c3a4ff;--wm-c:#ffb4e0;--wm-glow:#c3a4ff;--wm-glow-soft:#c3a4ff66;--wm-deep:#231b44}
+
+/* Echo mark: the orb and its orbit, as one reusable symbol (#i-echo-mark) and the favicon. */
+.em-hi{stop-color:#f4fffb}.em-a{stop-color:var(--wm-a)}.em-b{stop-color:var(--wm-b)}.em-c{stop-color:var(--wm-c)}.em-deep{stop-color:var(--wm-deep)}
+.em-sphere{fill:url(#em-core)}.em-orbit{fill:none;stroke:url(#em-ring);stroke-width:1.5;stroke-linecap:round}
+.em-orbit-back{opacity:.5}.em-orbit-front{stroke-dasharray:24 100;stroke-dashoffset:-26}.em-satellite{fill:#fff}
+.echo-mark{width:30px;height:30px;flex:none;overflow:visible;filter:drop-shadow(0 0 7px var(--wm-glow-soft))}
+.topbar-mark{display:none;width:22px;height:22px}
+
+/* Wordmark: layered gradient lettering from the palette tokens, a slow reflection sweep and a soft orb glow. */
+.brand{gap:13px;margin:0 6px 26px;align-items:center;min-width:0}
+.wordmark{display:grid;gap:6px;min-width:0}
+.wordmark small{margin-top:0}
+.wordmark-text{position:relative;display:inline-block;isolation:isolate;width:max-content;max-width:100%;font-weight:700;font-size:16px;letter-spacing:3px;line-height:1.15;color:#eafff8;white-space:nowrap;text-shadow:0 0 14px var(--wm-glow-soft)}
+@supports ((background-clip:text) or (-webkit-background-clip:text)){
+ .wordmark-text{
+  color:transparent;-webkit-text-fill-color:transparent;text-shadow:none;
+  background-image:
+   linear-gradient(108deg,transparent 40%,#ffffff00 45%,#ffffffd9 50%,#ffffff00 55%,transparent 60%),
+   linear-gradient(168deg,#ffffff 0%,var(--wm-a) 26%,#f4fffd 44%,var(--wm-b) 58%,var(--wm-c) 84%,#ffffff 100%);
+  background-size:240% 100%,100% 100%;background-position:180% 0,0 0;background-repeat:no-repeat;
+  background-clip:text;-webkit-background-clip:text;
+  animation:wm-shimmer 9s cubic-bezier(.4,0,.25,1) infinite;
+ }
+ .wordmark-text::before,.wordmark-text::after{content:attr(data-text);position:absolute;inset:0;z-index:-1;font:inherit;letter-spacing:inherit;line-height:inherit;white-space:nowrap;pointer-events:none}
+ .wordmark-text::before{color:var(--wm-glow);-webkit-text-fill-color:var(--wm-glow);filter:blur(9px);opacity:.55}
+ .wordmark-text::after{color:transparent;-webkit-text-fill-color:transparent;-webkit-text-stroke:.4px #ffffff33;transform:translate(.35px,.35px)}
+}
+@keyframes wm-shimmer{0%,18%{background-position:180% 0,0 0}62%,100%{background-position:-90% 0,0 0}}
+:root[data-motion=paused] .wordmark-text{animation-play-state:paused}
+@media(prefers-reduced-motion:reduce){.wordmark-text{animation:none!important;background-position:50% 0,0 0}}
+
+/* Grouped navigation. Buttons keep their own hooks and `hidden`; nav.js owns the slot, group and toggle. */
+.sidebar{padding-top:26px}
+.sidebar .new-chat{padding:11px 12px}
+#prime-nav{margin-top:10px;display:grid;gap:5px}
+.nav-group{display:grid;gap:1px}
+.nav-group-toggle{display:flex;align-items:center;justify-content:space-between;width:100%;background:transparent;color:#5c7a72;padding:6px 10px 4px 12px;border-radius:6px;font-size:9px;letter-spacing:1.9px;text-transform:uppercase;font-weight:650}
+.nav-group-toggle:hover{color:#a4c6ba;background:#0e1a18}
+.nav-group-toggle svg{width:12px;height:12px;color:#4f6b64;transition:transform .2s}
+.nav-group.collapsed .nav-group-toggle svg{transform:rotate(-90deg)}
+.nav-group-items{list-style:none;margin:0;padding:0;display:grid;gap:1px}
+.nav-slot{display:block;min-width:0}
+.nav-slot>.nav-item{padding:8px 10px 8px 12px;font-size:12px;gap:11px;border-radius:7px;min-width:0}
+.nav-slot>.nav-item svg{width:16px;height:16px}
+.nav-item:not(.active) .active-dot{display:none}
+.nav-item[aria-current=page]{color:#c6f6e1}
+.nav-item.journal-status{font-size:11px;color:#6e8d85}
+#workspace-navigation:empty{display:none}
+.nav-bottom{display:grid;gap:1px;margin-bottom:10px}
+.nav-bottom .nav-group-items{gap:1px}
+.sidebar-bottom{padding-top:10px}
+.sidebar .profile{padding:14px 3px;margin-top:12px}
+.sidebar .history{max-height:18dvh;min-height:48px}
+.sidebar .workspace-search{margin-top:10px}
+.history-heading{margin:14px 12px 8px}
+@media(max-width:800px){.topbar-mark{display:block}.nav-slot>.nav-item{min-height:44px}.nav-group-toggle{min-height:36px}}
+/* Short desktop windows: tighten vertical rhythm so the whole panel fits without scrolling at 1440x900. */
+@media(min-width:801px) and (max-height:960px){.sidebar{padding-top:18px}.brand{margin-bottom:16px}.sidebar .new-chat{padding:9px 12px}.nav-slot>.nav-item{padding-block:6px}.nav-group-toggle{padding-block:4px 2px}.sidebar .history{min-height:36px}.history-heading{margin-top:10px}.sidebar .profile{padding:10px 3px;margin-top:6px}.sidebar-bottom .signin-button{min-height:36px;margin-bottom:6px}.signup-button{min-height:30px;margin-bottom:8px}.sidebar .workspace-card{padding:11px 12px}}
+
+/* Always-visible account controls (workspace.js toggles them from the session): Sign in + Request access while
+   anonymous, avatar menu + Sign out while signed in. Hidden entirely when no Workspace backend is configured. */
+.signin-button{display:inline-flex;align-items:center;gap:8px;min-height:34px;padding:8px 14px;border-radius:20px;background:linear-gradient(120deg,var(--wm-a),var(--wm-b));color:#06231b;font-size:11px;font-weight:650;letter-spacing:.3px;box-shadow:0 0 18px var(--wm-glow-soft),inset 0 1px 0 #ffffffaa;transition:filter .2s,transform .2s}
+.signin-button:hover{filter:brightness(1.06);transform:translateY(-1px)}
+.signin-button svg{width:13px;height:13px;stroke-width:1.8;color:#06231b}
+.sidebar-bottom .signin-button{width:100%;justify-content:center;min-height:40px;margin-bottom:8px}
+.signup-button{display:inline-flex;align-items:center;justify-content:center;width:100%;min-height:34px;margin-bottom:12px;border:1px solid #2b4a3f;border-radius:20px;background:transparent;color:#9fc1b6;font-size:11px}
+.signup-button:hover{border-color:#467561;color:#d1efe2}
+.signout-button{color:#f0b3ae}
+.profile .signout-button{margin-left:auto;font-size:10px;padding:6px 9px;border:1px solid #4a3a3a;border-radius:6px;background:transparent}
+.profile .signout-button:hover{background:#2a1716;color:#ffd0cc}
+.profile .signout-button+.icon-button{margin-left:0}
+.topbar-account{position:relative}
+.topbar-account summary{list-style:none;display:flex;align-items:center;gap:9px;cursor:pointer;padding:4px 8px 4px 4px;border-radius:30px;border:1px solid transparent;transition:background .2s,border-color .2s}
+.topbar-account summary::-webkit-details-marker{display:none}
+.topbar-account[open] summary,.topbar-account summary:hover{border-color:#2b4a3f;background:#0e1a18}
+.topbar-avatar{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;font-size:10px;font-weight:650;color:#06231b;background:linear-gradient(135deg,var(--wm-a),var(--wm-c));box-shadow:0 0 12px var(--wm-glow-soft)}
+.topbar-name{font-size:11px;color:#c6e2d8;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.topbar-caret{width:12px;height:12px;fill:none;stroke:#78948f;stroke-width:1.4;stroke-linecap:round;stroke-linejoin:round;transition:transform .2s}
+.topbar-account[open] .topbar-caret{transform:rotate(180deg)}
+.account-menu{position:absolute;right:0;top:calc(100% + 8px);min-width:230px;display:grid;gap:3px;padding:10px;border:1px solid #2b4a3f;border-radius:12px;background:#0a1715f5;box-shadow:0 18px 50px #000a;z-index:30;text-align:left}
+.account-menu header{display:grid;gap:4px;justify-items:start;padding:6px 8px 10px;border-bottom:1px solid var(--line);margin-bottom:4px;font-size:12px;color:#e4eeeb}
+.account-menu header small{color:#78948f;font-size:10px;overflow-wrap:anywhere}
+.account-menu header small:empty{display:none}
+.account-menu-item{display:flex;align-items:center;gap:10px;width:100%;text-align:left;padding:9px 10px;border-radius:7px;background:transparent;color:#c6e2d8;font-size:12px}
+.account-menu-item:hover{background:#12211d}
+.account-menu-item svg{width:15px;height:15px}
+@media(max-width:800px){.topbar-name{display:none}.signin-button{min-height:32px;padding:7px 11px;font-size:10px}.account-menu{right:-6px}.topbar-account summary{padding-right:4px}}
+
+/* Sign-in card (rendered by workspace.js inside #workspace-dialog). Tokens default to dark; a light theme can set
+   data-theme="light" on <html>. The Google button is GIS's own iframe; only its container, theme and width are ours. */
+.signin-card{--card-bg:#0a1715;--card-line:#2b4a3f;--card-text:#e4eeeb;--card-muted:#8fb0a4;--card-field:#0b1915;position:relative;overflow:hidden;display:grid;justify-items:center;text-align:center;gap:14px;width:min(100%,440px);margin:6px auto;padding:30px 26px 22px;border:1px solid var(--card-line);border-radius:20px;background:var(--card-bg);color:var(--card-text);box-shadow:0 24px 70px #0006,inset 0 1px 0 #ffffff0a}
+:root[data-theme=light] .signin-card{--card-bg:#f7fbf9;--card-line:#cfe2da;--card-text:#102421;--card-muted:#4b6a61;--card-field:#ffffff}
+.signin-card::before{content:"";position:absolute;left:15%;right:15%;top:-45%;height:70%;background:radial-gradient(ellipse at 50% 50%,var(--wm-glow) 0,transparent 70%);opacity:.16;filter:blur(28px);pointer-events:none}
+.signin-card>*{position:relative}
+.signin-brand{display:flex;align-items:center;gap:12px}
+.signin-brand .echo-mark{width:38px;height:38px}
+.signin-brand .wordmark-text{font-size:18px;letter-spacing:4px}
+.signin-card h3{margin:0;font-size:22px;font-weight:500;letter-spacing:-.4px;line-height:1.25;color:var(--card-text);overflow-wrap:anywhere}
+.signin-lead{margin:0;font-size:12.5px;line-height:1.65;color:var(--card-muted);max-width:36ch}
+.signin-google{display:grid;justify-items:center;gap:8px;width:100%}
+.signin-google-slot{min-height:44px;width:100%;display:flex;justify-content:center;align-items:center}
+.signin-google[data-state=loading] .signin-google-slot::before{content:"";width:min(100%,300px);height:40px;border-radius:20px;background:linear-gradient(90deg,#132421 20%,#1d342e 50%,#132421 80%);background-size:200% 100%;animation:signin-pulse 1.4s linear infinite}
+@keyframes signin-pulse{from{background-position:100% 0}to{background-position:-100% 0}}
+@media(prefers-reduced-motion:reduce){.signin-google[data-state=loading] .signin-google-slot::before{animation:none}}
+.signin-google[data-state=unavailable] .signin-google-slot{display:none}
+.signin-google-status{margin:0;font-size:11px;line-height:1.6;color:var(--card-muted);max-width:40ch}
+.signin-google-status:empty{display:none}
+.signin-google[data-state=blocked] .signin-google-status,.signin-google[data-state=error] .signin-google-status{color:#f0b3ae}
+.signin-google>.quiet-button{display:inline-flex;align-items:center;min-height:36px;padding:8px 14px;border:1px solid #486a57;border-radius:20px;background:#183126;color:#cff0df;font-size:11px}
+.signin-roles{display:grid;grid-template-columns:1fr 1fr;gap:8px;width:100%;text-align:left}
+.signin-role{border:1px solid var(--card-line);border-radius:12px;padding:10px 12px;font-size:11px;line-height:1.5;color:var(--card-muted);background:#ffffff05}
+.signin-role strong{display:block;color:var(--card-text);font-size:11.5px;font-weight:600;margin-bottom:3px}
+.signin-alt{width:100%;text-align:left}
+.signin-alt summary{cursor:pointer;font-size:12px;color:#a9cbbd;padding:6px 0;list-style-position:inside}
+.signin-alt summary:hover{color:#d1efe2}
+.signin-alt .workspace-field{margin-top:10px}
+.signin-alt .workspace-field input{background:var(--card-field)}
+.signin-alt .quiet-button{display:inline-flex;justify-content:center;align-items:center;min-height:38px;margin-top:10px;margin-right:8px;padding:9px 12px;border:1px solid #486a57;border-radius:7px;background:#183126;color:#cff0df;font-size:12px}
+/* Each sign-in action answers next to its own button (role=status), so its result is visible on a phone (2026-11-06). */
+.signin-action{display:block}
+.signin-result{margin:6px 0 0;font-size:12px;line-height:1.6;color:#cfe9dc;max-width:46ch;overflow-wrap:anywhere}
+.signin-result[data-state=error]{color:#f0b3ae}
+.signin-fine{margin:0;font-size:10.5px;line-height:1.6;color:#6e8d85}
+.signin-invited{margin:0;width:100%;box-sizing:border-box;padding:10px 14px;border:1px solid #2f6b55;border-radius:12px;background:#0d221b;color:#c9f3e2;font-size:12px;line-height:1.6;text-align:left}
+:root[data-theme=light] .signin-invited{background:#e8f6f0;border-color:#9fd2bd;color:#123a2e}
+.signin-fine a{color:var(--mint,#a7f5dd)}
+.signin-card.signed-in{text-align:left;justify-items:stretch}
+.signin-card.signed-in .signin-brand{justify-self:center}
+.signin-identity{display:grid;grid-template-columns:auto 1fr;gap:14px;align-items:center;width:100%}
+.signin-identity h3{font-size:17px;display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+.signin-avatar{width:46px;height:46px;border-radius:50%;display:grid;place-items:center;font-size:14px;font-weight:650;letter-spacing:.5px;color:#06231b;background:linear-gradient(135deg,var(--wm-a),var(--wm-c));box-shadow:0 0 18px var(--wm-glow-soft)}
+.signin-email{margin:4px 0 0;font-size:12px;color:var(--card-muted);overflow-wrap:anywhere}
+.signin-role-badge{display:inline-block;font-size:9px;letter-spacing:1.6px;text-transform:uppercase;padding:3px 8px;border-radius:20px;border:1px solid var(--card-line);color:var(--wm-a);font-weight:600}
+.signin-card.signed-in .signin-lead{max-width:none}
+.signin-card.signed-in>.quiet-button{display:inline-flex;justify-self:start;align-items:center;min-height:38px;padding:9px 14px;border:1px solid #486a57;border-radius:7px;background:#183126;color:#cff0df;font-size:12px}
+@media(max-width:800px){.signin-card{padding:24px 18px 18px;border-radius:16px}.signin-roles{grid-template-columns:1fr}.signin-brand .wordmark-text{font-size:16px;letter-spacing:3px}.signin-card h3{font-size:20px}}

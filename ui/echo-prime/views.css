@@ -1,0 +1,39 @@
+/* First-class Workspace views (Projects, Library, SDK, Vault, Code review) inside the Prime shell. */
+.views-dialog{width:min(980px,calc(100vw - 32px))}
+.views-dialog .dialog-title{position:sticky;top:-28px;background:#12231f;z-index:1;padding-block:8px}
+.views-subtitle{margin:0 0 10px}
+.views-status{color:#b8d8c7;font-size:13px;line-height:1.6;overflow-wrap:anywhere;margin:0 0 12px}.views-status:empty{display:none}
+.views-body{display:grid;gap:14px;min-width:0}
+.views-lead{margin:0;color:#a8c5b7;font-size:13px;line-height:1.65}
+.views-card>p:empty{display:none}
+.views-row{display:flex;flex-wrap:wrap;gap:8px;align-items:end;min-width:0}
+.views-row .workspace-field{flex:1;min-width:160px}
+.views-count,.views-muted{color:#78948f;font-size:12px;line-height:1.6;margin:0;overflow-wrap:anywhere}
+.views-empty{color:#78948f;font-size:12px;line-height:1.6;margin:0}
+.views-callout{margin:0;padding:10px 12px;border:1px solid #486a57;border-radius:9px;background:#0f1f19;font-size:12px;line-height:1.6;color:#b8d8c7}
+.views-editor{display:grid;gap:10px}.views-editor summary{cursor:pointer;font-size:12px;color:#aac8b9}
+.views-chat-list{display:grid;gap:2px}.views-chat-list .history-item{padding:8px 0;font-size:12px}
+.views-files{display:grid;gap:8px}
+.views-file-row{display:grid;gap:8px;padding:12px 14px;border:1px solid #2b4538;border-radius:10px;background:#0a1813;min-width:0}
+.views-file-meta{display:grid;gap:4px;min-width:0}.views-file-meta strong{font-size:13px;color:#d8f3e5;overflow-wrap:anywhere}.views-file-meta small{color:#78948f;font-size:11px;overflow-wrap:anywhere}
+.views-file-out{display:grid;gap:8px}.views-file-out:empty,.views-output:empty{display:none}
+.views-output{display:grid;gap:8px;min-width:0}
+.views-body .quiet-button,.views-body .new-chat{display:inline-flex;align-items:center;justify-content:center;min-height:36px;padding:8px 12px;border-radius:7px;font-size:12px;white-space:normal;text-align:left}
+.views-body .new-chat{width:auto;margin:0}
+.views-body button:disabled{opacity:.5}
+.sdk-results{display:grid;gap:6px;max-height:40dvh;overflow:auto;overscroll-behavior:contain}
+.sdk-result{display:grid;gap:3px;text-align:left;padding:10px 12px;border:1px solid #2b4538;border-radius:9px;background:#0a1813;color:#cee2d9}
+.sdk-result:hover,.sdk-result:focus-visible{border-color:#5a8f77}
+.sdk-result strong{font-size:12px;overflow-wrap:anywhere}.sdk-result span{font-size:11px;color:#a5bdb3;overflow-wrap:anywhere}.sdk-result small{font-size:10px;color:#78948f}
+.sdk-tier{color:#c9c08a}
+.sdk-confirm{display:grid;gap:10px;padding:12px;border:1px solid #a8914b;border-radius:10px;background:#1a1706}
+.sdk-confirm p{margin:0;font-size:12px;line-height:1.6;color:#e8d9a0;overflow-wrap:anywhere}
+.vault-rows{display:grid;gap:6px;min-width:0}
+.vault-row{display:flex;flex-wrap:wrap;justify-content:space-between;gap:4px 14px;font-size:12px;color:#a8c5b7}
+.vault-row strong{color:#d8f3e5;font-weight:600;overflow-wrap:anywhere}
+.vault-value{display:inline-flex;align-items:center;gap:8px}
+.vault-masked{font-family:ui-monospace,Consolas,monospace;letter-spacing:.12em}
+.views-body .vault-reveal{min-height:32px;padding:4px 10px;font-size:11px}
+.vault-table{width:100%;border-collapse:collapse;font-size:12px}
+.vault-table th,.vault-table td{text-align:left;padding:6px 8px;border-bottom:1px solid #ffffff14;overflow-wrap:anywhere}.vault-table th{color:#a2b4ad;font-weight:500}
+@media(max-width:800px){.views-dialog{padding:20px}.views-dialog .dialog-title{top:-20px}.views-body .quiet-button,.views-body .new-chat{min-height:44px}.views-row .workspace-field{flex-basis:100%}}
