@@ -69,3 +69,28 @@ it('refuses malformed cookie bytes without terminating the HTTP process',()=>{
  expect({exit:child.status,diagnostic:child.stderr}).toEqual({exit:0,diagnostic:''});
  expect(JSON.parse(child.stdout.trim())).toEqual({codes:[403,403,403,403],authenticatedStatus:200});
 });
+it('caches static assets briefly, serves sitemap and robots, and gives browsers a styled 404 while machines keep JSON',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'prime-webfix-'));
+ writeFileSync(join(dir,'index.html'),'<html>Prime</html>');
+ writeFileSync(join(dir,'app.js'),'console.log(1)');
+ writeFileSync(join(dir,'sitemap.xml'),'<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>');
+ writeFileSync(join(dir,'robots.txt'),'User-agent: *\nAllow: /\n\nSitemap: https://echoomegaprime.com/sitemap.xml\n');
+ writeFileSync(join(dir,'404.html'),'<html>Page not found</html>');
+ const s=await startPrimeServer(new PrimeHub({capabilities:[]}),dir,0);
+ try{
+  const asset=await fetch(s.url+'/app.js');
+  expect(asset.status).toBe(200);expect(asset.headers.get('cache-control')).toBe('public, max-age=300, stale-while-revalidate=60');
+  const page=await fetch(s.url);
+  expect(page.headers.get('cache-control')).toBe('no-store');// HTML stays uncached, like the API
+  const sm=await fetch(s.url+'/sitemap.xml');
+  expect(sm.status).toBe(200);expect(sm.headers.get('content-type')).toBe('application/xml; charset=utf-8');expect(await sm.text()).toContain('<urlset');
+  const rb=await fetch(s.url+'/robots.txt');
+  expect(rb.status).toBe(200);expect(rb.headers.get('content-type')).toBe('text/plain; charset=utf-8');expect(await rb.text()).toContain('Sitemap: https://echoomegaprime.com/sitemap.xml');
+  const browser=await fetch(s.url+'/no-such-page',{headers:{accept:'text/html,application/xhtml+xml'}});
+  expect(browser.status).toBe(404);expect(browser.headers.get('content-type')).toBe('text/html; charset=utf-8');expect(await browser.text()).toContain('Page not found');
+  const machine=await fetch(s.url+'/no-such-page');
+  expect(machine.status).toBe(404);expect(machine.headers.get('content-type')).toBe('application/json; charset=utf-8');expect(await machine.json()).toEqual({error:'Not found'});
+  const api=await fetch(s.url+'/api/nope',{headers:{accept:'text/html'}});
+  expect(api.status).toBe(403);expect(api.headers.get('content-type')).toBe('application/json; charset=utf-8');// the API branch never serves the HTML page
+ }finally{await s.close();rmSync(dir,{recursive:true,force:true});}
+});

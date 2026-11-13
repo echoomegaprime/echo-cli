@@ -27,7 +27,8 @@ Object.assign(assets,{'/rail.js':'rail.js','/rail.css':'rail.css'});
 Object.assign(assets,{'/videoagent.js':'videoagent.js','/videoagent.css':'videoagent.css'});
 // The Echo orb mark answers the browser's default /favicon.ico probe as well as the linked /favicon.svg (both the same SVG).
 assets['/favicon.svg']='favicon.svg';assets['/favicon.ico']='favicon.svg';
-const assetTypes:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml'};
+assets['/sitemap.xml']='sitemap.xml';assets['/robots.txt']='robots.txt';
+const assetTypes:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.xml':'application/xml; charset=utf-8','.txt':'text/plain; charset=utf-8'};
 Object.assign(assets,{'/brain.js':'brain.js','/brain.css':'brain.css'});
 assets['/autonomy.js']='autonomy.js';
 Object.assign(assets,{'/media-router.js':'media-router.js','/media.css':'media.css'});
@@ -303,9 +304,18 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
   // HEAD mirrors GET for a static asset (status, type, length and the session cookie on the page) without a body; the
   // API above keeps its own method rules. The type follows the served file, so /favicon.ico is the SVG mark.
   const head=req.method==='HEAD';
-  if((req.method!=='GET'&&!head)||!assets[path]){send(404,{error:'Not found'});return;}
+  if((req.method!=='GET'&&!head)||!assets[path]){
+   // A person following a bad link in a browser gets a real page back; machines and the API keep the JSON body.
+   if((req.method==='GET'||head)&&(req.headers.accept??'').includes('text/html')){
+    try{const page=await readFile(join(uiDirectory,'404.html'));res.writeHead(404,{'Content-Type':'text/html; charset=utf-8','Content-Length':page.length});res.end(head?undefined:page);return;}catch{/* fall through to the JSON body */}
+   }
+   send(404,{error:'Not found'});return;
+  }
   try{
    const file=assets[path],data=await readFile(join(uiDirectory,file));
+   // Static assets are the whole page weight on a repeat visit; a short shared-cache TTL with revalidation is the
+   // drift-safe middle ground while the asset names carry no version strings. HTML and the API stay no-store.
+   if(/\.(?:js|css|svg)$/.test(file))res.setHeader('Cache-Control','public, max-age=300, stale-while-revalidate=60');
    if(path==='/'||path==='/index.html')res.setHeader('Set-Cookie','echo_prime='+token+'; HttpOnly; SameSite=Strict; Path=/'+(externalOrigin?'; Secure':''));
    res.writeHead(200,{'Content-Type':assetTypes[file.slice(file.lastIndexOf('.'))]??'application/octet-stream','Content-Length':data.length});res.end(head?undefined:data);
   }catch{send(404,{error:'Asset unavailable'});}
