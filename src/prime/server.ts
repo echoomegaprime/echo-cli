@@ -28,7 +28,9 @@ Object.assign(assets,{'/videoagent.js':'videoagent.js','/videoagent.css':'videoa
 // The Echo orb mark answers the browser's default /favicon.ico probe as well as the linked /favicon.svg (both the same SVG).
 assets['/favicon.svg']='favicon.svg';assets['/favicon.ico']='favicon.svg';
 assets['/sitemap.xml']='sitemap.xml';assets['/robots.txt']='robots.txt';
-const assetTypes:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.xml':'application/xml; charset=utf-8','.txt':'text/plain; charset=utf-8'};
+// PWA: the install manifest, the service worker, its registration script, the offline fallback and the raster icons.
+Object.assign(assets,{'/manifest.webmanifest':'manifest.webmanifest','/sw.js':'sw.js','/pwa.js':'pwa.js','/offline.html':'offline.html','/apple-touch-icon.png':'apple-touch-icon.png','/icons/icon-192.png':'icons/icon-192.png','/icons/icon-512.png':'icons/icon-512.png','/icons/icon-maskable-512.png':'icons/icon-maskable-512.png'});
+const assetTypes:Record<string,string>={'.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8','.svg':'image/svg+xml','.xml':'application/xml; charset=utf-8','.txt':'text/plain; charset=utf-8','.png':'image/png','.webmanifest':'application/manifest+json'};
 Object.assign(assets,{'/brain.js':'brain.js','/brain.css':'brain.css'});
 assets['/autonomy.js']='autonomy.js';
 Object.assign(assets,{'/media-router.js':'media-router.js','/media.css':'media.css'});
@@ -315,7 +317,9 @@ export async function startPrimeServer(hub:PrimeHub,uiDirectory:string,port=8767
    const file=assets[path],data=await readFile(join(uiDirectory,file));
    // Static assets are the whole page weight on a repeat visit; a short shared-cache TTL with revalidation is the
    // drift-safe middle ground while the asset names carry no version strings. HTML and the API stay no-store.
-   if(/\.(?:js|css|svg)$/.test(file))res.setHeader('Cache-Control','public, max-age=300, stale-while-revalidate=60');
+   if(/\.(?:js|css|svg)$/.test(file)&&path!=='/sw.js')res.setHeader('Cache-Control','public, max-age=300, stale-while-revalidate=60');
+   // The service worker script itself always revalidates, so a new worker is seen on the next load, not after a cache TTL.
+   if(path==='/sw.js')res.setHeader('Cache-Control','no-cache');
    if(path==='/'||path==='/index.html')res.setHeader('Set-Cookie','echo_prime='+token+'; HttpOnly; SameSite=Strict; Path=/'+(externalOrigin?'; Secure':''));
    res.writeHead(200,{'Content-Type':assetTypes[file.slice(file.lastIndexOf('.'))]??'application/octet-stream','Content-Length':data.length});res.end(head?undefined:data);
   }catch{send(404,{error:'Asset unavailable'});}
