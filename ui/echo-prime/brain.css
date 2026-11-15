@@ -1,0 +1,14 @@
+/* Echo brain surface: personality tag + controls, unverified-claim markers, Verify action (Commander directives 2026-11-04). */
+.personality-control{display:flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0}
+.personality-control select{max-width:100%}
+.personality-control .connection-note{flex-basis:100%}
+.chat-message .personality-tag{display:block;margin-top:4px;color:var(--muted);font-size:11px;letter-spacing:.2px}
+.chat-message .personality-tag .personality-pin{margin-left:6px;padding:0 6px;font-size:10px}
+.chat-message .unverified{text-decoration:underline dotted #e3b341;text-decoration-thickness:1.5px;text-underline-offset:2px;cursor:help}
+.chat-message .claims-note{display:block;margin-top:2px;color:#e3b341;font-size:11px}
+.chat-message .verify-action{margin-top:4px;padding:1px 8px;font-size:11px}
+.chat-message .verify-result{margin:4px 0 0;padding:6px 8px;border:1px solid var(--line);border-radius:6px;font-size:12px;background:rgba(169,225,213,.04)}
+.chat-message .verify-result ul{margin:4px 0 0;padding-left:16px}
+.chat-message .verify-result li.verified{color:var(--green)}
+.chat-message .verify-result li.unverified-claim{color:#e3b341}
+.chat-message .verify-result pre{white-space:pre-wrap;margin:4px 0 0;font-size:11px;color:var(--muted)}

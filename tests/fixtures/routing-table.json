@@ -1,0 +1,328 @@
+{
+ "classes": {
+  "coding": {
+   "keywords": [
+    "refactor",
+    "debug this",
+    "stack trace",
+    "stacktrace",
+    "lint error",
+    "compile error",
+    "unit test",
+    "code review",
+    "pull request",
+    "syntax error",
+    "type error",
+    "traceback",
+    "failing test",
+    "typescript error",
+    "git diff",
+    "merge conflict",
+    "runtime exception",
+    "null pointer",
+    "segmentation fault",
+    "write a function",
+    "fix this bug",
+    "code snippet",
+    "regression test",
+    "pytest",
+    "cargo build",
+    "npm test",
+    "undefined reference",
+    "code fence"
+   ],
+   "regexes": [
+    "\\bTS\\d{4}\\b",
+    "\\b(TypeError|ReferenceError|SyntaxError|ValueError|KeyError)\\b",
+    "```[\\w]*\\n",
+    "\\bat\\s+[\\w.$<>]+\\s*\\([^\\n]+:\\d+:\\d+\\)",
+    "\\b(pytest|mypy|ruff|tsc|cargo\\s+test|npm\\s+test|go\\s+test)\\b",
+    "\\b(fix|debug|refactor|implement)\\b.{0,48}\\b(function|class|bug|error|test)s?\\b"
+   ]
+  },
+  "long_context": {
+   "keywords": [
+    "pdf",
+    "transcript",
+    "summarise this",
+    "summarize this",
+    "attached document",
+    "full document",
+    "meeting transcript",
+    "scanned pages",
+    "this image",
+    "screenshot",
+    "extract from",
+    "compare these",
+    "whitepaper",
+    "whole document",
+    "multimodal",
+    "ocr",
+    "attached file",
+    "long transcript",
+    "chapter by chapter",
+    "the attachment",
+    "pasted below",
+    "document dump",
+    "audio transcript",
+    "these pages",
+    "slide deck",
+    "entire report"
+   ],
+   "regexes": [
+    "\\b\\d{1,4}\\s*-\\s*page\\s+([Pp][Dd][Ff]|document|report|paper)\\b",
+    "\\b(attached|attachment|uploaded)\\s+(pdf|document|file|image|transcript|screenshot)\\b",
+    "\\b(summari[sz]e|extract|compare)\\b.{0,40}\\b(pdf|document|transcript|image|attachment|whitepaper)\\b",
+    "\\b(full|entire|whole)\\s+(document|transcript|pdf|paper|report)\\b",
+    "\\b(meeting|audio|call)\\s+transcript\\b",
+    "\\bocr\\b|\\bscanned\\s+pages?\\b"
+   ]
+  },
+  "research": {
+   "keywords": [
+    "latest",
+    "today",
+    "this week",
+    "breaking news",
+    "stock price",
+    "current price",
+    "what happened",
+    "just announced",
+    "live score",
+    "weather forecast",
+    "exchange rate",
+    "trending",
+    "as of today",
+    "this morning",
+    "right now",
+    "current events",
+    "headline",
+    "market price",
+    "who won",
+    "election results",
+    "released today",
+    "newest version",
+    "price of",
+    "in the news",
+    "just released",
+    "news today"
+   ],
+   "regexes": [
+    "\\b(latest|newest|current)\\s+(version|release|price|news)\\b",
+    "\\b(today|this week|this morning|right now)\\b",
+    "\\b(stock|share|crypto|bitcoin|ethereum)\\s+price\\b",
+    "\\b(breaking news|just announced|exchange rate|who won)\\b",
+    "\\b(as of|price of)\\b",
+    "\\bwhat happened\\b.{0,40}\\b(today|this week|announcement)\\b"
+   ]
+  },
+  "general": {
+   "keywords": [
+    "quench",
+    "forge",
+    "anvil",
+    "temper",
+    "hammer",
+    "crucible",
+    "crystal memory",
+    "echo continuity",
+    "sdk cap",
+    "sitrep",
+    "fleet status",
+    "esh",
+    "my mom",
+    "birthday",
+    "how are you",
+    "feelings",
+    "my schedule",
+    "paycheck",
+    "my health",
+    "good morning",
+    "family",
+    "remind me",
+    "i feel",
+    "node status",
+    "echo fleet",
+    "ecf",
+    "groceries",
+    "i spent"
+   ],
+   "regexes": [
+    "\\b(QUENCH|FORGE|ANVIL|TEMPER|HAMMER|CRUCIBLE)\\b",
+    "\\b(my mom|my dad|my health|my schedule|birthday|paycheck|[Ii] feel)\\b",
+    "\\b([Ss][Ii][Tt][Rr][Ee][Pp]|[Cc]rystal [Mm]emory|[Ss][Dd][Kk] [Cc]aps?|ESH|ECF|esh|ecf)\\b",
+    "\\b(remind me|how are you|good morning|fleet status|node status)\\b",
+    "\\b(feelings|family|groceries|i spent)\\b"
+   ]
+  }
+ },
+ "tie_break_order": [
+  "general",
+  "coding",
+  "long_context",
+  "research"
+ ],
+ "examples": [
+  {
+   "text": "fix this TypeScript error TS2345",
+   "expected": "coding"
+  },
+  {
+   "text": "refactor the parse function to remove the nested loops",
+   "expected": "coding"
+  },
+  {
+   "text": "this pytest run failed with a traceback in test_router.py",
+   "expected": "coding"
+  },
+  {
+   "text": "review this pull request for race conditions",
+   "expected": "coding"
+  },
+  {
+   "text": "why does this throw: const x = null; x.foo()",
+   "expected": "coding"
+  },
+  {
+   "text": "lint error no-unused-vars on line 40, how do I fix it",
+   "expected": "coding"
+  },
+  {
+   "text": "debug why the latest build fails on QUENCH",
+   "expected": "coding"
+  },
+  {
+   "text": "write a unit test for the merge conflict resolver",
+   "expected": "coding"
+  },
+  {
+   "text": "segmentation fault in the rust parser, here is the stack trace",
+   "expected": "coding"
+  },
+  {
+   "text": "explain what this git diff changes in the auth middleware",
+   "expected": "coding"
+  },
+  {
+   "text": "summarise this 40-page PDF",
+   "expected": "long_context"
+  },
+  {
+   "text": "compare these two contracts and list the differing clauses",
+   "expected": "long_context"
+  },
+  {
+   "text": "extract the action items from this meeting transcript",
+   "expected": "long_context"
+  },
+  {
+   "text": "here is a scanned 12-page report, pull out the tables",
+   "expected": "long_context"
+  },
+  {
+   "text": "describe what is in this image of the whiteboard",
+   "expected": "long_context"
+  },
+  {
+   "text": "compare these two stack traces from the attached PDF",
+   "expected": "long_context"
+  },
+  {
+   "text": "summarise chapter by chapter the whitepaper I pasted below",
+   "expected": "long_context"
+  },
+  {
+   "text": "ocr this screenshot of a 3-page invoice and extract the line items",
+   "expected": "long_context"
+  },
+  {
+   "text": "the full document is attached, what are the key risks",
+   "expected": "long_context"
+  },
+  {
+   "text": "extract the function signatures from this design-review transcript",
+   "expected": "long_context"
+  },
+  {
+   "text": "what's the latest version of TypeScript",
+   "expected": "research"
+  },
+  {
+   "text": "what is the stock price of NVIDIA right now",
+   "expected": "research"
+  },
+  {
+   "text": "breaking news in oil markets this morning",
+   "expected": "research"
+  },
+  {
+   "text": "who won the game last night",
+   "expected": "research"
+  },
+  {
+   "text": "is eslint 9 the latest release",
+   "expected": "research"
+  },
+  {
+   "text": "what's the price of the NVIDIA GPU I should buy for HAMMER",
+   "expected": "research"
+  },
+  {
+   "text": "summarise today's news about the Rust compiler",
+   "expected": "research"
+  },
+  {
+   "text": "exchange rate USD to EUR as of today",
+   "expected": "research"
+  },
+  {
+   "text": "what happened in the OpenAI announcement this week",
+   "expected": "research"
+  },
+  {
+   "text": "current price of bitcoin and ethereum",
+   "expected": "research"
+  },
+  {
+   "text": "how is FORGE doing today",
+   "expected": "general"
+  },
+  {
+   "text": "my mom's birthday is next week, remind me",
+   "expected": "general"
+  },
+  {
+   "text": "SITREP on the Echo fleet please",
+   "expected": "general"
+  },
+  {
+   "text": "I feel anxious about the schedule tomorrow",
+   "expected": "general"
+  },
+  {
+   "text": "how much did I spend on groceries this week",
+   "expected": "general"
+  },
+  {
+   "text": "what happened to the deploy on ANVIL this morning",
+   "expected": "general"
+  },
+  {
+   "text": "is Crystal memory syncing on QUENCH",
+   "expected": "general"
+  },
+  {
+   "text": "good morning, how are you",
+   "expected": "general"
+  },
+  {
+   "text": "check ESH and the SDK caps before we start",
+   "expected": "general"
+  },
+  {
+   "text": "my health appointment is Thursday, don't let me forget",
+   "expected": "general"
+  }
+ ],
+ "source": "grok-4.7-build via wrap.sh draft (3rd attempt, 1 turn)"
+}

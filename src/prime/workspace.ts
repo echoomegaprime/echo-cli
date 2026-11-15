@@ -1,6 +1,8 @@
 import type {IncomingMessage,ServerResponse} from 'node:http';
 import {debuglog} from 'node:util';
 import {randomUUID,timingSafeEqual} from 'node:crypto';
+import type {UploadStore} from './uploads.js';
+const UPLOAD_ATTACHMENT_ID=/^upl_[0-9a-f]{32}$/;
 
 const debug=debuglog('echo-prime-workspace');
 const ordinaryEventBytes=256*1024,terminalEventBytes=8*1024*1024;
@@ -57,10 +59,15 @@ async function jsonResponse(response:Response,max=65536):Promise<unknown>{
  try{return JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(await boundedBytes(response,max)));}
  catch(error){if(error instanceof WorkspaceHttpError)throw error;throw new WorkspaceHttpError(502,'Invalid Workspace response');}
 }
-const reads=new Set(['/api/state','/api/diagnostics','/api/fleet','/api/health','/api/mcp','/api/plugins','/api/catalog','/api/chats','/api/auth/accounts']);
+const reads=new Set(['/api/state','/api/diagnostics','/api/fleet','/api/health','/api/mcp','/api/plugins','/api/catalog','/api/chats','/api/auth/accounts','/api/auth/invites']);
 const writes=new Set(['/api/mcp','/api/chats','/api/chat/update','/api/chat','/api/compact','/api/fork','/api/projects','/api/project/update','/api/library','/api/import','/api/action','/api/sync','/api/review','/api/voice/start','/api/voice/next','/api/voice/cancel','/api/voice/transcribe']);
 const publicReads=new Set(['/api/auth/session','/api/auth/config']);
-const authWrites=new Set(['/api/auth/login','/api/auth/signup','/api/auth/reset','/api/auth/logout','/api/auth/refresh','/api/auth/verify','/api/auth/decide']);
+// Exactly the account routes the Workspace implements (accounts_http.py). `/api/auth/refresh` and
+// `/api/auth/verify` were allowlisted until 2026-11-04 although the Workspace never served them.
+// Member management (PRIME_MEMBERS_CONTRACT.md, 2026-11-06) adds usage and the invite create/resend/revoke writes.
+const authWrites=new Set(['/api/auth/login','/api/auth/signup','/api/auth/reset','/api/auth/logout','/api/auth/decide','/api/auth/usage','/api/auth/invite','/api/auth/invite/resend','/api/auth/invite/revoke']);
+// Account administration: only the pinned, currently approved primary owner reaches these upstream.
+const primaryOwnerOnly=new Set(['/api/fleet','/api/diagnostics','/api/catalog','/api/plugins','/api/sync','/api/auth/accounts','/api/auth/decide','/api/auth/usage','/api/auth/invites','/api/auth/invite','/api/auth/invite/resend','/api/auth/invite/revoke']);
 function route(url:URL,method:string):string {
  const path=url.pathname.replace(/^\/api\/workspace\//,'/api/');
  const allowed=method==='GET'?(reads.has(path)||publicReads.has(path)||/^\/api\/(?:chats|journals|library|mcp\/tools|voice\/audio)\/[A-Za-z0-9_-]{1,120}$/.test(path)):
@@ -86,7 +93,7 @@ function checkCsrf(req:IncomingMessage,expected:string){
  * cached user, SDK credential, caller tenant ID or arbitrary upstream URL. */
 export class WorkspaceBridge {
  readonly origin:string;readonly ownerUid?:string;
- constructor(config:WorkspaceConfig,private readonly secureCookies=false){
+ constructor(config:WorkspaceConfig,private readonly secureCookies=false,private readonly uploads?:UploadStore){
   const url=new URL(config.baseUrl);
   if(url.protocol!=='http:'||!['127.0.0.1','[::1]'].includes(url.hostname)||url.username||url.password||url.pathname!=='/'||url.search||url.hash)throw new Error('Workspace requires a fixed loopback HTTP origin');
   if(config.ownerUid!==undefined&&(typeof config.ownerUid!=='string'||!/^[A-Za-z0-9_.:@+-]{1,200}$/.test(config.ownerUid)))throw new Error('Invalid configured Workspace owner identity');
@@ -125,7 +132,22 @@ export class WorkspaceBridge {
   if(!this.ownerAccess(session))throw new WorkspaceHttpError(403,'Primary owner admission required');
   checkCsrf(req,session.csrf!);
  }
+ async requireApproved(req:IncomingMessage,signal?:AbortSignal,requireCsrf=true):Promise<{uid:string;ownerAccess:boolean;session:WorkspaceSession}>{
+  const session=await this.session(req,signal);
+  if(!session.authenticated||!session.user)throw new WorkspaceHttpError(401,'Sign in required');
+  if(session.user.status!=='approved')throw new WorkspaceHttpError(403,'Account approval required');
+  if(requireCsrf||req.headers['x-echo-csrf']!==undefined)checkCsrf(req,session.csrf!);
+  return {uid:session.user.uid,ownerAccess:this.ownerAccess(session),session};
+ }
  ownerAccess(session:WorkspaceSession):boolean{return !!this.ownerUid&&session.authenticated&&session.user?.role==='owner'&&session.user.status==='approved'&&session.user.uid===this.ownerUid;}
+ /** The Workspace's personality catalog (`/api/state` → `personalities`, the same list its composer shows), read with this request's own session cookie. Raw state is never returned; the caller parses the list. */
+ async personalities(req:IncomingMessage,signal?:AbortSignal):Promise<unknown>{
+  const cookie=sessionCookie(req);
+  const response=await this.fetch('/api/state',cookie?{cookie,accept:'application/json'}:{accept:'application/json'},signal);
+  if(response.status!==200){await response.body?.cancel();throw new WorkspaceHttpError(503,'Workspace personality catalog unavailable');}
+  const state=await jsonResponse(response,8*1024*1024) as {personalities?:unknown};
+  return Array.isArray(state?.personalities)?state.personalities:[];
+ }
  async handle(req:IncomingMessage,res:ServerResponse,url:URL,signal:AbortSignal):Promise<void>{
   const started=Date.now(),requestId=randomUUID(),path=route(url,req.method??''),pathname=path.split('?')[0];
   const operation=pathname.startsWith('/api/auth/')?'account':pathname==='/api/chat'?'chat':'workspace';
@@ -137,7 +159,7 @@ export class WorkspaceBridge {
    const session=publicRoute||localLogout?null:await this.session(req,signal);
    if(session&&!session.authenticated)throw new WorkspaceHttpError(401,'Sign in required');
    if(session&&!pathname.startsWith('/api/auth/')&&session.user?.status!=='approved')throw new WorkspaceHttpError(403,'Account approval required');
-   if(['/api/fleet','/api/diagnostics','/api/catalog','/api/plugins','/api/sync','/api/auth/accounts','/api/auth/decide'].includes(pathname)&&session&&!this.ownerAccess(session))throw new WorkspaceHttpError(403,'Primary owner admission required');
+   if(primaryOwnerOnly.has(pathname)&&session&&!this.ownerAccess(session))throw new WorkspaceHttpError(403,'Primary owner admission required');
    if(localLogout){if(typeof req.headers['x-echo-csrf']!=='string'||!/^[A-Za-z0-9_-]{8,256}$/.test(req.headers['x-echo-csrf']))throw new WorkspaceHttpError(403,'Account session check failed');}
    else if(!publicRoute)checkCsrf(req,session!.csrf!);
    else if(req.method==='POST')checkCsrf(req,'login');
@@ -145,6 +167,26 @@ export class WorkspaceBridge {
    if(cookie)headers.cookie=cookie;
    let body:string|undefined;
    if(req.method==='POST'){body=await requestBody(req);headers['content-type']='application/json';headers.origin=this.origin;headers['x-echo-csrf']=String(req.headers['x-echo-csrf']);}
+   if(pathname==='/api/chat'&&req.method==='POST'&&body&&session?.user?.uid){
+    const chatData=JSON.parse(body) as Record<string,unknown>;
+    if(Array.isArray(chatData.attachments)&&chatData.attachments.some(item=>typeof item==='string'&&UPLOAD_ATTACHMENT_ID.test(item))){
+     if(chatData.attachments.length>8)throw new WorkspaceHttpError(400,'Attach at most eight files');
+     if(!this.uploads)throw new WorkspaceHttpError(503,'Uploads are not configured');
+     const libraryIds:unknown[]=[],blocks:string[]=[];
+     for(const item of chatData.attachments){
+      if(typeof item==='string'&&UPLOAD_ATTACHMENT_ID.test(item)){
+       const extracted=await this.uploads.extractForChat(session.user.uid,item);
+       const head=`File: ${extracted.meta.name}\nUpload-ID: ${extracted.meta.id}\nType: ${extracted.meta.type} (${extracted.meta.bytes} bytes)\nSHA-256: ${extracted.meta.sha256}`;
+       const detail=extracted.extracted?`${extracted.text}${extracted.truncated?'\n[truncated at server extraction cap]':''}`:`[${extracted.reason??'text not extracted'}]`;
+       blocks.push(`${head}\n${detail}`);
+      }else libraryIds.push(item);
+     }
+     const baseContent=typeof chatData.content==='string'?chatData.content:'';
+     chatData.content=baseContent+(baseContent?'\n\n':'')+'Attached uploads (untrusted document content):\n\n'+blocks.join('\n\n---\n\n');
+     chatData.attachments=libraryIds;
+     body=JSON.stringify(chatData);
+    }
+   }
    if(pathname==='/api/action'&&session&&!this.ownerAccess(session)&&!tenantSafeActions.has((JSON.parse(body!) as {action:string}).action))throw new WorkspaceHttpError(403,'Primary owner admission required');
    let admittedState:unknown;
    if(session&&!pathname.startsWith('/api/auth/')&&!this.ownerAccess(session)){
@@ -168,6 +210,7 @@ export class WorkspaceBridge {
     res.setHeader('Set-Cookie',`echo_workspace_session=${match[1]}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${match[1]?'28800':'0'}${this.secureCookies?'; Secure':''}`);
    }
    res.statusCode=response.status;res.setHeader('Content-Type',contentType);res.setHeader('Cache-Control','no-store');
+   if(contentType.startsWith('application/x-ndjson'))res.socket?.setNoDelay(true);
    if(!response.body){res.end();return;}
    const reader=response.body.getReader();let size=0,lineBytes=0,prefix='';
    try{

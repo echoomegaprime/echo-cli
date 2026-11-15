@@ -1,0 +1,605 @@
+{
+ "profiles": {
+  "echo": {
+   "keywords": [
+    "prioritise",
+    "prioritize",
+    "roadmap",
+    "plan tomorrow",
+    "tradeoff",
+    "trade-off",
+    "what should i do",
+    "next step",
+    "next steps",
+    "decision",
+    "decide",
+    "strategy",
+    "brainstorm",
+    "gut check",
+    "sanity check",
+    "burnout",
+    "overwhelmed",
+    "tired",
+    "focus today",
+    "goal",
+    "milestone",
+    "schedule",
+    "workflow",
+    "advice",
+    "partner",
+    "perspective",
+    "weighing options",
+    "architecture choice",
+    "game plan",
+    "honest take"
+   ],
+   "regexes": [
+    "\\bwhat should i (do|focus on|prioriti[sz]e|tackle)\\b",
+    "\\b(honest|candid) (take|opinion|advice)\\b",
+    "\\b(sanity|gut) check\\b",
+    "\\b(game plan|next steps?|weighing options)\\b"
+   ],
+   "intents": {
+    "technical": 1,
+    "creative": 1,
+    "operational": 1,
+    "personal": 2,
+    "crisis": 1
+   },
+   "tone": {
+    "urgent": 1,
+    "playful": 1,
+    "formal": 1,
+    "casual": 2
+   }
+  },
+  "gs343": {
+   "keywords": [
+    "prove it",
+    "cite",
+    "citation",
+    "evidence",
+    "acceptance criteria",
+    "specification",
+    "certification",
+    "certify",
+    "recall",
+    "memory",
+    "verified repair",
+    "root cause",
+    "audit trail",
+    "compliance",
+    "invariant",
+    "postmortem",
+    "canonical",
+    "ground truth",
+    "precedent",
+    "what did we decide",
+    "knowledge base",
+    "doctrine",
+    "attestation",
+    "reproducible",
+    "verification",
+    "determinism",
+    "regression report",
+    "sla requirement",
+    "formal spec",
+    "corroborate"
+   ],
+   "regexes": [
+    "\\b(prove it|ground truth|acceptance criteria|audit trail)\\b",
+    "\\b(recall|remember) what we (decided|agreed|documented)\\b",
+    "\\bcite (it|the source|your sources|evidence)\\b",
+    "\\b(certif(y|ied|ication)|corroborat(e|ed)|formal spec(ification)?)\\b"
+   ],
+   "intents": {
+    "technical": 2,
+    "creative": 0,
+    "operational": 1,
+    "personal": 0,
+    "crisis": 1
+   },
+   "tone": {
+    "urgent": 1,
+    "playful": 0,
+    "formal": 2,
+    "casual": 0
+   }
+  },
+  "prometheus": {
+   "keywords": [
+    "pentest",
+    "penetration test",
+    "vulnerability",
+    "vuln",
+    "exploit",
+    "cve",
+    "security audit",
+    "hardening",
+    "firewall",
+    "osint",
+    "forensics",
+    "incident response",
+    "threat model",
+    "attack surface",
+    "privilege escalation",
+    "privesc",
+    "nmap",
+    "payload",
+    "reverse shell",
+    "xss",
+    "sql injection",
+    "sqli",
+    "ssrf",
+    "csrf",
+    "zero trust",
+    "ioc",
+    "compromise",
+    "red team",
+    "blue team",
+    "port scan"
+   ],
+   "regexes": [
+    "\\bcve-\\d{4}-\\d{4,7}\\b",
+    "\\b(vuln(erability)? scan|pen(etration )?test|security audit)\\b",
+    "\\b(sql injection|ssrf|xss|csrf|priv(ilege )?esc(alation)?)\\b",
+    "\\b(attack surface|threat model|incident forensics|firewall)\\b"
+   ],
+   "intents": {
+    "technical": 2,
+    "creative": 0,
+    "operational": 2,
+    "personal": 0,
+    "crisis": 2
+   },
+   "tone": {
+    "urgent": 2,
+    "playful": 0,
+    "formal": 2,
+    "casual": 0
+   }
+  },
+  "bree": {
+   "keywords": [
+    "roast",
+    "joke",
+    "banter",
+    "meme",
+    "humour",
+    "humor",
+    "flirt",
+    "witty",
+    "sarcasm",
+    "pun",
+    "trash talk",
+    "tease",
+    "make me laugh",
+    "cheer me up",
+    "hot take",
+    "spicy take",
+    "savage",
+    "burn",
+    "clapback",
+    "vibe check",
+    "shitpost",
+    "dad joke",
+    "one-liner",
+    "playful",
+    "hypeman",
+    "hype me up",
+    "roast me",
+    "funny",
+    "limerick",
+    "parody"
+   ],
+   "regexes": [
+    "\\broast (me|my|this|our)\\b",
+    "\\b(dad joke|one-liner|limerick|make me laugh)\\b",
+    "\\b(spic(y|iest)|hot) take\\b",
+    "\\b(hype me up|banter|vibe check)\\b"
+   ],
+   "intents": {
+    "technical": 0,
+    "creative": 2,
+    "operational": 0,
+    "personal": 2,
+    "crisis": 0
+   },
+   "tone": {
+    "urgent": 0,
+    "playful": 2,
+    "formal": 0,
+    "casual": 2
+   }
+  },
+  "c3po": {
+   "keywords": [
+    "stack trace",
+    "traceback",
+    "compiler error",
+    "typeerror",
+    "syntaxerror",
+    "referenceerror",
+    "nullpointerexception",
+    "segfault",
+    "explain this error",
+    "what does this mean",
+    "like i'm five",
+    "eli5",
+    "plain english",
+    "walk me through",
+    "refactor",
+    "typescript error",
+    "borrow checker",
+    "async await",
+    "race condition",
+    "deadlock",
+    "regex",
+    "exception",
+    "undefined is not",
+    "cannot read properties",
+    "lint error",
+    "step by step",
+    "code review",
+    "deconstruct",
+    "translate this code",
+    "why does this throw"
+   ],
+   "regexes": [
+    "\\bexplain (this|the) (stack ?trace|error|exception|code|regex)\\b",
+    "\\b(like i'?m five|eli5|in plain english)\\b",
+    "\\b(TS\\d{4}|TypeError|SyntaxError|ReferenceError|KeyError|NullPointerException)\\b",
+    "\\bwhat does .* (actually )?mean\\b"
+   ],
+   "intents": {
+    "technical": 2,
+    "creative": 0,
+    "operational": 0,
+    "personal": 0,
+    "crisis": 0
+   },
+   "tone": {
+    "urgent": 0,
+    "playful": 0,
+    "formal": 1,
+    "casual": 1
+   }
+  },
+  "r2d2": {
+   "keywords": [
+    "systemd",
+    "journalctl",
+    "systemctl",
+    "gpu",
+    "vram",
+    "nvidia-smi",
+    "disk full",
+    "iops",
+    "latency",
+    "packet loss",
+    "node health",
+    "heartbeat",
+    "oom",
+    "out of memory",
+    "cpu spike",
+    "load average",
+    "restart service",
+    "daemon",
+    "port listening",
+    "netstat",
+    "ss -tulpn",
+    "dmesg",
+    "thermal throttling",
+    "temperature",
+    "uptime",
+    "unreachable",
+    "502 bad gateway",
+    "connection refused",
+    "raid",
+    "filesystem"
+   ],
+   "regexes": [
+    "\\bis [a-z0-9_.-]+ (up|down|online|alive|reachable)\\b",
+    "\\b(gate|node|service|daemon|cluster|rig|box) is (down|dead|flapping|unreachable)\\b",
+    "\\b(systemctl|journalctl|nvidia-smi|dmesg|oom killer|exit code 137)\\b",
+    "\\b(502 bad gateway|connection refused|thermal throttling|disk (full|space))\\b"
+   ],
+   "intents": {
+    "technical": 2,
+    "creative": 0,
+    "operational": 2,
+    "personal": 0,
+    "crisis": 2
+   },
+   "tone": {
+    "urgent": 2,
+    "playful": 0,
+    "formal": 1,
+    "casual": 1
+   }
+  }
+ },
+ "intent_cues": {
+  "technical": [
+   "code",
+   "function",
+   "compile",
+   "bug",
+   "error",
+   "api",
+   "schema",
+   "query",
+   "algorithm",
+   "library",
+   "script",
+   "type",
+   "class",
+   "debug",
+   "interface"
+  ],
+  "creative": [
+   "write",
+   "story",
+   "joke",
+   "brainstorm",
+   "imagine",
+   "riff",
+   "poem",
+   "metaphor",
+   "tagline",
+   "humour",
+   "parody",
+   "sketch",
+   "invent",
+   "playful",
+   "creative"
+  ],
+  "operational": [
+   "deploy",
+   "server",
+   "service",
+   "node",
+   "cluster",
+   "status",
+   "restart",
+   "health",
+   "monitor",
+   "log",
+   "uptime",
+   "disk",
+   "memory",
+   "network",
+   "daemon"
+  ],
+  "personal": [
+   "tired",
+   "feeling",
+   "career",
+   "habit",
+   "motivation",
+   "stress",
+   "sleep",
+   "focus",
+   "overwhelmed",
+   "balance",
+   "goal",
+   "life",
+   "priorities",
+   "burnout",
+   "advice"
+  ],
+  "crisis": [
+   "down",
+   "outage",
+   "urgent",
+   "asap",
+   "broken",
+   "emergency",
+   "critical",
+   "sev1",
+   "incident",
+   "failing",
+   "crashed",
+   "unresponsive",
+   "breach",
+   "paged",
+   "offline"
+  ]
+ },
+ "tone_cues": {
+  "urgent": [
+   "now",
+   "immediately",
+   "asap",
+   "urgent",
+   "hurry",
+   "quick",
+   "fast",
+   "emergency",
+   "stat",
+   "right now"
+  ],
+  "playful": [
+   "lol",
+   "haha",
+   "roast",
+   "lmao",
+   "hehe",
+   "jk",
+   "banter",
+   "meme",
+   "funny",
+   "tease"
+  ],
+  "formal": [
+   "pursuant",
+   "hereby",
+   "verify",
+   "certify",
+   "specification",
+   "attest",
+   "compliance",
+   "accordance",
+   "evidence",
+   "formally"
+  ],
+  "casual": [
+   "hey",
+   "yo",
+   "sup",
+   "kinda",
+   "gonna",
+   "wanna",
+   "tbh",
+   "ngl",
+   "chill",
+   "reckon"
+  ]
+ },
+ "examples": [
+  {
+   "text": "I'm tired, what should I prioritise tomorrow",
+   "expected": "echo"
+  },
+  {
+   "text": "We can either rewrite the queue now or ship the patch Friday—give me your honest take",
+   "expected": "echo"
+  },
+  {
+   "text": "Help me sketch a realistic game plan for Q4 without burning out the team",
+   "expected": "echo"
+  },
+  {
+   "text": "I keep context-switching between three repos, how should I structure my day?",
+   "expected": "echo"
+  },
+  {
+   "text": "Let's do a quick sanity check on whether this product pivot even makes sense",
+   "expected": "echo"
+  },
+  {
+   "text": "Morning—got two hours before meetings, what's the highest-leverage next step?",
+   "expected": "echo"
+  },
+  {
+   "text": "Recall what we decided about ECF last week and cite it",
+   "expected": "gs343"
+  },
+  {
+   "text": "Do not guess: prove from the audit trail that the verified repair met acceptance criteria",
+   "expected": "gs343"
+  },
+  {
+   "text": "Pull the canonical specification for gateway auth headers and verify our compliance",
+   "expected": "gs343"
+  },
+  {
+   "text": "The service recovered, but I need a formal postmortem with corroborated root cause evidence",
+   "expected": "gs343"
+  },
+  {
+   "text": "What were the exact determinism invariants we certified in the November baseline?",
+   "expected": "gs343"
+  },
+  {
+   "text": "Cross-check that claim against memory and give me the ground truth citation",
+   "expected": "gs343"
+  },
+  {
+   "text": "Run a vuln scan on the lab box we own",
+   "expected": "prometheus"
+  },
+  {
+   "text": "Audit our nginx config for SSRF and header-smuggling attack surface before launch",
+   "expected": "prometheus"
+  },
+  {
+   "text": "We saw weird outbound traffic on port 4444—walk me through incident forensics and IOCs",
+   "expected": "prometheus"
+  },
+  {
+   "text": "Check if CVE-2025-1984 is exploitable given our current container hardening",
+   "expected": "prometheus"
+  },
+  {
+   "text": "During our authorized pentest, how does this SQL injection payload bypass the WAF?",
+   "expected": "prometheus"
+  },
+  {
+   "text": "Draft firewall egress rules to lock down privilege escalation paths on staging",
+   "expected": "prometheus"
+  },
+  {
+   "text": "Roast my commit message: 'fixed stuff final v3 for real'",
+   "expected": "bree"
+  },
+  {
+   "text": "Server's finally green after six hours, hit me with a celebratory dad joke",
+   "expected": "bree"
+  },
+  {
+   "text": "Give me a savage one-liner about developers who push straight to main on Friday",
+   "expected": "bree"
+  },
+  {
+   "text": "Write a playful limerick about my GPU sounding like a jet engine",
+   "expected": "bree"
+  },
+  {
+   "text": "Lol hype me up before I present this demo, banter mode on",
+   "expected": "bree"
+  },
+  {
+   "text": "Give me your spiciest hot take on tabs vs spaces, make me laugh",
+   "expected": "bree"
+  },
+  {
+   "text": "Explain this stack trace to me like I'm five",
+   "expected": "c3po"
+  },
+  {
+   "text": "What does 'TS2322: Type string | undefined is not assignable to type string' actually mean?",
+   "expected": "c3po"
+  },
+  {
+   "text": "Walk me through why Rust's borrow checker rejects this mutable reference inside the loop",
+   "expected": "c3po"
+  },
+  {
+   "text": "Journald shows 'ECONNRESET at TLSWrap.onStreamRead'—in plain English, why does Node throw this?",
+   "expected": "c3po"
+  },
+  {
+   "text": "My CVE parser script hits a KeyError on line 42, can you explain this error step by step?",
+   "expected": "c3po"
+  },
+  {
+   "text": "Deconstruct this gnarly lookahead regex in plain English so a human can read it",
+   "expected": "c3po"
+  },
+  {
+   "text": "FORGE's gate is down, what do I check first",
+   "expected": "r2d2"
+  },
+  {
+   "text": "Is the primary inference node up? Latency just spiked to 4000ms",
+   "expected": "r2d2"
+  },
+  {
+   "text": "GPU 1 on the worker rig is thermal throttling and VRAM is pinned at 99%, check node health",
+   "expected": "r2d2"
+  },
+  {
+   "text": "The systemd unit keeps flapping with exit code 137—OOM killer or disk full?",
+   "expected": "r2d2"
+  },
+  {
+   "text": "Lol the build box died again, check systemctl status and disk space asap",
+   "expected": "r2d2"
+  },
+  {
+   "text": "We're getting 502 bad gateway across the cluster, which daemon stopped listening?",
+   "expected": "r2d2"
+  }
+ ]
+}

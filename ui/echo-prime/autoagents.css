@@ -1,0 +1,28 @@
+/* Autonomous agents (autoagents.js): the chat card "Echo built an agent and a bot for this", its approval box, and the
+   "Echo-made from your prompt" badge also rendered by agents.js and bots.js for definitions with origin.by === "echo". */
+.autoagent-card{display:grid;gap:10px;padding:14px;border:1px solid #3d6b57;border-radius:12px;background:#0f2a2266;min-width:0}
+.autoagent-card.autoagent-explain{border-color:#345343;background:#09181388}
+.autoagent-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.autoagent-head strong{font-size:14px;color:#d8f3e5}
+.autoagent-badge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:20px;font-size:10px;letter-spacing:.05em;text-transform:uppercase;border:1px solid #64e5af;color:var(--mint);background:#0b1a15}
+.autoagent-section{display:grid;gap:6px;padding:10px;border:1px solid #345343;border-radius:10px;background:#09181388;min-width:0}
+.autoagent-section-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px}.autoagent-section-head h3{margin:0;font-size:13px;overflow-wrap:anywhere}
+.autoagent-role,.autoagent-mode{padding:2px 8px;border-radius:20px;font-size:10px;letter-spacing:.05em;text-transform:uppercase;border:1px solid #3d6b57;color:#b6e8d3}
+.autoagent-existing{font-size:11px;color:var(--muted)}
+.autoagent-row{margin:0;font-size:12px;color:#a8c5b7;overflow-wrap:anywhere;display:flex;flex-wrap:wrap;gap:4px 6px;align-items:baseline}
+.autoagent-label{color:#78948f;margin-right:3px}
+.autoagent-caps{margin:0;padding:0;list-style:none;display:flex;flex-wrap:wrap;gap:6px}
+.autoagent-caps li{display:inline-flex;align-items:center;gap:6px;padding:2px 8px;border:1px solid var(--line);border-radius:8px;background:#0b1a15}
+.autoagent-caps code{font-size:11px;color:#b6e8d3;overflow-wrap:anywhere}
+.autoagent-tier{font-size:10px;padding:1px 6px;border-radius:20px;border:1px solid #486a57;color:#cff0df}
+.autoagent-tier-0,.autoagent-tier-1{border-color:#3f8a64;color:var(--green)}.autoagent-tier-2{border-color:#a8742f;color:#f0cf9c}.autoagent-tier-3{border-color:#a8504b;color:#f0a09b}.autoagent-tier-unknown{border-color:#5f716b;color:#8da39d}
+.autoagent-status{display:inline-flex;align-items:center;padding:2px 8px;border-radius:20px;font-size:10px;letter-spacing:.05em;text-transform:uppercase;border:1px solid #486a57;color:#cff0df}
+.autoagent-status-paused{border-color:#7a7a52;color:#e6dc9c}.autoagent-status-idle,.autoagent-status-running{border-color:#3f8a64;color:var(--green)}.autoagent-status-running{box-shadow:0 0 8px #64e5af55}.autoagent-status-error{border-color:#a8504b;color:#f0a09b}.autoagent-status-unknown{border-color:#5f716b;color:#8da39d}
+.autoagent-approval{display:grid;gap:4px;padding:8px 10px;border:1px solid #a8742f;border-radius:8px;background:#2c2010;color:#f0cf9c;font-size:12px}
+.autoagent-approval ul{margin:0;padding-left:18px}.autoagent-approval li{overflow-wrap:anywhere}
+.autoagent-actions{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.autoagent-actions .quiet-button{min-height:36px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;font-size:11px;color:#9fc5b5}
+.autoagent-actions .quiet-button:hover{border-color:#5a8f77;color:#e4eeeb}
+.autoagent-primary{border-color:#3f8a64!important;color:var(--green)!important}.autoagent-danger{border-color:#a8504b!important;color:#f0a09b!important}
+.autoagent-note{min-height:18px;margin:0;color:var(--mint);font-size:12px;overflow-wrap:anywhere}
+.autoagent-meta{display:block;color:var(--muted);font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+@media(max-width:800px){.autoagent-actions .quiet-button{min-height:44px}}

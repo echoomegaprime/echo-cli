@@ -1,0 +1,56 @@
+.fleet-bar{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:6px;min-width:0}
+.fleet-node{display:inline-flex;align-items:center;gap:7px;min-height:32px;padding:6px 10px;border:1px solid #2f4a3f;border-radius:30px;background:#0b1a15;color:#b9d3c8;font-size:10px;letter-spacing:.09em}
+.fleet-node:hover,.fleet-node:focus-visible{border-color:#5a8f77;color:#e4eeeb}
+.fleet-led{width:7px;height:7px;flex:none;border-radius:50%;background:#5f716b}
+.fleet-node.connected .fleet-led{background:var(--green,#64e5af);box-shadow:0 0 8px #64e5af99}
+.fleet-node.disconnected .fleet-led,.fleet-node.offline .fleet-led{background:#e5645e;box-shadow:0 0 8px #e5645e99}
+.fleet-node.degraded .fleet-led{background:#f0c674;box-shadow:0 0 8px #f0c67499}
+.fleet-node.dormant .fleet-led{background:#7f9bc4;box-shadow:0 0 6px #7f9bc466}
+.fleet-node.dormant{color:#9fb3cc;border-color:#3b4f66}
+.fleet-node.unknown{color:#8da39d}
+.fleet-age{font-size:9px;letter-spacing:0;color:#6f8a83}
+.fleet-age:empty{display:none}
+.forge-connection{margin-left:6px;font-size:10px;letter-spacing:.04em;color:#8da39d;white-space:nowrap}
+.forge-connection.online{color:var(--green,#64e5af)}
+.fleet-evidence{width:min(560px,calc(100vw - 32px))}
+.fleet-evidence-body{display:grid;gap:12px;min-width:0}
+.fleet-evidence-state{margin:0;font-size:13px;font-weight:600}
+.fleet-evidence-state.connected{color:var(--green,#64e5af)}.fleet-evidence-state.disconnected,.fleet-evidence-state.offline{color:#e5645e}.fleet-evidence-state.degraded{color:#f0c674}.fleet-evidence-state.dormant{color:#9fb3cc}.fleet-evidence-state.unknown{color:#b9c2a4}
+.fleet-checks{margin:0;padding-left:18px;display:grid;gap:4px;font-size:12px;color:#b9d3c8}.fleet-checks li{overflow-wrap:anywhere}.fleet-checks li.ok{color:#cff0df}.fleet-checks li.failed{color:#f0a09b}
+.fleet-evidence-list{display:grid;grid-template-columns:max-content 1fr;gap:6px 14px;margin:0;font-size:12px}
+.fleet-evidence-list dt{color:#78948f}.fleet-evidence-list dd{margin:0;overflow-wrap:anywhere;color:#d8f3e5}
+/* Fleet nodes overview (side panel item): one row per node, wrapping on a phone. */
+.fleet-overview{list-style:none;margin:12px 0 0;padding:0;display:grid;gap:8px}
+.fleet-overview-row{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;font-size:12px}
+.fleet-overview-row small{flex-basis:100%;color:#78948f;overflow-wrap:anywhere}
+.fleet-evidence h3{margin:4px 0 0;font-size:13px;color:#d8f3e5}
+.journal-status{font-size:11px;justify-content:flex-start}
+.logs-toolbar{display:flex;align-items:center;gap:12px;margin:6px 0 14px}.logs-toolbar .dialog-description{margin:0}
+.logs-toolbar .quiet-button{min-height:38px}
+.logs-body{display:grid;gap:12px;min-width:0}
+.logs-rows{display:grid;gap:6px}.logs-row{display:flex;flex-wrap:wrap;justify-content:space-between;gap:4px 16px;font-size:12px;color:#a8c5b7}
+.logs-row strong{color:#d8f3e5;font-weight:600;overflow-wrap:anywhere}
+.logs-operations{display:grid;gap:8px}
+.logs-operation{gap:6px;padding:12px}.logs-operation-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.logs-operation h3{font-size:13px}.logs-operation small{color:#78948f}
+.logs-pill{flex:none;padding:2px 8px;border-radius:20px;font-size:10px;border:1px solid #486a57;color:#cff0df}
+.logs-pill.good{border-color:#3f8a64;color:var(--green,#64e5af)}.logs-pill.bad{border-color:#a8504b;color:#f0a09b}
+.logs-empty,.logs-muted{color:#78948f}
+@media(max-width:800px){.fleet-bar{gap:4px}.fleet-label,.fleet-age{display:none}.fleet-node{min-width:32px;min-height:32px;justify-content:center;padding:6px 9px}}
+@media(max-width:520px){.forge-connection{display:none}}
+/* Mobile top bar (Commander report 2026-11-05: node chips covered the menu button). The bar never wraps; on narrow
+   screens it shrinks to six LED dots that sit after the menu button, and the composer notes take their own line. */
+@media(max-width:640px){
+ .topbar{flex-wrap:nowrap;gap:6px;overflow:hidden}
+ .topbar>div:first-child{flex:0 0 auto;min-width:0}
+ #conversation-title,.conversation-subtitle{display:none}
+ #menu{position:relative;z-index:2;flex:none}
+ .fleet-bar{flex:1 1 auto;flex-wrap:nowrap;justify-content:flex-start;gap:3px;min-width:0;overflow-x:auto;scrollbar-width:none;position:relative;z-index:1}
+ .fleet-bar::-webkit-scrollbar{display:none}
+ .fleet-node{min-width:22px;min-height:22px;width:22px;height:22px;padding:0;justify-content:center;border-radius:50%;flex:none}
+ .fleet-led{width:8px;height:8px}
+ .topbar-right{flex:none;gap:6px}
+ .connection-pill{display:none}
+ .model-picker,.personality-control{flex:1 1 100%;min-width:0;max-width:100%}
+ .model-picker .connection-note,.personality-control .connection-note{display:block;font-size:11px;line-height:1.35}
+}

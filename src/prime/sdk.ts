@@ -16,6 +16,7 @@ export async function sdkBroker(connection:McpConnection,names:SdkTools,fixed:Js
    });
   },
   read:capability=>call(names.read,{target:'sdk_cap',capability}),
-  invoke:request=>connection.call(names.invoke,{...fixed,...request}),
+  // The bridge reads `timeout_ms` as its own gate wait for this call (src/bridge/sdk-stdio.ts); it is never forwarded to the gate.
+  invoke:(request,options)=>connection.call(names.invoke,{...fixed,...request,...(options?.timeoutMs?{timeout_ms:Math.round(options.timeoutMs)}:{})},options?.timeoutMs?{timeoutMs:options.timeoutMs+5000}:undefined),
  };
 }

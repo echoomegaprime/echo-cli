@@ -1,6 +1,7 @@
 import type { SessionStore, Session } from './sessions.js';
 import { hash, redact } from './workspace.js';
 import type { Workspace } from './workspace.js';
+import {debuglog} from 'node:util';
 
 export interface CapturePayload { kind: 'artifact'; title: string; detail: string; requestId: string }
 export interface CaptureReceipt {
@@ -16,10 +17,15 @@ export interface MemoryCheckpoint {
   receipt?: CaptureReceipt;
 }
 export type ContinuityInvoker = (request: {
-  capability: 'echo.continuity.capture' | 'echo.continuity.recall';
-  params: CapturePayload | { query: string }; idempotencyKey?: string;
+  capability: 'echo.continuity.capture' | 'echo.continuity.recall' | 'echo.continuity.prepare';
+  params: CapturePayload | PrimeCapturePayload | { query: string } | {message:string;maxChars:number}; idempotencyKey?: string;
   reason: string; signal: AbortSignal;
 }) => Promise<unknown>;
+
+export type PrimeCaptureKind='decision'|'task'|'lesson'|'correction'|'note';
+export interface PrimeCapturePayload {kind:Exclude<PrimeCaptureKind,'correction'>;title:string;detail:string;requestId:string;projectId?:string}
+export interface PrimeCaptureResult {state:'verified'|'unavailable'|'uncertain';saved:boolean;message:string;receipt?:Omit<CaptureReceipt,'kind'>&{kind:PrimeCapturePayload['kind']}}
+const debugContinuity=debuglog('echo-prime-continuity');
 
 const hasControl = (text: string) => [...text].some(char => {
   const code = char.charCodeAt(0); return (code < 32 && ![9, 10, 13].includes(code)) || code === 127;
@@ -71,8 +77,21 @@ function record(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 function response(value: unknown) {
-  const wrapper = record(value), root = record(wrapper.structuredContent ?? value);
-  const sdk = record(root.sdk_result), result = record(sdk.result), body = record(result.body);
+  let root=record(value),error=false;
+  for(let i=0;i<4;i++){
+    error ||= root.isError===true||root.ok===false;
+    if(root.structuredContent){root=record(root.structuredContent);continue;}
+    if(Array.isArray(root.content)){
+      const text=record(root.content.find(b=>record(b).type==='text')).text;
+      if(typeof text!=='string'||Buffer.byteLength(text)>1048576){root={};break;}
+      try{root=record(JSON.parse(text));continue;}catch{root={};break;}
+    }
+    break;
+  }
+  if(error)root={...root,ok:false};
+  const sdk = record(root.sdk_result), result = record(sdk.result);
+  let body=record(result.body);
+  if(typeof result.body==='string'&&Buffer.byteLength(result.body)<=1048576){try{body=record(JSON.parse(result.body));}catch{body={};}}
   return { root, sdk, result, body, data: record(body.result) };
 }
 function ownerData(value: unknown): Record<string, unknown> | undefined {
@@ -163,4 +182,65 @@ export async function syncCheckpoint(store: SessionStore, workspace: Workspace, 
     if (denied(recall)) return save('saved', 'read_scope_missing');
     return recallMatches(recall, item) ? save('verified') : save('saved', 'recall_not_matched');
   } finally { release(); }
+}
+
+/** Prime's bounded client uses only the same host invoker as explicit checkpoints.
+ * Captured assertions remain model text. Verification proves storage, not truth. */
+export class ContinuityClient {
+ constructor(private invoke?:ContinuityInvoker){}
+ private async call(capability:Parameters<ContinuityInvoker>[0]['capability'],params:Parameters<ContinuityInvoker>[0]['params'],signal?:AbortSignal,idempotencyKey?:string){
+  if(!this.invoke)throw new Error('Existing continuity host broker is not attached');
+  if(signal?.aborted)throw new Error('Interrupted');
+  const invoke=this.invoke;
+  const reply=await boundedInvoke(request=>invoke({...request,signal:signal?AbortSignal.any([signal,request.signal]):request.signal}),{
+   capability,params,idempotencyKey,reason:'Prime bounded continuity through the existing host authority; no scope expansion.'});
+  if(signal?.aborted)throw new Error('Interrupted; continuity outcome unknown');
+  if(Buffer.byteLength(JSON.stringify(reply))>1048576)throw new Error('Continuity response exceeds limit');
+  if(denied(reply))throw new Error('Existing continuity broker scope denied');
+  const data=ownerData(reply);if(!data)throw new Error('Continuity owner response not verified');return data;
+ }
+ async prepare(message:string,signal?:AbortSignal){
+  if(typeof message!=='string'||!message.trim()||message.length>12000)throw new Error('Invalid continuity message');
+  const data=await this.call('echo.continuity.prepare',{message:redact(message),maxChars:4000},signal);
+  if(data.ready!==true||typeof data.context!=='string')throw new Error('Continuity prepare unavailable');
+  debugContinuity('%j',{event:'ecf_prepare',chars:Math.min(data.context.length,4000),ambiguous:data.ambiguous===true});
+  return {context:redact(data.context).slice(0,4000),ambiguous:data.ambiguous===true,untrusted:true};
+ }
+ async recall(query:string,signal?:AbortSignal){
+  if(typeof query!=='string'||!query.trim()||query.length>500||redact(query)!==query)throw new Error('Invalid continuity query');
+  const data=await this.call('echo.continuity.recall',{query},signal);
+  const text=redact(JSON.stringify(data));
+  debugContinuity('%j',{event:'ecf_recall',chars:Math.min(text.length,8000)});
+  return {untrusted:true,context:text.slice(0,8000),truncated:text.length>8000};
+ }
+ async capture(kind:PrimeCaptureKind,content:string,sessionId:string,project?:string,signal?:AbortSignal):Promise<PrimeCaptureResult>{
+  if(!['decision','task','lesson','correction','note'].includes(kind)||typeof content!=='string'||!content.trim()||content.length>4000||hasControl(content)||redact(content)!==content)throw new Error('Invalid or secret-like continuity content');
+  if(!/^[A-Za-z0-9_-]{1,100}$/.test(sessionId)||(project!==undefined&&!/^[A-Za-z0-9_-]{1,120}$/.test(project)))throw new Error('Invalid continuity session or project');
+  // ECF has no native correction kind. Keep that intent explicit in the note title.
+  const nativeKind=kind==='correction'?'note':kind,title='Prime '+kind,detail=content.trim();
+  const requestId='prime:'+sessionId+':'+hash(JSON.stringify({kind:nativeKind,title,detail,project}));
+  const payload:PrimeCapturePayload={kind:nativeKind,title,detail,requestId,...(project?{projectId:project}:{})};
+  const expected=title+'\n'+detail,contentSha256=hash(expected);
+  const fail=(state:'unavailable'|'uncertain',message:string):PrimeCaptureResult=>{
+   debugContinuity('%j',{event:'ecf_capture',state,kind});return {state,saved:false,message};
+  };
+  if(!this.invoke)return fail('unavailable','ECF capture unavailable: existing host broker is not attached. Nothing was saved.');
+  let receipt:Record<string,unknown>;
+  try{receipt=await this.call('echo.continuity.capture',payload,signal,requestId);}
+  catch{return fail('uncertain','ECF capture unavailable or unconfirmed. No verified save; do not replay with a new request ID.');}
+  const validId=(v:unknown):v is string=>typeof v==='string'&&/^[A-Za-z0-9_-]{1,100}$/.test(v);
+  if(!validId(receipt.id)||!validId(receipt.eventId)||receipt.kind!==nativeKind||receipt.requestId!==requestId||receipt.saved!==true||receipt.verified!==true||typeof receipt.duplicate!=='boolean'||receipt.contentSha256!==contentSha256)
+   return fail('uncertain','ECF capture returned an invalid receipt. Saved state is unverified.');
+  let recall:Record<string,unknown>;
+  try{recall=await this.call('echo.continuity.recall',{query:receipt.eventId},signal);}
+  catch{return fail('uncertain','ECF capture returned, but receipt read-back is unavailable. Saved state is unverified.');}
+  const match=Array.isArray(recall.events)&&recall.events.length<=20&&recall.events.some(value=>{
+   const event=record(value);return event.id===receipt.eventId&&event.content_sha256===contentSha256&&
+    (event.content_text===expected||(expected.length>1200&&event.excerpt_truncated===true&&event.content_text===expected.slice(0,1199)+'\u2026'));
+  });
+  if(!match)return fail('uncertain','ECF receipt read-back did not match the exact event and content hash. Saved state is unverified.');
+  const verified={id:receipt.id,eventId:receipt.eventId,kind:nativeKind,requestId,saved:true as const,verified:true as const,duplicate:receipt.duplicate,contentSha256};
+  debugContinuity('%j',{event:'ecf_capture',state:'verified',kind,receiptId:receipt.id});
+  return {state:'verified',saved:true,receipt:verified,message:'Saved to ECF; receipt '+receipt.id+' read back and verified.'};
+ }
 }

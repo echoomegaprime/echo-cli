@@ -1,0 +1,16 @@
+/* Swarm (40-seat brain) result cards; rendered inside .chat-message articles by swarm.js. */
+.swarm-badge{margin:8px 0;padding:8px 10px;border:1px solid #3d6b57;border-radius:8px;background:#0f2a22;color:#b6e8d3;font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+.swarm-badge strong{display:inline;letter-spacing:.04em}
+.swarm-badge-warn{border-color:#a8742f;background:#2c2010;color:#f0cf9c}
+.swarm-answer{white-space:pre-wrap;overflow-wrap:anywhere;margin:10px 0 4px}
+.swarm-confidence,.swarm-meta{color:var(--muted);font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+.swarm-meta{display:block}
+.swarm-error{color:#f0b3a8;overflow-wrap:anywhere;margin:8px 0}
+.swarm-status{color:var(--mint);font-size:12px;margin:6px 0}
+.swarm-elapsed{font-variant-numeric:tabular-nums;color:var(--text)}
+.swarm-stop{display:inline-flex;min-height:36px;padding:6px 10px;border:1px solid var(--line);border-radius:8px}
+.swarm-section{margin:8px 0;border-top:1px solid var(--line);padding-top:6px}
+.swarm-section summary{cursor:pointer;color:var(--mint);font-size:12px;min-height:28px}
+.swarm-section ol,.swarm-section ul{margin:6px 0;padding-left:20px}
+.swarm-section li{margin:6px 0;overflow-wrap:anywhere}
+.swarm-section pre{max-height:220px;overflow:auto;font-size:11px;white-space:pre-wrap;overflow-wrap:anywhere}

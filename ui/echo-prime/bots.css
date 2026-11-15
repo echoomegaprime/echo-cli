@@ -1,0 +1,53 @@
+/* echoBots view (bots.js): bot cards, create form, bot chat and group chat inside the shared panel dialog. */
+.bots-dialog{width:min(1100px,calc(100vw - 32px))}
+.bots-note{margin:4px 0 12px;border:1px solid #3d6b57;border-radius:8px;background:#0f2a22;color:#b6e8d3;font-size:12px;line-height:1.55;padding:8px 12px}
+.bots-note summary{cursor:pointer;color:var(--mint);min-height:28px;display:flex;align-items:center}
+.bots-note p{margin:6px 0 2px;overflow-wrap:anywhere}
+.bots-toolbar{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 10px}
+.bots-toolbar .quiet-button,.bots-actions .quiet-button,.bots-run,.bots-group .quiet-button{min-height:36px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;font-size:11px;color:#9fc5b5}
+.bots-toolbar .quiet-button:hover,.bots-actions .quiet-button:hover,.bots-run:hover{border-color:#5a8f77;color:#e4eeeb}
+.bots-notice{min-height:18px;margin:0 0 10px;color:var(--mint);font-size:12px;overflow-wrap:anywhere}
+.bots-body{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.2fr);gap:14px;min-width:0}
+.bots-list{display:grid;gap:10px;align-content:start;min-width:0}
+.bots-pane{min-width:0}
+.bots-card{display:grid;gap:6px;background:#09181388;border:1px solid #345343;border-radius:12px;padding:14px;min-width:0}
+.bots-card-selected{border-color:#64e5af;box-shadow:0 0 0 1px #64e5af55}
+.bots-card-confirm{border-color:#a8504b}
+.bots-card-head{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.bots-card-head h3{margin:0;font-size:14px;overflow-wrap:anywhere}
+.bots-badge{display:inline-flex;align-items:center;padding:2px 8px;border-radius:20px;font-size:10px;letter-spacing:.05em;border:1px solid #486a57;color:#cff0df;text-transform:uppercase}
+.bots-mode{border-color:#3d6b57;color:#b6e8d3}
+.bots-status-paused{border-color:#7a7a52;color:#e6dc9c}
+.bots-status-idle{border-color:#3f8a64;color:var(--green)}
+.bots-status-running{border-color:#3f8a64;color:var(--green);box-shadow:0 0 8px #64e5af55}
+.bots-status-error,.bots-danger{border-color:#a8504b;color:#f0a09b}
+.bots-status-unknown{border-color:#5f716b;color:#8da39d}
+.bots-row{margin:0;font-size:12px;color:#a8c5b7;overflow-wrap:anywhere}
+.bots-label{color:#78948f;margin-right:5px}
+.bots-meter-wrap{display:grid;gap:4px}
+.bots-meter{height:6px;border-radius:4px;background:#13241e;border:1px solid #2f4a3f;overflow:hidden}
+.bots-meter-fill{display:block;height:100%;background:var(--green);border-radius:4px}
+.bots-meter-full{background:#e5645e}
+.bots-meta{display:block;color:var(--muted);font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+.bots-error{margin:0;color:#f0b3a8;font-size:12px;overflow-wrap:anywhere}
+.bots-actions{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:4px}
+.bots-form,.bots-chat,.bots-group{display:grid;gap:10px;background:#09181388;border:1px solid #345343;border-radius:12px;padding:14px;min-width:0}
+.bots-form h3,.bots-chat h3,.bots-group h3{margin:0;font-size:14px}
+.bots-inline{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.bots-inline input[type=checkbox]{width:auto}
+.bots-submit{justify-content:center}
+.bots-transcript{display:grid;gap:8px;max-height:46vh;overflow:auto;padding:4px;border:1px solid var(--line);border-radius:8px;min-height:80px}
+.bots-msg{display:grid;gap:3px;padding:8px 10px;border-radius:8px;background:#0b1915}
+.bots-msg-user{background:#13241e}
+.bots-msg-system{border:1px dashed #3d6b57}
+.bots-msg strong{font-size:11px;letter-spacing:.05em;color:var(--mint)}
+.bots-msg p{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
+.bots-run{min-height:28px;padding:2px 8px;display:inline-flex;font-variant-numeric:tabular-nums}
+.bots-poll{margin:0;color:var(--mint);font-size:12px}
+.bots-composer{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:end}
+.bots-composer textarea{width:100%;min-width:0;box-sizing:border-box;border:1px solid #375c4d;border-radius:8px;background:#0b1915;color:#e1f2ea;padding:10px 12px;font:inherit}
+.bots-picks{display:grid;gap:6px}
+.bots-pick{display:flex;align-items:center;gap:8px;font-size:12px}
+.bots-summary{display:grid;gap:4px;padding:10px;border:1px solid #3d6b57;border-radius:8px;background:#0f2a22}
+.bots-summary p{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
+@media(max-width:860px){.bots-body{grid-template-columns:1fr}.bots-inline{grid-template-columns:1fr}.bots-composer{grid-template-columns:1fr}}

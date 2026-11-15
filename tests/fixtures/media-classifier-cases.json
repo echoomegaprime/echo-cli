@@ -1,0 +1,306 @@
+[
+ {
+  "text": "A cat on a windowsill.",
+  "kind": "image",
+  "styles": [],
+  "why": "plain scene with no style, aspect, or duration cue"
+ },
+ {
+  "text": "Photoreal photograph of dew on a fern leaf at dawn, shot close with soft natural light, shallow depth, true color, and absolutely no text or watermark.",
+  "kind": "image",
+  "styles": [
+   "photoreal"
+  ],
+  "why": "photoreal names a still photograph"
+ },
+ {
+  "text": "Need a simple geometric logo for a riverside pottery studio, flat shapes, centered, lots of margin, no letters.",
+  "kind": "image",
+  "styles": [
+   "logo"
+  ],
+  "why": "a logo mark is a still graphic"
+ },
+ {
+  "text": "Draw an anime illustration of a traveler in a red scarf, standing in falling snow, full body, quiet mood.",
+  "kind": "image",
+  "styles": [
+   "anime",
+   "illustration"
+  ],
+  "why": "anime illustration asks for a drawn still"
+ },
+ {
+  "text": "Clean product shot of a matte ceramic mug on a white sweep, soft shadow, square frame.",
+  "kind": "image",
+  "styles": [
+   "product"
+  ],
+  "aspect": "1:1",
+  "why": "product shot is a still and square maps to 1:1"
+ },
+ {
+  "text": "Not a painting: a photoreal studio portrait of an older woman with silver hair, soft side light, and a plain gray backdrop.",
+  "kind": "image",
+  "styles": [
+   "photoreal",
+   "portrait"
+  ],
+  "why": "portrait names a still person image"
+ },
+ {
+  "text": "Pixel art of a cozy tavern interior, chunky shapes, warm lanterns, and a wooden bar.",
+  "kind": "image",
+  "styles": [
+   "pixel"
+  ],
+  "why": "pixel art names a still image style"
+ },
+ {
+  "text": "Watercolor painting of small fishing boats in a misty harbor, loose washes and plenty of bare paper.",
+  "kind": "image",
+  "styles": [
+   "watercolor"
+  ],
+  "why": "watercolor names a still painting"
+ },
+ {
+  "text": "3D render of a small wooden cabin in a pine forest, soft global illumination, wide view.",
+  "kind": "image",
+  "styles": [
+   "3d"
+  ],
+  "why": "3d render names a still image"
+ },
+ {
+  "text": "Typography poster reading quiet hours in tall condensed letters on cream paper, 3:4 layout.",
+  "kind": "image",
+  "styles": [
+   "typography"
+  ],
+  "aspect": "3:4",
+  "why": "a typography poster is a still in 3:4"
+ },
+ {
+  "text": "Please make a 10 second clip of waves rolling onto a dark pebble beach at dusk, with no people, no titles, and no sudden cuts.",
+  "kind": "video",
+  "styles": [],
+  "durationSeconds": 10,
+  "why": "a timed clip is video"
+ },
+ {
+  "text": "Cut a vertical reel of a potter centering clay, tight and steady, hands only.",
+  "kind": "video",
+  "styles": [],
+  "aspect": "9:16",
+  "why": "a reel is video and vertical maps to 9:16"
+ },
+ {
+  "text": "The camera pans slowly across a cluttered inventor workbench in 4:3, dust in the light.",
+  "kind": "video",
+  "styles": [],
+  "aspect": "4:3",
+  "why": "a camera move is video in 4:3"
+ },
+ {
+  "text": "Build a timelapse of storm clouds gathering over open prairie, framed 16:9, no people or titles.",
+  "kind": "video",
+  "styles": [],
+  "aspect": "16:9",
+  "why": "timelapse is video in 16:9"
+ },
+ {
+  "text": "Please animate this scene of paper boats drifting down a rain gutter.",
+  "kind": "video",
+  "styles": [],
+  "why": "ambiguous between video and image-edit; the motion request is the stronger cue"
+ },
+ {
+  "text": "A 6 second cinematic shot rising over terraced rice fields at first light.",
+  "kind": "video",
+  "styles": [
+   "cinematic"
+  ],
+  "durationSeconds": 6,
+  "why": "a timed cinematic shot is video"
+ },
+ {
+  "text": "Seamless cinematic loop of neon rain on a night alley, ultrawide 21:9, empty street.",
+  "kind": "video",
+  "styles": [
+   "cinematic"
+  ],
+  "aspect": "21:9",
+  "why": "a seamless picture loop is video in 21:9"
+ },
+ {
+  "text": "Write a short folk song about leaving a coastal town just before sunrise, gentle and hopeful.",
+  "kind": "music",
+  "styles": [],
+  "why": "a song is music"
+ },
+ {
+  "text": "Lo-fi beat with soft vinyl crackle, a mellow piano loop, and no vocals.",
+  "kind": "music",
+  "styles": [],
+  "why": "a beat is music"
+ },
+ {
+  "text": "Orchestral score for a quiet discovery moment, low strings and one lone horn, slow tempo.",
+  "kind": "music",
+  "styles": [],
+  "why": "a score is music"
+ },
+ {
+  "text": "Upbeat electronic track around 90 bpm, bright and playful, instrumental only.",
+  "kind": "music",
+  "styles": [],
+  "why": "a bpm track is music"
+ },
+ {
+  "text": "Compose a 2 minute instrumental of fingerpicked acoustic guitar and light hand percussion, hopeful but not busy, no vocals.",
+  "kind": "music",
+  "styles": [],
+  "durationSeconds": 120,
+  "why": "a timed instrumental is music"
+ },
+ {
+  "text": "A short wooden door creak, dry and close.",
+  "kind": "sfx",
+  "styles": [],
+  "why": "one creak is a sound effect"
+ },
+ {
+  "text": "Steady rain ambience on a tin roof for about 20 seconds, no thunder and no music.",
+  "kind": "sfx",
+  "styles": [],
+  "durationSeconds": 20,
+  "why": "ambience without melody is a sound effect"
+ },
+ {
+  "text": "A fast whoosh as cloth passes the microphone, short, dry, and without reverb.",
+  "kind": "sfx",
+  "styles": [],
+  "why": "a whoosh is one sound effect"
+ },
+ {
+  "text": "Design a soft notification sound, two gentle chimes, clean, modern, and very short.",
+  "kind": "sfx",
+  "styles": [],
+  "why": "a notification chime is a sound effect"
+ },
+ {
+  "text": "Read this aloud in a warm unhurried tone: the market opens at dawn and closes when the lamps are lit.",
+  "kind": "voice",
+  "styles": [],
+  "why": "read aloud is text to speech"
+ },
+ {
+  "text": "Narrate a walking tour of a small botanical garden, friendly and clear, about 45 seconds.",
+  "kind": "voice",
+  "styles": [],
+  "durationSeconds": 45,
+  "why": "narrate asks for spoken audio"
+ },
+ {
+  "text": "Say the following in a calm voice: your table is ready beside the garden window.",
+  "kind": "voice",
+  "styles": [],
+  "why": "say in a voice is text to speech"
+ },
+ {
+  "text": "Need a voice-over script read aloud for a thirty-second film about a hand-thrown bowl.",
+  "kind": "voice",
+  "styles": [],
+  "durationSeconds": 30,
+  "why": "ambiguous between voice, chat, and video; reading aloud is the lead request"
+ },
+ {
+  "text": "Remove the background from this photo and leave only the ceramic vase.",
+  "kind": "image-edit",
+  "styles": [],
+  "why": "an existing photo is being changed"
+ },
+ {
+  "text": "Replace the sky in this picture with a pale overcast morning, keeping the rooftops as they are.",
+  "kind": "image-edit",
+  "styles": [],
+  "why": "an existing picture is being changed"
+ },
+ {
+  "text": "Please upscale my image so it is cleaner and sharper, without changing the pose or the crop.",
+  "kind": "image-edit",
+  "styles": [],
+  "why": "an existing image is being enhanced"
+ },
+ {
+  "text": "Turn this rough sketch into a square cinematic still, unless a short move would serve it better.",
+  "kind": "image-edit",
+  "styles": [
+   "sketch",
+   "cinematic"
+  ],
+  "aspect": "1:1",
+  "why": "ambiguous between image-edit, image, and video; an existing sketch is named"
+ },
+ {
+  "text": "Explain how aperture changes depth of field, using plain language and a simple example.",
+  "kind": "chat",
+  "styles": [],
+  "why": "explain is a text request, not media"
+ },
+ {
+  "text": "Write a Python function that takes a list of numbers, ignores empty input, returns the median as a float, and includes a short docstring.",
+  "kind": "chat",
+  "styles": [],
+  "why": "writing code is chat"
+ },
+ {
+  "text": "Summarize the notes I pasted into three cautious bullet points, and do not add new claims.",
+  "kind": "chat",
+  "styles": [],
+  "why": "summarize is a text task"
+ },
+ {
+  "text": "What is the capital of Portugal?",
+  "kind": "chat",
+  "styles": [],
+  "why": "a fact question is chat"
+ },
+ {
+  "text": "How do I export a transparent PNG from a layered design file without flattening the type?",
+  "kind": "chat",
+  "styles": [],
+  "why": "a how-to question is chat"
+ },
+ {
+  "text": "Does this rhyme scheme stay consistent if the third line is shorter than the others?",
+  "kind": "chat",
+  "styles": [],
+  "why": "a question about wording is chat"
+ },
+ {
+  "text": "An epic orchestral soundtrack for a trailer.",
+  "kind": "music",
+  "styles": [],
+  "why": "the trailer is what the soundtrack is for, so it does not tie the music request with video"
+ },
+ {
+  "text": "Epic trailer music with big drums and rising strings.",
+  "kind": "music",
+  "styles": [],
+  "why": "trailer modifies the music noun"
+ },
+ {
+  "text": "Sound effects for a video game menu: hover, select and back.",
+  "kind": "sfx",
+  "styles": [],
+  "why": "the video game is what the sound effects are for"
+ },
+ {
+  "text": "A trailer with an epic orchestral soundtrack.",
+  "kind": "video",
+  "styles": [],
+  "why": "the trailer itself is requested; the soundtrack is part of it"
+ }
+]

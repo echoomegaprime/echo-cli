@@ -1,0 +1,94 @@
+[
+ {
+  "check": "prime assets + CSP + HEAD",
+  "ok": true,
+  "detail": "31 scripts + 15 stylesheets served once, HEAD ok, CSP ok",
+  "s": 0.0
+ },
+ {
+  "check": "prime owner gating",
+  "ok": true,
+  "detail": "7 owner routes refuse an anonymous caller ([403])",
+  "s": 0.0
+ },
+ {
+  "check": "qwen 3.8 256K loaded",
+  "ok": true,
+  "detail": "loaded: ['c3po-code:echo-qwen38-abliterated-256k']",
+  "s": 0.0
+ },
+ {
+  "check": "echo-adk-api health",
+  "ok": true,
+  "detail": {
+   "ok": true,
+   "service": "echo-adk-api",
+   "profile": "ECHO_ADK",
+   "version": "0.1.0",
+   "agents": 2,
+   "bots": 0,
+   "runs_active": 0
+  },
+  "s": 0.0
+ },
+ {
+  "check": "echo-adk real run with proof",
+  "ok": true,
+  "detail": {
+   "run": "4e64f9c4",
+   "steps": [
+    "model",
+    "cap",
+    "model",
+    "final"
+   ],
+   "answered_by": {
+    "provider": "qwen-local",
+    "requested": "c3po-code:echo-qwen38-abliterated-256k",
+    "model": "c3po-code:echo-qwen38-abliterated-256k",
+    "reported": true
+   },
+   "proof": "PASS",
+   "final": "Node forge is reachable (35 ms latency) but its health status is reported as \"unknown\" because the health probe was denied by a scope restriction (required scop"
+  },
+  "s": 60.0
+ },
+ {
+  "check": "echoBots lifecycle",
+  "ok": true,
+  "detail": {
+   "created": "paused",
+   "reply": "Hello there, how are you",
+   "deleted": true
+  },
+  "s": 76.0
+ },
+ {
+  "check": "workspace backend",
+  "ok": true,
+  "detail": "echo-workspace-web active; /api/health owner-gated",
+  "s": 0.0
+ },
+ {
+  "check": "shadowglass relay via tunnel",
+  "ok": true,
+  "detail": "1.4.0",
+  "s": 0.0
+ },
+ {
+  "check": "maximalist swarm worker",
+  "ok": true,
+  "detail": {
+   "ready": true,
+   "profile": "MAXIMALIST_RECONSTRUCTED",
+   "active_runs": 0
+  },
+  "s": 0.0
+ },
+ {
+  "check": "SDK gate",
+  "ok": true,
+  "detail": "gate ok",
+  "s": 0.0
+ }
+]
