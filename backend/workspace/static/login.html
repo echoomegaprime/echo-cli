@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Sign in · Echo Prime</title><link rel="icon" href="/echo-icon.png"><link rel="stylesheet" href="/auth.css"><script src="/auth.js" defer></script></head>
+<body><main class="auth-card"><a href="/" class="identity"><img src="/echo-icon.png" alt="Echo emblem"><span>ECHO PRIME<small>YOUR PRIVATE WORKSPACE</small></span></a>
+<div id="login-content"><h1>A space that remembers you.</h1><p>Your conversations, projects and memories belong to your account.</p>
+<form id="auth-form"><label>Email or user ID<input id="identifier" name="username" autocomplete="username" required maxlength="320"></label><label>Password<input id="password" name="password" type="password" autocomplete="current-password" required maxlength="1024"></label><label id="name-field" hidden>Your name<input id="display-name" autocomplete="name" maxlength="100"></label><button class="primary" id="submit" type="submit">Sign in</button></form>
+<div id="google-button"></div>
+<div class="links"><button id="switch-mode">Create an account</button><button id="reset-password">Forgot password?</button></div>
+<p class="fine" id="admission-note">New accounts need the owner’s approval before entering the Workspace. For Google sign-in, create and verify your ECHO account first.</p></div>
+<section id="account-content" hidden><h1 id="account-heading">Your account</h1><p id="account-status"></p><div class="links"><a href="/" id="open-workspace" hidden>Open Workspace</a><button id="sign-out">Sign out</button></div><div id="approvals"></div></section>
+<p class="fine"><a href="/privacy">Privacy and your data</a></p>
+<p id="auth-status" role="status" aria-live="polite"></p></main></body></html>

@@ -1,0 +1,259 @@
+{
+  "source_sha": "8de99d98521787c9580c84e1645dfb5b7aadfd88",
+  "files": [
+    {
+      "path": "AUTH.md",
+      "sha256": "1cfb0d75254855de4cdb20e42d17087229b13905f4dcbd1ffb7677c11e2d0e89"
+    },
+    {
+      "path": "CAPABILITIES.md",
+      "sha256": "7e069176b101f75b7bdf4fd9df24ff5acf889a7493c96e777860fb6609fa2dc3"
+    },
+    {
+      "path": "GROUNDING.md",
+      "sha256": "dbca28f21a38180451cd2d0ed758f72b74401870949a76c09e14fb33656df965"
+    },
+    {
+      "path": "MCP.md",
+      "sha256": "fa460d0545eeab5b481ddfea604b80e8bfe3327a1853ac77d289bbc9624321fc"
+    },
+    {
+      "path": "README.md",
+      "sha256": "6e61328973cd32700bcab8f97f90b112cb600c1b5391bc043965fc79ce56b65e"
+    },
+    {
+      "path": "accounts.py",
+      "sha256": "71939508038d94e12d9ec66c3975452daf81c1add7e60911c0fddadd71e1f64c"
+    },
+    {
+      "path": "accounts_http.py",
+      "sha256": "ddf1e820d16eb86405b027ab1f677e38afaec90aac6cc5afe67bd111439fdeef"
+    },
+    {
+      "path": "adapters.py",
+      "sha256": "25ee170899ee3d0953ce16e8fd0bb2ea21f4277007db29ddb548fa55f92f712d"
+    },
+    {
+      "path": "agent_tools.py",
+      "sha256": "e5221a7348bdea70c2888a0bc022e9d5923af5ac3bc2498e1239b17898c5750c"
+    },
+    {
+      "path": "app.py",
+      "sha256": "185101383b9df30c91aa555c97b757b0c20aea66cbb2c7195b427849d5bbb177"
+    },
+    {
+      "path": "approval_notifications.py",
+      "sha256": "15a9a93717e8f85a1b5d11973022ebd762504fe8e0b0c46bfe2d1ce542d03e59"
+    },
+    {
+      "path": "audit.py",
+      "sha256": "05e4e211fa78ea7fb10ea2636c07b77d31175d0150d682b09db838798318105e"
+    },
+    {
+      "path": "config.example.json",
+      "sha256": "cdaef8116cb8d1c8013ae1e38dfcdbe7b3e759fef2b63033ed0aa484beff796a"
+    },
+    {
+      "path": "fleet.py",
+      "sha256": "c2193a65c8d12a622edfa1fd7b7f10d90941f81c249c8f0c35a501e0207a8db5"
+    },
+    {
+      "path": "grounding.py",
+      "sha256": "00138f54c6587be25a1ab4db0f7b7a5d4c33d0fba8cbcc0a5a2c07a32acd1181"
+    },
+    {
+      "path": "internet.py",
+      "sha256": "f9c9badfe216849738e7ff259ec7fdf2a02c1f63457347e5a64405a5527fdfe4"
+    },
+    {
+      "path": "knowledge.py",
+      "sha256": "ea5a14352b0e0e966c3f58368b00b93d8d4783d3d523c8ea1b7964103d9ff396"
+    },
+    {
+      "path": "launchers/Start-EchoVoiceTunnel.ps1",
+      "sha256": "92616e300e692590f1a996670f6a51300bff4024e9e11b17b34252dc67a708d5"
+    },
+    {
+      "path": "launchers/Start-EchoWorkspace.ps1",
+      "sha256": "afa07b10208b50973c03c5f66e148195970db764b045b5e090348dea1c5e6717"
+    },
+    {
+      "path": "launchers/Stop-EchoWorkspace.ps1",
+      "sha256": "050607a6e563aea20131355eb4e3131d737912efd8a62c7b7a7e3046e9f32a54"
+    },
+    {
+      "path": "launchers/Workspace.AGENTS.md",
+      "sha256": "adfbcddc97f50cf5c138d1c0815e9322b16feba2ca42128c1bf3881b29f0a823"
+    },
+    {
+      "path": "mission.py",
+      "sha256": "223643975ccdc1cfac611234f8f34469ff9a8776d55431a9de475f5f756e1118"
+    },
+    {
+      "path": "personalities.py",
+      "sha256": "4895cfa61834c5fae3c7ec1b123366b7d61168a0ab67b2a49c2bc43eb2050048"
+    },
+    {
+      "path": "preferences.py",
+      "sha256": "e4ca5b8f98ce7e2ca332d47fdc2d73bea280d2188e305cdaeeaa57bd38ea37a3"
+    },
+    {
+      "path": "remote_mcp.py",
+      "sha256": "3c99ac3c15a08487245626ba5117ce83c5292fba48e75351b32147baca15e501"
+    },
+    {
+      "path": "sdk_dispatch.py",
+      "sha256": "5872345ff1794830723256c345a358733a280a2878a388529866b4179905c724"
+    },
+    {
+      "path": "static/app.js",
+      "sha256": "a011c87a754e8c35b225d846796ab91a9623f29befb1ea1b2817947c95ea4bea"
+    },
+    {
+      "path": "static/auth.css",
+      "sha256": "bc43517cd025b86cc9f9f6a6a33d3578afefd9a8c14cf35815f6f0bf17e30d6f"
+    },
+    {
+      "path": "static/auth.js",
+      "sha256": "48c44d3d76bebf544cfeb3a87237a89b221093948cd1af7b4c12aed2cf115eb9"
+    },
+    {
+      "path": "static/echo-icon.png",
+      "sha256": "7e9f27a053d3ac764fafab3f67e9576cc3a61b9c93fa826f760f55a5aa20b922"
+    },
+    {
+      "path": "static/esh-panel.js",
+      "sha256": "3a37c0bff341b515c455217c18fd2a4ebb223728d3c99c6863e8a650c5c4227a"
+    },
+    {
+      "path": "static/icon-provenance.md",
+      "sha256": "831ca5be9991976fcff8c36a10a0ae8523273aed38f33df13bb20ead746e5d54"
+    },
+    {
+      "path": "static/index.html",
+      "sha256": "1a62ba860617ced96a8eaabcc4c927dfe8cce9ac799afcdde3ed2128b988e98f"
+    },
+    {
+      "path": "static/layout.js",
+      "sha256": "8c2f797818a871a8b2dd6f0d73a8fec27338f97862a7fc8b2457db660f2a6d6f"
+    },
+    {
+      "path": "static/login.html",
+      "sha256": "c3b1ef8b39c8b26ad1cfb60637bb7b3407f1eeb30e7475e7e38a78e710d18a28"
+    },
+    {
+      "path": "static/mcp.js",
+      "sha256": "bc3289431f4029f7e9903f78c179127e5cb22573d0745535dc9a4eca0f1e0fc6"
+    },
+    {
+      "path": "static/privacy.html",
+      "sha256": "ea8c08a5752f0957ada814cd2e23134f35cbebc4398f9d2b4841cfef68001636"
+    },
+    {
+      "path": "static/style.css",
+      "sha256": "89c980acbf32a94436e84b0e0eb953b8804b3e6903e285acc4bb79b5b9d75e7b"
+    },
+    {
+      "path": "static/voice.js",
+      "sha256": "209005fa8759d2ee1e5785cd5b66e0728a18aa86ae7aecddc31f366e777c1462"
+    },
+    {
+      "path": "tests/esh_panel.test.mjs",
+      "sha256": "7d89aae1795f0503fb8f992445fd19976ebfdb1ef8fb6343cc85306490f0214f"
+    },
+    {
+      "path": "tests/layout.test.mjs",
+      "sha256": "f73444c782c49eed38ba6c926fce318bbbb7c5099e98004c76d56b9c6157981d"
+    },
+    {
+      "path": "tests/test_account_notifications.py",
+      "sha256": "b9998306144b463fe9ecc03282efd6bffe820cdcf4dc2aa97749e0b7f6fd13b3"
+    },
+    {
+      "path": "tests/test_accounts.py",
+      "sha256": "8b240422bb442e727cbc8c47aca5b40b47ef629f801ffc204bc65beeffc74fb8"
+    },
+    {
+      "path": "tests/test_adapters.py",
+      "sha256": "821cf61db207ced130ccc32e3d3355be4218251953e4072f826f4988f41f60af"
+    },
+    {
+      "path": "tests/test_agent_integration.py",
+      "sha256": "82b8c361855e7172609900199e846e15d0a36f5b2c01913efee46bc9b1d73000"
+    },
+    {
+      "path": "tests/test_auth_hardening.py",
+      "sha256": "e9d8ef709c8384eb5d358d63c551682217fc119ab2f4cbaa05d2dce57cd6afa1"
+    },
+    {
+      "path": "tests/test_auth_http.py",
+      "sha256": "105b1f6f10315d77eaab2103928dd5e40e3e5597c1201be8460c681f27ae3586"
+    },
+    {
+      "path": "tests/test_auth_ingress.py",
+      "sha256": "0f620a302459d44578772b2ea116512a7a7c1f88ca003db43ee9daa317363c72"
+    },
+    {
+      "path": "tests/test_cookie_isolation.py",
+      "sha256": "94175b8a9f32d258997b7348855d5267ce5cd23622141d748667f21fd1d55ca6"
+    },
+    {
+      "path": "tests/test_current_admission.py",
+      "sha256": "94959d4b0131653deb8c1744a9c55297289b596600e17d440624da5339cd398d"
+    },
+    {
+      "path": "tests/test_esh_receipts.py",
+      "sha256": "daa5c1e4cc144538b335059d5d523f0c672fc49cd798f6320f6f8cf70ee695d0"
+    },
+    {
+      "path": "tests/test_grounding.py",
+      "sha256": "05e3d2868cf573fadc57098b9d92f05ac1f9875234d7f2b0f207c17b89266a74"
+    },
+    {
+      "path": "tests/test_http.py",
+      "sha256": "df91b74acc06da2fcbde5c30ebb462a7b21af7da9593bb3b36b68cfefa8a31b5"
+    },
+    {
+      "path": "tests/test_improvements.py",
+      "sha256": "0b317f7845f4388e1f5dae1eb5c157baa887c5bcca19c7ecc957772e48a02f2f"
+    },
+    {
+      "path": "tests/test_owner_storage.py",
+      "sha256": "4afdb69eeb978716d12363048f536fd0ee9787e757bc1a29bc26e8c0d08c8710"
+    },
+    {
+      "path": "tests/test_recall_preferences.py",
+      "sha256": "01541c7e52e9262ef01f25695da612a6781161cb0a5d7e7ecd9e4074d7bc1d48"
+    },
+    {
+      "path": "tests/test_remote_mcp.py",
+      "sha256": "6bbeb1ae36a88e51542143dc7b525b0b2fb10d10a55c9ba851418df90a7deedd"
+    },
+    {
+      "path": "tests/test_voice.py",
+      "sha256": "229d85ff1085681a5609275e0fbe6fbf6550bbc833942b827cff98174931801a"
+    },
+    {
+      "path": "tests/test_workspace.py",
+      "sha256": "5a348bc8f9128edd33bc0aac2cbeb2e05331905c9d588ab1a14bb3c390f6052e"
+    },
+    {
+      "path": "tests/voice_browser.test.mjs",
+      "sha256": "8d416ad91a22723887abae8597a65196a52510f78018ed70a59fa4bcfa12ac6e"
+    },
+    {
+      "path": "voice.py",
+      "sha256": "a563034239172b280ca5bcc5e500759057f6074b527e4d5de24b5ec23200ace3"
+    },
+    {
+      "path": "voice_transport.mjs",
+      "sha256": "ec844b985d33f049e472e13dc8ef78ae435c0d26202802a2ff469cac0d840112"
+    },
+    {
+      "path": "workspace.py",
+      "sha256": "6f6fb258791bfb8086809a41515054eb1b820c499a2e511e4e6574806ac98a0e"
+    }
+  ],
+  "source_repository": "echoomegaprime/echo-omnipresence-runtime",
+  "source_path": "SYSTEMS/echo_qwen_chat"
+}

@@ -42,7 +42,13 @@
   },
   "files": [
     "dist/",
-    "ui/"
+    "ui/",
+    "backend/workspace/*.py",
+    "backend/workspace/*.md",
+    "backend/workspace/SOURCE_PROVENANCE.json",
+    "backend/workspace/static/",
+    "scripts/deploy/prime_runtime.py",
+    "scripts/deploy/prime_runtimew.pyw"
   ],
   "publishConfig": {
     "registry": "https://npm.pkg.github.com",
