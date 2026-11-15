@@ -10,20 +10,33 @@ name: echo-cli-ci
 permissions:
   contents: read
 
+env:
+  ECHO_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  ECHO_SCAN_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number) || github.ref }}
+
 jobs:
   test:
+    name: CI
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Check out exact source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ env.ECHO_SOURCE_SHA }}
+          persist-credentials: false
+      - name: Verify source identity
+        run: |
+          echo_actual_sha=$(git rev-parse HEAD)
+          test "$echo_actual_sha" = "$ECHO_SOURCE_SHA"
+          printf 'Verified source: %s\n' "$echo_actual_sha"
       - name: Configure Node
         uses: actions/setup-node@v4
         with:
           node-version: "24"
           cache: npm
       - name: Install dependencies
-        run: npm install
+        run: npm ci
       - name: Lint
         run: npm run lint
       - name: Typecheck
@@ -32,3 +45,33 @@ jobs:
         run: npm test
       - name: Build
         run: npm run build
+
+  codeql:
+    name: CodeQL
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Check out source for static analysis
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.ECHO_SOURCE_SHA }}
+          persist-credentials: false
+      - name: Verify source identity
+        run: |
+          echo_actual_sha=$(git rev-parse HEAD)
+          test "$echo_actual_sha" = "$ECHO_SOURCE_SHA"
+          printf 'Verified source: %s\n' "$echo_actual_sha"
+      - name: Initialize JavaScript and TypeScript analysis
+        uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          languages: javascript-typescript
+          build-mode: none
+      - name: Analyze and upload results
+        uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          category: /language:javascript-typescript
+          ref: ${{ env.ECHO_SCAN_REF }}
+          sha: ${{ env.ECHO_SOURCE_SHA }}
