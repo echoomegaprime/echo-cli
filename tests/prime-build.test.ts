@@ -55,6 +55,10 @@ describe('Build config and contract',()=>{
  it('validates ids before touching filesystem or upstream',()=>{for(const id of ['../x','a'.repeat(31),'A'.repeat(32),null,'a'.repeat(33)])expect(()=>buildId(id)).toThrow(/Invalid build id/);expect(buildId(ID)).toBe(ID);});
  it('uses engine argument arrays and no provider fallback',()=>{expect(engineCommand('gpt',ROOT,'prompt','x')).toMatchObject({cmd:'codex',args:expect.arrayContaining(['exec','-C',ROOT,'workspace-write']),input:'x'});expect(engineCommand('grok',ROOT,'prompt','x').args).toContain('--prompt-file');expect(engineCommand('gemini',ROOT,'prompt','x').cmd).toBe('agy');expect(engineCommand('claude',ROOT,'prompt','x').args).toContain('acceptEdits');});
  it('redacts bearer, cookie, named secrets, key formats and private keys',()=>{const value=redactBuild('Authorization: Bearer FAKE\nCookie: abc\nrefresh_token=FAKE\napi_key=FAKE\n-----BEGIN PRIVATE KEY-----\nFAKE\n-----END PRIVATE KEY-----');expect(value).not.toContain('FAKE');expect(value).toContain('REDACTED');});
+ it('preserves delimiters around prefixed credential names in streamed output',()=>{
+  expect(redactBuild('build.9Worker_TOKEN=fixture; {"_clientSecret":"fixture"} ordinary_word=visible'))
+   .toBe('build.9Worker_TOKEN=[REDACTED]; {"_clientSecret":"[REDACTED]"} ordinary_word=visible');
+ });
  it('defines real program, data, auth, build, headless QA and restart requirements',()=>{const text=buildContract({build_id:ID,engine:'gpt',preview:{port:8402}} as never);for(const word of ['Triage','CLI','Python','SQLite','echo-auth','npm run build','startup.sh','0.0.0.0:8402','Playwright','headless','No daemonizing'])expect(text).toContain(word);});
 });
 
