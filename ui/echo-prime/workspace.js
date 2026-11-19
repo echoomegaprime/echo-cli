@@ -115,7 +115,7 @@
  $('#sidebar-signup').addEventListener('click',()=>void openAccount('signup'));
  for(const id of ['#topbar-signout','#sidebar-signout'])$(id).addEventListener('click',()=>{$('#topbar-account').open=false;void signOut();});
  $('#topbar-account').addEventListener('click',event=>{const target=event.target,item=typeof target?.closest==='function'?target.closest('[data-workspace-view]'):null;if(item||target?.dataset?.workspaceView==='account')$('#topbar-account').open=false;});
- function setBusy(value){$('#composer .send').disabled=value;$('#stop-chat').hidden=!value;$('#chat-log').setAttribute('aria-busy',String(value));}
+ function setBusy(value){$('#composer .send').disabled=value;const stopBtn=$('#stop-chat');stopBtn.hidden=!value;if(value){stopBtn.disabled=false;stopBtn.textContent='Stop';}$('#chat-log').setAttribute('aria-busy',String(value));}
  function updateContext(){
   const capacity=Number(state.data?.context_length),messages=state.chat?.messages||[];
   const used=Math.ceil((messages.reduce((n,m)=>n+(typeof m.content==='string'?m.content.length:0),0)+(Number(state.data?.base_context_chars)||0)+$('#prompt').value.length)/4);
@@ -247,7 +247,7 @@
   // Personality Forge (brain.js): the owner's auto-selection picks this chat's profile through the Workspace's own personality_select before the turn. Never blocks the turn.
   try{await window.EchoPrimeBrain?.beforeWorkspaceTurn?.({text,chatId:state.chat.id,api,messages:state.chat.messages});}catch(error){log('personality',error instanceof Error?error.message.slice(0,120):'skipped');}
   const priorMessages=Array.isArray(state.chat?.messages)?state.chat.messages:[],priorCount=priorMessages.length,priorIds=new Set(priorMessages.map(m=>m?.id).filter(Boolean));
-  const epoch=state.epoch,accountEpoch=state.accountEpoch,startGen=transport.generation??0,chatId=state.chat.id,requestId=crypto.randomUUID(),controller=new AbortController();state.turn=controller;setBusy(true);line('user',text);
+  const epoch=state.epoch,accountEpoch=state.accountEpoch,startGen=transport.generation??0,chatId=state.chat.id,requestId=crypto.randomUUID(),controller=new AbortController();controller.chatId=chatId;controller.requestId=requestId;state.turn=controller;setBusy(true);line('user',text);
   activity?.clear(activityHost());let strip=null;
   const ensureStrip=()=>{if(!strip&&activity)strip=activity.start(activityHost(),{label:'Activity'});return strip;};
   let answer=null,replyBox=null,answerText='',completed=false,verified=false,spoken=false,recoveryStarted=false;
@@ -1086,7 +1086,18 @@
  $('#prompt').addEventListener('input',updateContext);
  let searchTimer,searchRevision=0;
  $('#workspace-chat-search').addEventListener('input',()=>{clearTimeout(searchTimer);const epoch=state.epoch,revision=++searchRevision;searchTimer=setTimeout(()=>{if(epoch!==state.epoch||revision!==searchRevision)return;void api('/chats?q='+encodeURIComponent($('#workspace-chat-search').value)).then(rows=>{if(epoch===state.epoch&&revision===searchRevision)renderHistory(rows);}).catch(error=>{if(epoch===state.epoch&&revision===searchRevision){$('#draft-notice').textContent=error.message;$('#draft-notice').hidden=false;}});},200);});
- $('#stop-chat').addEventListener('click',()=>{state.turn?.abort();endConversation();stopAudio();});
+ $('#stop-chat').addEventListener('click',()=>{
+  const turn=state.turn;
+  if(turn&&turn.requestId){
+   // Real stop: the Workspace ends the turn server-side; the stream closes with the saved partial reply.
+   transport.request('/chat/stop',{chat_id:turn.chatId,request_id:turn.requestId}).catch(()=>{});
+   const stopBtn=$('#stop-chat');stopBtn.disabled=true;stopBtn.textContent='Stopping…';
+   // Escape hatch: if the stream still has not ended, fall back to the old display-only stop.
+   setTimeout(()=>{if(state.turn===turn){turn.abort();endConversation();stopAudio();}},75000);
+   return;
+  }
+  state.turn?.abort();endConversation();stopAudio();
+ });
  // With speech.js loaded the microphone button is push-to-talk (speech.js binds it); without it the Voice panel opens.
  $('#voice-button').addEventListener('click',()=>{if(state.enabled&&!window.EchoPrimeSpeech)void open('voice');});
  window.addEventListener('pagehide',()=>{transport.clear();if(dialog.open)dialog.close();});

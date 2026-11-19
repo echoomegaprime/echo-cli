@@ -10,7 +10,7 @@ const ordinaryEventBytes=256*1024,terminalEventBytes=8*1024*1024;
 // receives a larger allowance; ordinary model/tool events remain bounded.
 const terminalPrefix=/^\s*\{\s*"type"\s*:\s*"done"\s*,/;
 const operationBudgets:Record<string,number>={
- '/api/chat':125000,'/api/review':610000,'/api/compact':610000,
+ '/api/chat':3600000,'/api/review':610000,'/api/compact':610000,
  '/api/voice/start':455000,'/api/voice/next':305000,'/api/voice/transcribe':155000,
  '/api/sync':610000,
 };
@@ -60,7 +60,7 @@ async function jsonResponse(response:Response,max=65536):Promise<unknown>{
  catch(error){if(error instanceof WorkspaceHttpError)throw error;throw new WorkspaceHttpError(502,'Invalid Workspace response');}
 }
 const reads=new Set(['/api/state','/api/diagnostics','/api/fleet','/api/health','/api/mcp','/api/plugins','/api/catalog','/api/chats','/api/auth/accounts','/api/auth/invites']);
-const writes=new Set(['/api/mcp','/api/chats','/api/chat/update','/api/chat','/api/compact','/api/fork','/api/projects','/api/project/update','/api/library','/api/import','/api/action','/api/sync','/api/review','/api/voice/start','/api/voice/next','/api/voice/cancel','/api/voice/transcribe']);
+const writes=new Set(['/api/mcp','/api/chats','/api/chat/update','/api/chat','/api/chat/stop','/api/compact','/api/fork','/api/projects','/api/project/update','/api/library','/api/import','/api/action','/api/sync','/api/review','/api/voice/start','/api/voice/next','/api/voice/cancel','/api/voice/transcribe']);
 const publicReads=new Set(['/api/auth/session','/api/auth/config']);
 // Exactly the account routes the Workspace implements (accounts_http.py). `/api/auth/refresh` and
 // `/api/auth/verify` were allowlisted until 2026-11-04 although the Workspace never served them.
