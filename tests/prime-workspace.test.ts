@@ -245,6 +245,10 @@ async function ownerFixture(authEnabled=true){
   }
   if(url.pathname==='/api/chats'){json(200,[{id:`chat-${account}`,title:`Private ${account}`}]);return;}
   if(url.pathname.startsWith('/api/chats/')){json(url.pathname===`/api/chats/chat-${account}`?200:404,url.pathname===`/api/chats/chat-${account}`?{id:`chat-${account}`,messages:[]}:{error:'Not found'});return;}
+  if(url.pathname==='/api/chat/stop'){
+   let body='';for await(const chunk of req)body+=chunk;
+   bodies.push({path:url.pathname,body});json(200,{ok:true,stopped:true});return;
+  }
   if(url.pathname==='/api/chat'){
    let text='';for await(const chunk of req)text+=chunk;
    const input=JSON.parse(text) as {chat_id:string};
@@ -373,6 +377,14 @@ describe('canonical Workspace boundary in the existing Prime host',()=>{
    expect((await fetch(p.url+'/api/workspace/state',{headers:headers(p)})).status).toBe(502);
    expect(upstream.calls.filter(c=>c.path==='/api/review')).toHaveLength(1);
   }finally{spy.mockRestore();}
+ });
+ it('forwards Stop for the signed-in member and preserves the chat and turn identifiers',async()=>{
+  const upstream=await ownerFixture(),p=await login(await prime(upstream.baseUrl),'member');
+  const turn={chat_id:'chat-member',request_id:'fixture-turn'};
+  const response=await fetch(p.url+'/api/workspace/chat/stop',{method:'POST',headers:headers(p),body:JSON.stringify(turn)});
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({ok:true,stopped:true});
+  expect(upstream.bodies.filter(item=>item.path==='/api/chat/stop').map(item=>JSON.parse(item.body))).toEqual([turn]);
  });
  it('delivers a large canonical terminal history through both actual HTTP and browser parsing without relaxing token limits',async()=>{
   const upstream=await ownerFixture(),p=await login(await prime(upstream.baseUrl),'member');upstream.behavior.historyText='prior '.repeat(90000);

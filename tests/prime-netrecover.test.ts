@@ -86,6 +86,7 @@ function createTurnHarness(opts:TurnHarnessOptions){
    if(opts.onChatPost)return opts.onChatPost(parsed,chatPosts);
    return completeStream([]);
   }
+  if(path==='/api/workspace/chat/stop'&&init.method==='POST')return jsonResponse({ok:true,stopped:true});
   if(path==='/api/workspace/chats/c1'&&(!init.method||init.method==='GET')){
    chatReads++;
    const data=opts.onChatRead?await opts.onChatRead(lastReqId,chatReads):{id:'c1',title:'Mission chat',messages:[]};
@@ -416,7 +417,7 @@ describe('Echo Prime chat stream transport recovery and keepalives',()=>{
   expect(h.chatLogText()).not.toContain("Connection dropped. Checking for Echo's reply...");
  });
 
- it('does not recover on user abort during streaming, and stops an active recovery on abort or chat switch',async()=>{
+ it('requests a server stop, suppresses recovery after the local fallback, and stops recovery on chat switch',async()=>{
   vi.useFakeTimers();
   let releaseStream!:()=>void;
   const h1=createTurnHarness({
@@ -435,8 +436,16 @@ describe('Echo Prime chat stream transport recovery and keepalives',()=>{
   const abortedTurn=ws1.send('Cancel me');
   await vi.advanceTimersByTimeAsync(0);
 
-  // User clicks Stop, then the underlying reader rejects with a TypeError
+  // An acknowledged Stop still waits for the saved partial reply on the active stream.
   await h1.w.get('#stop-chat').click();
+  await vi.advanceTimersByTimeAsync(0);
+  const requests=h1.fetchMock.mock.calls.filter(([url])=>url==='/api/workspace/chat/stop');
+  expect(requests).toHaveLength(1);
+  expect(JSON.parse(requests[0]![1].body)).toEqual({chat_id:'c1',request_id:h1.lastReqId()});
+  expect(h1.w.get('#stop-chat').disabled).toBe(true);
+  expect(h1.w.get('#stop-chat').textContent).toBe('Stopping…');
+  await vi.advanceTimersByTimeAsync(75_000);
+  // The stream never delivered its receipt. A transport rejection after the local abort must not poll.
   releaseStream();
   const abortedOutcome=await abortedTurn;
   expect(abortedOutcome.sent).toBe(false);
