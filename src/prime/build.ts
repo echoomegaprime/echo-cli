@@ -74,9 +74,10 @@ export function parseBuildConfig(value: unknown): BuildConfig {
 }
 /** Includes bearer/cookie forms the shared code redactor does not cover. Never log raw CLI chunks. */
 export function redactBuild(text: string): string {
+ // Match credential names from the start of each word so ordinary log output is scanned once.
  return redact(text.replace(/\b(?:authorization|proxy-authorization|cookie|set-cookie)["']?\s*[=:][^\r\n]*/gi,'[REDACTED HEADER]')
   .replace(/\bBearer\s+[^\s"']+/gi,'Bearer [REDACTED]')
-  .replace(/((?:[a-z0-9_]*token|[a-z0-9_]*secret|[a-z0-9_]*password|[a-z0-9_]*api_key)["']?\s*[:=]\s*["']?)[^\s"',;}]+/gi,'$1[REDACTED]')
+  .replace(/(\b[a-z0-9_]*(?:token|secret|password|api_key)["']?\s*[:=]\s*["']?)[^\s"',;}]+/gi,'$1[REDACTED]')
   .replace(/https?:\/\/[^\s/@]+:[^\s/@]+@/gi,'https://[REDACTED]@'));
 }
 /** The credential check Echo Build `create` and `turn` apply to a title or prompt. Exported so Enhance (build mode) can prove its brief passes it. */
